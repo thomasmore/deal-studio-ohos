@@ -17,8 +17,8 @@
  * so a number the model made up or took from memory is dropped, and the screen keeps the figure it had.
  */
 
-import http from '@ohos.net.http'
-import hilog from '@ohos.hilog'
+import { http } from '@kit.NetworkKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { settings } from './SettingsStore'
 import { webSearchHits, SearchHit, SearchHits } from './VeraWebSearch'
 

@@ -12,8 +12,8 @@
  * that is talking to the person.
  */
 
-import http from '@ohos.net.http'
-import util from '@ohos.util'
+import { http } from '@kit.NetworkKit'
+import { util } from '@kit.ArkTS'
 import { GenerateRequest } from './LlamaEngine'
 import { compileVeraSource, CompileError } from './VeraCompiler'
 import { applyRepair, repairPrompt, RepairOutcome } from './VeraRepair'

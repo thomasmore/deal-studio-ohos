@@ -14,8 +14,8 @@
  * costs prompt tokens, erring narrow costs a compile error.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { ComponentSpec, optionalComponents, componentEmbeddingText } from './VeraUiCatalog'
 import { embedBatch, embedOne, embeddingModelReady } from './VeraEmbeddings'
 

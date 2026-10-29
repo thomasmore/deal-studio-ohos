@@ -34,8 +34,8 @@
  * not know or care how many requests, or which tool, it took.
  */
 
-import http from '@ohos.net.http'
-import util from '@ohos.util'
+import { http } from '@kit.NetworkKit'
+import { util } from '@kit.ArkTS'
 import { GenerateRequest, GenerateResult, TokenCallback } from './LlamaEngine'
 import { settings } from './SettingsStore'
 import { findSdkFunctionFromCache, SdkEntry } from './VeraSdkIndex'

@@ -10,9 +10,9 @@
  * blocked on release-provisioned installs — see GeneratePage.checkModel()).
  */
 
-import resourceManager from '@ohos.resourceManager'
-import fs from '@ohos.file.fs'
-import util from '@ohos.util'
+import { resourceManager } from '@kit.LocalizationKit'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { util } from '@kit.ArkTS'
 import nativeLlama from 'libllama.so'
 
 export class LlamaConfig {

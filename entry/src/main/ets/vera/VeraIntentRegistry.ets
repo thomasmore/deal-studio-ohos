@@ -22,8 +22,8 @@
  * which is what the app did before this file existed.
  */
 
-import insightIntentDriver from '@ohos.app.ability.insightIntentDriver'
-import hilog from '@ohos.hilog'
+import { insightIntentDriver } from '@kit.AbilityKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 
 const DOMAIN = 0x0000
 

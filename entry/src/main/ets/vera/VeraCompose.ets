@@ -24,7 +24,7 @@
  * status line names it.
  */
 
-import http from '@ohos.net.http'
+import { http } from '@kit.NetworkKit'
 import { FragmentSpec, StateFieldSpec, PortSpec, VetoSpec, fragments, vetoes } from './VeraTemplates'
 import { composeFragments } from './VeraSectionCompose'
 import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'

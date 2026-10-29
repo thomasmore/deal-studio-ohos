@@ -1,5 +1,5 @@
 /** Shared discovery indexes. VeraCapabilities owns background model and cache preparation. */
-import resourceManager from '@ohos.resourceManager'
+import { resourceManager } from '@kit.LocalizationKit'
 import { loadIntentSummaries } from './VeraIntentIndex'
 import { loadRegistry } from './VeraIntentRegistry'
 import { loadSdkIndex } from './VeraSdkIndex'

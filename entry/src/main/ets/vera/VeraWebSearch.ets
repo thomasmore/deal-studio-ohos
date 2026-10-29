@@ -7,7 +7,7 @@
  * same function bodies, same behavior, same budget.
  */
 
-import http from '@ohos.net.http'
+import { http } from '@kit.NetworkKit'
 import { settings } from './SettingsStore'
 import { noteService, httpFailure, SERVICE_EXA } from './ServiceHealth'
 import { noteTool } from './ToolLog'

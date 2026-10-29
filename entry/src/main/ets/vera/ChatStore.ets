@@ -13,7 +13,7 @@
  * neither be lost that way nor count as a change that moves it up the list.
  */
 
-import fs from '@ohos.file.fs'
+import { fileIo as fs } from '@kit.CoreFileKit'
 import { AttemptStat, costOf } from './VeraChatStats'
 
 export class StoredMessage {

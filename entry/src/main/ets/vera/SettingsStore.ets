@@ -25,7 +25,7 @@
  * and not in this repository. Only maskedKey() is ever shown or logged.
  */
 
-import fs from '@ohos.file.fs'
+import { fileIo as fs } from '@kit.CoreFileKit'
 
 export const DEFAULT_DEEPSEEK_BASE_URL: string = 'https://api.deepseek.com'
 export const DEFAULT_DEEPSEEK_MODEL: string = 'deepseek-flash'

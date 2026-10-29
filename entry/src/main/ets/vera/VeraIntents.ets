@@ -12,12 +12,10 @@
  * is what the generated program shows its user.
  */
 
-import insightIntentDriver from '@ohos.app.ability.insightIntentDriver'
-import insightIntent from '@ohos.app.ability.insightIntent'
-import hilog from '@ohos.hilog'
-import { BusinessError } from '@ohos.base'
+import { insightIntentDriver, insightIntent, Want } from '@kit.AbilityKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 import { AbilityContext } from './VeraPermissions'
-import Want from '@ohos.app.ability.Want'
 import { unreachableTarget } from './VeraIntentCatalog'
 
 const DOMAIN = 0x0000

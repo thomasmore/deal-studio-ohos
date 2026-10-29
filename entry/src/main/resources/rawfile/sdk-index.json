@@ -74273,7 +74273,7 @@
   "returnType": "void",
   "description": "Dumps VM heap data.",
   "since": "9",
-  "deprecated": false,
+  "deprecated": true,
   "systemapi": false,
   "permission": "",
   "file": "@ohos.hidebug.d.ts",

@@ -36,7 +36,7 @@
  *     collecting the first version of this benchmark).
  */
 
-import hilog from '@ohos.hilog'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { findSdkFunctionFromCache, sdkIndexSize } from './VeraSdkIndex'
 import { findIntentFunction } from './VeraIntentIndex'
 import { findSdkFunctionByEmbedding, sdkEmbeddingsReady } from './VeraSdkEmbeddingCache'

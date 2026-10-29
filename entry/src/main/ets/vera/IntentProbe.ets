@@ -22,10 +22,9 @@
  * here. The catalogue remains the only way a program reaches the platform.
  */
 
-import insightIntentDriver from '@ohos.app.ability.insightIntentDriver'
-import insightIntent from '@ohos.app.ability.insightIntent'
-import hilog from '@ohos.hilog'
-import { BusinessError } from '@ohos.base'
+import { insightIntentDriver, insightIntent } from '@kit.AbilityKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 
 const DOMAIN = 0x0000
 

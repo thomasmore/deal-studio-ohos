@@ -1,10 +1,9 @@
 import { copyText } from '../components/Clipboard'
-import common from '@ohos.app.ability.common'
-import { KeyboardAvoidMode } from '@ohos.arkui.UIContext'
-import fs from '@ohos.file.fs'
-import http from '@ohos.net.http'
-import request from '@ohos.request'
-import window from '@ohos.window'
+import { common } from '@kit.AbilityKit'
+import { KeyboardAvoidMode, window } from '@kit.ArkUI'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { http } from '@kit.NetworkKit'
+import { request } from '@kit.BasicServicesKit'
 import { Version, VersionMetrics, store } from '../vera/ProjectStore'
 import { refreshForms } from '../vera/FormUpdater'
 import { engine, LlamaEngine, GenerateRequest, GenerateResult, loadRawfileText } from '../vera/LlamaEngine'
@@ -1242,7 +1241,7 @@ struct GeneratePage {
         this.compositionJson = ''
         this.modelWrote = true
         this.acceptRequest()
-        animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
+        this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
         this.tab = TAB_PREVIEW
         this.compiled = true
         this.compileErrors = ''
@@ -1469,7 +1468,7 @@ struct GeneratePage {
       this.compiledVbc2 = vbc2
       this.compiledSource = this.generatedSource.trim()
       this.refinePrompt = ''
-      animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
+      this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
       // Only when the program first appears: yanking the pane away from
       // someone reading the source or the numbers is worse than leaving it.
       if (!hadProgram) { this.tab = TAB_PREVIEW }
@@ -2349,7 +2348,7 @@ struct GeneratePage {
       value: this.tools.length === 0 ? 'none' : this.tools.length + ' \u00B7 ' + this.formatMs(toolMs(this.tools)),
       chevron: this.tools.length === 0 ? '' : (this.toolsOpen ? '\u25B2' : '\u25BC'),
       onHead: (): void => {
-        if (this.tools.length > 0) { animateTo({ duration: 200, curve: Curve.EaseInOut }, () => { this.toolsOpen = !this.toolsOpen }) }
+        if (this.tools.length > 0) { this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseInOut }, () => { this.toolsOpen = !this.toolsOpen }) }
       }
     }) {
       if (this.tools.length === 0) {

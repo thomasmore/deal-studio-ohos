@@ -21,7 +21,7 @@
  * for the intent registry.
  */
 
-import hilog from '@ohos.hilog'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { runSdkAdapter, isSdkTargetImplemented } from './VeraSdkBackend'
 import { findSdkFunctionFromCache, SdkEntry } from './VeraSdkIndex'
 import { findSdkFunctionByEmbedding } from './VeraSdkEmbeddingCache'

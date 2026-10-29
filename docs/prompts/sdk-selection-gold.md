@@ -7,7 +7,7 @@ normal app. An empty gold means no SDK call is correct for that request.
 
 Checked two ways: the flags in `entry/src/main/resources/rawfile/sdk-index.json`
 (`deprecated`, `systemapi`, params, return type), and the official reference in
-`/home/stanislav/work/ohos/docs/en/application-dev/reference/` (the page's own
+the OpenHarmony docs checkout (`en/application-dev/reference/`, the page's own
 deprecation notice and its advised replacement). `state` is the entry in
 `ADAPTERS` (`VeraSdkBackend.ets`) when this was written.
 

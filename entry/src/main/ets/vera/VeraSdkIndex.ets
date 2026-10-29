@@ -33,8 +33,8 @@
  * embeddings upgrade, not something more weight-tuning closes.
  */
 
-import resourceManager from '@ohos.resourceManager'
-import hilog from '@ohos.hilog'
+import { resourceManager } from '@kit.LocalizationKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { loadRawfileText } from './LlamaEngine'
 import { requestWords } from './VeraIntentRegistry'
 

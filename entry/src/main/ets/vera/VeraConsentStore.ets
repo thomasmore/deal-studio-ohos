@@ -20,8 +20,8 @@
  * asks again.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 
 const DOMAIN = 0x0000
 

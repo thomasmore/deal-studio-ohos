@@ -12,8 +12,8 @@
  * they are ready, the same consume-once-flag shape as VeraSdkEval.ets.
  */
 
-import hilog from '@ohos.hilog'
-import resourceManager from '@ohos.resourceManager'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { resourceManager } from '@kit.LocalizationKit'
 import { loadRawfileText } from './LlamaEngine'
 import { deepseek } from './DeepSeekEngine'
 import { findUiComponentsByEmbedding } from './VeraUiIndex'

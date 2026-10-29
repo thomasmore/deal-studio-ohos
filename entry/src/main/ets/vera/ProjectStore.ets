@@ -1,4 +1,4 @@
-import fs from '@ohos.file.fs'
+import { fileIo as fs } from '@kit.CoreFileKit'
 import { requestHeadline } from './ProjectText'
 
 
@@ -367,7 +367,12 @@ export class ProjectStore {
       this.deleteProject(projectId)
       return true
     }
-    fs.unlinkSync(this.versionPath(projectId, versionId))
+    try {
+      fs.unlinkSync(this.versionPath(projectId, versionId))
+    } catch (e) {
+      console.error('Delete version file failed: ' + (e as Error).message)
+      throw e as Error
+    }
     this.clearState(projectId, versionId)
     this.summaries.delete(projectId)
     return false

@@ -7442,24 +7442,6 @@
   "score": 0
  },
  {
-  "target": "PerformanceAnalysisKit.hidebug.dumpJsHeapData",
-  "kit": "PerformanceAnalysisKit",
-  "module": "hidebug",
-  "name": "dumpJsHeapData",
-  "file": "@ohos.hidebug.d.ts",
-  "params": [
-   [
-    "filename",
-    "string",
-    false
-   ]
-  ],
-  "returnType": "void",
-  "isPromise": false,
-  "description": "Dumps VM heap data.",
-  "score": 0
- },
- {
   "target": "PerformanceAnalysisKit.hidebug.dumpJsRawHeapData",
   "kit": "PerformanceAnalysisKit",
   "module": "hidebug",

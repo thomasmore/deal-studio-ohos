@@ -38,11 +38,9 @@ node tools/vera-harness/capability-check.js /tmp/vera-capabilities.json
 node tools/vera-harness/visual-check.js /tmp/vera-visual.json
 ```
 
-The recorded run used:
-
-```bash
-export VERA_TYPESCRIPT_PATH=/Users/egavrin/.codex/worktrees/porting-guide-main/arkestr/.dexter-local/porting-baseline/nominal-edges-root-acceptance/54/published-e2e/.dexter-local/tests/coverage-controls/run-UvDYkQ/project/node_modules/typescript/lib/typescript.js
-```
+The recorded run used an existing TypeScript installation selected through
+`VERA_TYPESCRIPT_PATH`. Export that variable with the path to your installed
+`typescript/lib/typescript.js` when reproducing the checks.
 
 No package installation was necessary. The archived visual report is gzip-compressed JSON with its original command and revision.
 

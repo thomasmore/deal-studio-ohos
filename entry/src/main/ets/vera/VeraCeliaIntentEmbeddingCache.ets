@@ -12,9 +12,9 @@
  * summaries, which genuinely does vary (a device's own registry size).
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
-import resourceManager from '@ohos.resourceManager'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { resourceManager } from '@kit.LocalizationKit'
 import { CeliaIntentEntry, celiaIntentIndexEntries } from './VeraCeliaIntentIndex'
 import { embedBatch, embedOne, embeddingModelReady, MODEL_FILE } from './VeraEmbeddings'
 import { nativeScanCorpus } from './LlamaEngine'

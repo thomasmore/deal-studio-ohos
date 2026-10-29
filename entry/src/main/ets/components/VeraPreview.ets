@@ -15,8 +15,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, VeraNumberValue, VeraStr
 import { UiHostEnvironment, HostEffect, VeraUiNode, decodeVeraUi, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
 import { runRawIntent } from '../vera/VeraIntents'
 import { runSdkAdapter } from '../vera/VeraSdkBackend'
-import { LengthMetrics } from '@ohos.arkui.node'
-import mediaquery from '@ohos.mediaquery'
+import { LengthMetrics, mediaquery, matrix4, uiObserver } from '@kit.ArkUI'
 
 import { catalogKinds } from '../vera/VeraUiCatalog'
 import { iconPath, ICON_STROKE, ICON_VIEWPORT, ICON_ORIGIN } from '../vera/VeraIcons'
@@ -29,9 +28,7 @@ import { LiveNode, toLive, reconcile, armReveal } from './VeraLiveTree'
 import { carryState } from '../vera/VeraStateCarry'
 import { MotionPose, motionPose, motionDuration, poseMatrix, poseFromArray, multiplyMatrices, identityMatrix, perspectiveMatrix,
   columnMajor, poseToPixels, facesViewer, samePose, animatedPose, stageDistance, faceShade, depthRanks } from '../vera/VeraMotion'
-import matrix4 from '@ohos.matrix4'
-import displaySync from '@ohos.graphics.displaySync'
-import uiObserver from '@ohos.arkui.observer'
+import { displaySync } from '@kit.ArkGraphics2D'
 import { decodeGfx, paintGfx, pointerValue, gfxFit, gfxToSurface, gfxNaturalHeight } from '../vera/VeraGfx'
 
 /**

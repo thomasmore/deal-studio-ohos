@@ -26,8 +26,8 @@
  *   which is exactly how the app behaved before this file existed.
  */
 
-import http from '@ohos.net.http'
-import hilog from '@ohos.hilog'
+import { http } from '@kit.NetworkKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'
 import { intentDomains } from './VeraIntentCatalog'
 import { registryDomains, registryEntries, RegistryEntry } from './VeraIntentRegistry'

@@ -1,6 +1,5 @@
-import { KeyboardAvoidMode } from '@ohos.arkui.UIContext'
-import { SymbolGlyphModifier } from '@kit.ArkUI'
-import common from '@ohos.app.ability.common'
+import { KeyboardAvoidMode, SymbolGlyphModifier } from '@kit.ArkUI'
+import { common } from '@kit.AbilityKit'
 import { VeraPreview } from '../components/VeraPreview'
 import { loadRawfileText } from '../vera/LlamaEngine'
 import { logMark, logStep, initTrace } from '../vera/VeraTiming'

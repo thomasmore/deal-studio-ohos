@@ -21,8 +21,8 @@
  */
 
 import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'
-import http from '@ohos.net.http'
-import hilog from '@ohos.hilog'
+import { http } from '@kit.NetworkKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { fragments, FragmentSpec, StateFieldSpec } from './VeraTemplates'
 import { markedHole, readChoiceValue } from './VeraSectionCompose'
 import { ScreenPlan, PlanComponent, FILL_BLOCK, planFromBlocks, assemblePlan } from './ScreenPlan'

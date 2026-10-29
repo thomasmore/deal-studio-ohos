@@ -10,8 +10,8 @@
  * differ between modes. Run from GeneratePage once the embedding index is warm.
  */
 
-import hilog from '@ohos.hilog'
-import resourceManager from '@ohos.resourceManager'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { resourceManager } from '@kit.LocalizationKit'
 import { loadRawfileText, GenerateRequest, GenerateResult } from './LlamaEngine'
 import { deepseek } from './DeepSeekEngine'
 import { compileVeraSource } from './VeraCompiler'

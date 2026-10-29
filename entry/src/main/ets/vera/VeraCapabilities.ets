@@ -1,7 +1,7 @@
 /** Shared index readiness and background embedding preparation for both generators. */
-import common from '@ohos.app.ability.common'
-import fs from '@ohos.file.fs'
-import request from '@ohos.request'
+import { common } from '@kit.AbilityKit'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { request } from '@kit.BasicServicesKit'
 import { loadDiscovery } from './VeraDiscovery'
 import { loadEmbeddingModel, embedModelExists, embedModelPath, EMBED_MODEL_URL } from './VeraEmbeddings'
 import { ensureSdkEmbeddings, sdkEmbeddingsReady } from './VeraSdkEmbeddingCache'

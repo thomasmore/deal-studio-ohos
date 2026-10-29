@@ -1,5 +1,4 @@
-import formBindingData from '@ohos.app.form.formBindingData'
-import formProvider from '@ohos.app.form.formProvider'
+import { formBindingData, formProvider } from '@kit.FormKit'
 import { store } from './ProjectStore'
 
 export function buildFormBinding(): formBindingData.FormBindingData {

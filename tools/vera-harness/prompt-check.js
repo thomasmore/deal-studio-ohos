@@ -30,9 +30,9 @@ function load(file){
   const compiled=ts.transpileModule(source,{fileName:file.replace(/\.ets$/,'.ts'),compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,esModuleInterop:true},reportDiagnostics:true});
   assert.equal((compiled.diagnostics||[]).filter(x=>x.category===ts.DiagnosticCategory.Error).length,0,file+' TypeScript syntax');
   const requireLocal=name=>{
-    if(name==='@ohos.net.http')return http;
-    if(name==='@ohos.util')return {TextDecoder:{create:()=>({decodeToString:bytes=>new TextDecoder().decode(bytes)})}};
-    if(name.startsWith('@ohos.')||name==='libllama.so')return {};
+    if(name==='@kit.NetworkKit')return {http};
+    if(name==='@kit.ArkTS')return {util:{TextDecoder:{create:()=>({decodeToString:bytes=>new TextDecoder().decode(bytes)})}}};
+    if(name.startsWith('@kit.')||name==='libllama.so')return {};
     if(name.startsWith('.'))return load(path.join(path.dirname(file),name+'.ets'));
     throw Error('Unexpected dependency '+name);
   };

@@ -28,8 +28,8 @@
  * score candidates by a plain dot product.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { nativeEmbedInit, nativeEmbedBatch, nativeBuildInfo } from './LlamaEngine'
 
 const DOMAIN = 0x0000

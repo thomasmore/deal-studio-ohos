@@ -1,7 +1,6 @@
-import hilog from '@ohos.hilog'
-import inputConsumer from '@ohos.multimodalInput.inputConsumer'
-import { KeyCode } from '@ohos.multimodalInput.keyCode'
-import { BusinessError } from '@ohos.base'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { inputConsumer, KeyCode } from '@kit.InputKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 
 const DOMAIN = 0x0000
 const TAG = 'VERA-PWR'

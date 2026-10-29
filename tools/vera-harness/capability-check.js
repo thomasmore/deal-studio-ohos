@@ -14,22 +14,22 @@ function fixture(options = {}) {
   let release; const gate = new Promise(resolve => { release = resolve })
   const sdk = [{kit:'Kit',module:'camera',name:'setTorchMode',params:'enabled: boolean',returnType:'void',description:'Control flashlight',since:'1',file:'camera',permission:'',deprecated:false,systemapi:false}]
   const stubs = {
-    '@ohos.hilog': {info(){},warn(){}}, '@ohos.file.fs':{mkdirSync(){}}, '@ohos.app.ability.common':{},
-    '@ohos.request': {async downloadFile(){events.push('download');return {on(name,fn){if(name==='fail' && options.downloadFails)setImmediate(()=>fn(1));if(name==='complete' && !options.downloadFails)setImmediate(()=>{exists=true;fn()})}}}},
-    '@ohos.resourceschedule.insightIntent': {}, '@ohos.resourceManager': {},
+    '@kit.PerformanceAnalysisKit': {hilog:{info(){},warn(){}}}, '@kit.CoreFileKit':{fileIo:{mkdirSync(){}}},
+    '@kit.AbilityKit': {common:{},insightIntentDriver:{GetInsightIntentFlag:{GET_FULL_INSIGHT_INTENT:1}, async getAllInsightIntentInfo(){events.push('registry');if(options.delayed)await gate;if(options.indexFails)throw Error('registry unavailable');events.push('registry-done');return []}}},
+    '@kit.BasicServicesKit': {request:{async downloadFile(){events.push('download');return {on(name,fn){if(name==='fail' && options.downloadFails)setImmediate(()=>fn(1));if(name==='complete' && !options.downloadFails)setImmediate(()=>{exists=true;fn()})}}}}},
+    '@kit.LocalizationKit': {resourceManager:{}},
     './LlamaEngine': {async loadRawfileText(mgr,name){events.push('read:'+name);if(options.delayed)await gate;if(options.indexFails)throw Error('index unavailable');return name==='sdk-index.json'?JSON.stringify(sdk):'{}'}},
     './VeraIntentCatalog':{INTENT_CATALOG:[]},
     './VeraEmbeddings':{embedModelExists:()=>exists,embedModelPath:()=>'/test/model',EMBED_MODEL_URL:'https://example.test/model',async loadEmbeddingModel(){events.push('model');model=!options.modelFails;return model}},
     './VeraSdkEmbeddingCache':{async ensureSdkEmbeddings(){assert(model);assert(load('VeraSdkIndex').sdkIndexSize()>0 || options.indexFails);events.push('sdk-vectors')},sdkEmbeddingsReady:()=>events.includes('sdk-vectors')},
     './VeraIntentEmbeddingCache':{async ensureIntentEmbeddings(){assert(model);assert(events.includes('registry-done') || options.indexFails);events.push('intent-vectors')},intentEmbeddingsReady:()=>events.includes('intent-vectors')}
   }
-  const driver = {GetInsightIntentFlag:{GET_FULL_INSIGHT_INTENT:1}, async getAllInsightIntentInfo(){events.push('registry');if(options.delayed)await gate;if(options.indexFails)throw Error('registry unavailable');events.push('registry-done');return []}}
   function load(name){
     if(cache.has(name))return cache.get(name).exports
     const file=path.join(base,name+'.ets'), source=fs.readFileSync(file,'utf8'), mod={exports:{}};cache.set(name,mod)
     const result=ts.transpileModule(source,{fileName:name+'.ts',compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS,esModuleInterop:true},reportDiagnostics:true})
     assert.equal((result.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0)
-    const req=id=>{if(id.includes('insightIntentDriver'))return driver;if(Object.hasOwn(stubs,id))return stubs[id];if(id.startsWith('./'))return load(id.slice(2));throw Error('Unexpected dependency '+id)}
+    const req=id=>{if(Object.hasOwn(stubs,id))return stubs[id];if(id.startsWith('./'))return load(id.slice(2));throw Error('Unexpected dependency '+id)}
     const timer=(fn,ms)=>setTimeout(fn,ms===10000?20:ms)
     const supports = new Set(['SystemCapability.Request.FileTransferAgent','SystemCapability.MiscServices.Download'])
     if(options.unsupported)supports.delete(options.unsupported)
