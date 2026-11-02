@@ -32,6 +32,8 @@ import { compileVeraSource, CompileResult } from './VeraCompiler'
 import { smokeRun } from './VeraSmoke'
 import { settings } from './SettingsStore'
 import { askJevViaCloud } from './JevProxy'
+import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
+import { requestWithCancellation } from './VeraWebSearch'
 
 const DOMAIN = 0x0000
 const ENDPOINT: string = 'https://api.typesafe.ai/v1/systemone'
@@ -453,31 +455,36 @@ export function readEditAnswer(body: string, c: Composition): CompositionEdit {
 }
 
 /** Asks Jev. Never throws; any failure is an edit of `none`, which sends the request to the model's refine path. */
-export async function selectEdit(request: string, c: Composition, apiKey: string): Promise<CompositionEdit> {
+export async function selectEdit(request: string, c: Composition, apiKey: string,
+    cancellation?: OperationCancellation): Promise<CompositionEdit> {
+  throwIfCancelled(cancellation)
   let none = new CompositionEdit()
   if (request.trim().length === 0) { none.note = 'edit=none(no key)'; return none }
   // Route through the on-device cloud proxy when it is on; the proxy uses the
   // cloud key, so the selector-key guard does not apply in that mode.
   if (settings.useJevProxy()) {
-    let body = await askJevViaCloud(buildEditRequest(request, c))
+    throwIfCancelled(cancellation)
+    let body = await askJevViaCloud(buildEditRequest(request, c), cancellation)
+    throwIfCancelled(cancellation)
     if (body.length === 0) { none.note = 'edit=none(selector unreachable)'; return none }
     let edit = readEditAnswer(body, c)
     hilog.info(DOMAIN, 'VERA', 'VERA-EDIT ' + edit.note)
     return edit
   }
   if (apiKey.length === 0) { none.note = 'edit=none(no key)'; return none }
-  let client = http.createHttp()
   try {
     let headers: Record<string, string> = {}
     headers['Content-Type'] = 'application/json'
     headers['Authorization'] = 'Bearer ' + apiKey
-    let response = await client.request(ENDPOINT, {
+    throwIfCancelled(cancellation)
+    let response = await requestWithCancellation(ENDPOINT, {
       method: http.RequestMethod.POST,
       header: headers,
       extraData: buildEditRequest(request, c),
       connectTimeout: 5000,
       readTimeout: 15000
-    })
+    }, cancellation)
+    throwIfCancelled(cancellation)
     if ((response.responseCode as number) !== 200) {
       noteService(SERVICE_JEV, false, httpFailure(response.responseCode as number, String(response.result)))
       none.note = 'edit=none(selector ' + (response.responseCode as number).toString() + ')'
@@ -488,16 +495,16 @@ export async function selectEdit(request: string, c: Composition, apiKey: string
     hilog.info(DOMAIN, 'VERA', 'VERA-EDIT ' + edit.note)
     return edit
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     hilog.warn(DOMAIN, 'VERA', 'VERA-EDIT failed: ' + (e as Error).message)
     noteService(SERVICE_JEV, false, (e as Error).message)
     none.note = 'edit=none(selector unreachable)'
     return none
-  } finally {
-    client.destroy()
   }
 }
 
-export type EditSelector = (request: string, c: Composition) => Promise<CompositionEdit>
+export type EditSelector = (request: string, c: Composition, cancellation?: OperationCancellation) => Promise<CompositionEdit>
 
 export class EditResult {
   /** True when the screen was rebuilt; false sends the request to the model's refine path. */
@@ -513,10 +520,14 @@ export class EditResult {
  * compile and one run. Never throws; `applied` is false whenever any step does not hold, with the
  * reason in `note`, and the caller then refines with the model as it always did.
  */
-export async function editComposition(request: string, c: Composition, mode: string, select: EditSelector): Promise<EditResult> {
+export async function editComposition(request: string, c: Composition, mode: string, select: EditSelector,
+    cancellation?: OperationCancellation): Promise<EditResult> {
+  throwIfCancelled(cancellation)
   let result = new EditResult()
   try {
-    let edit = await select(request, c)
+    throwIfCancelled(cancellation)
+    let edit = await select(request, c, cancellation)
+    throwIfCancelled(cancellation)
     result.note = edit.note
     if (edit.op === OP_NONE) { return result }
     let values: Map<string, string> | null = null
@@ -525,7 +536,9 @@ export async function editComposition(request: string, c: Composition, mode: str
       if (spec === null) { return result }
       values = defaultValues(spec)
       if (mode === 'deepseek') {
-        let fill = await fillSectionsContent([edit.kind], request, mode)
+        throwIfCancelled(cancellation)
+        let fill = await fillSectionsContent([edit.kind], request, mode, '', null, cancellation)
+        throwIfCancelled(cancellation)
         let filled = fill.instanceValues[0]
         if (filled !== undefined) { filled.forEach((v: string, k: string) => { values!.set(k, v) }) }
         result.note = result.note + ' ' + fill.note
@@ -537,7 +550,9 @@ export async function editComposition(request: string, c: Composition, mode: str
     let compiled: CompileResult
     try {
       compiled = compileVeraSource(source)
-    } catch (_e) {
+    } catch (e) {
+      throwIfCancelled(cancellation)
+      if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
       result.note = result.note + ' (did not compile)'
       return result
     }
@@ -549,6 +564,8 @@ export async function editComposition(request: string, c: Composition, mode: str
     result.vbc2 = compiled.vbc2
     return result
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     result.note = result.note + ' (failed: ' + (e as Error).message + ')'
     return result
   }

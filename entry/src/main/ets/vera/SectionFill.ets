@@ -5,6 +5,7 @@
  * The network calls come from the caller (BlockCalls), so the app and the host harness fill sections the same way.
  */
 
+import { OperationCancellation, PredicateCancellation, throwIfCancelled } from './OperationCancellation'
 import { fillSectionsContent, blockDefaults, ContentAsk } from './VeraTemplateContent'
 import { fillHoles, holesOf, holeValues, HoleInstance, HoleAsk, HoleFill } from './VeraHoles'
 import { checkLiveProvenance } from './VeraLive'
@@ -78,6 +79,7 @@ export class BlockCalls {
   status: (text: string) => void = (_text: string): void => {}
   /** True once the person has asked to stop. */
   cancelled: () => boolean = (): boolean => false
+  cancellation?: OperationCancellation
 }
 
 /** Per-section copies of `values` with `extra` merged in; the maps given are not changed. */
@@ -108,25 +110,30 @@ function searchFound(text: string): boolean {
  */
 export async function fillSections(request: BlockRequest, calls: BlockCalls): Promise<BlockFill> {
   let fill = new BlockFill()
+  throwIfCancelled(calls.cancellation)
+  if (calls.cancelled()) { fill.cancelled = true; return fill }
+  let cancellation: OperationCancellation = new PredicateCancellation((): boolean => calls.cancelled(), calls.cancellation)
   let work = request.work.length > 0 ? request.work : request.prompt
   let searchText = ''
   if (needsGrounding(request.kinds, request.realData)) {
     if (calls.search === null) { fill.failed = 'sections need real data and no search is available'; return fill }
     calls.status('Looking up real data...')
     let searchStart = Date.now()
+    throwIfCancelled(cancellation)
     searchText = await calls.search!(request.prompt, request.kinds.indexOf('trend_chart') >= 0 ? SEARCH_CHARS_DATA : SEARCH_CHARS)
+    throwIfCancelled(cancellation)
     fill.searchMs = Date.now() - searchStart
     fill.grounded = true
     fill.searchText = searchText
     fill.searched = searchFound(searchText)
-    if (calls.cancelled()) { fill.cancelled = true; return fill }
   }
 
   let contentStart = Date.now()
-  let content = await fillSectionsContent(request.kinds, work, request.mode, searchText, calls.content)
+  throwIfCancelled(cancellation)
+  let content = await fillSectionsContent(request.kinds, work, request.mode, searchText, calls.content, cancellation)
+  throwIfCancelled(cancellation)
   fill.contentMs = Date.now() - contentStart
   fill.contentNote = content.note
-  if (calls.cancelled()) { fill.cancelled = true; return fill }
 
   request.globals.forEach((v: string, k: string) => { fill.globals.set(k, v) })
   content.globalValues.forEach((v: string, k: string) => { fill.globals.set(k, v) })
@@ -158,18 +165,21 @@ export async function fillSections(request: BlockRequest, calls: BlockCalls): Pr
     } else {
       calls.status('Writing the details...')
       let holesStart = Date.now()
+      throwIfCancelled(cancellation)
       let sdkContext = holes.some((h: HoleInstance): boolean => h.spec.usesSdk) ? await calls.sdkContext(request.prompt) : ''
+      throwIfCancelled(cancellation)
       let filled: HoleFill = await fillHoles(work, kinds, calls.hole,
         (bodies: Map<string, string>): string =>
           request.compose(mergedValues(values, holeValues(kinds, bodies).slice(request.offset)), fill.globals),
-        padded, sdkContext)
+        padded, sdkContext, cancellation)
+      throwIfCancelled(cancellation)
       values = mergedValues(values, holeValues(kinds, filled.bodies).slice(request.offset))
       fill.holeBodies = filled.bodies
       fill.holesMs = Date.now() - holesStart
       fill.holesNote = filled.note
-      if (calls.cancelled()) { fill.cancelled = true }
     }
   }
+  throwIfCancelled(cancellation)
   fill.values = values
 
   let notes: string[] = [fill.contentNote]

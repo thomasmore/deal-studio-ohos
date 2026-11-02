@@ -1,5 +1,17 @@
 # Changelog
 
+## Chat and generation cancellation
+
+- Added request-scoped cancellation: Stop cancels the active chat or generation without interrupting independent requests or a newer run.
+- Cancellation aborts supported network requests, stops queued work, closes pending questions, and rejects late results and preview updates. Chat drafts, completed widgets, and the last successful generation remain intact.
+- Added host regression tests for cancellation, overlapping requests, and screen disposal.
+
+## Navigation and kit imports
+
+- Replaced app page-router navigation with a single `AppShell`, shared `Navigation`/`NavPathStack`, and `NavDestination` screens. External launches replace the stack while preserving isolated shortcut launches, widget launch behavior, and mini-app Back handling.
+- Bound navigation readiness to the active window stage and shared storage; hidden or removed screens ignore stale asynchronous updates.
+- Migrated application imports from `@ohos.*` to named `@kit` exports, preserving aliases. Updated SDK backend generation and host mocks, added explicit socket result types, and switched remaining Generate animations to scoped UI APIs.
+
 ## Shortcut processing
 
 ### Desktop shortcuts and launch behavior

@@ -217,6 +217,36 @@ export class ProjectOperations {
     })
   }
 
+  /**
+   * Brings the home-screen shortcut's label in line with the project's current name.
+   */
+  public async renameShortcut(context: common.UIAbilityContext | (() => common.UIAbilityContext),
+      id: string): Promise<ProjectOperationStatus> {
+    return this.runOperation(id, 'Rename project shortcut', async (): Promise<ProjectOperationStatus> => {
+      const project = this.projectStore.getProject(id)   // fresh from DB, with the new name
+      if (project === null) { return this.notFound(id) }
+      const bundleName = this.selfBundleName()
+      const present = await desktopContains(this.shortcutId(id), bundleName)
+      if (this.projectStore.getProject(id) === null) { return this.notFound(id) }
+      if (!present) { return ProjectOperationStatus.Success }  // nothing to rename
+
+      const resolvedContext = this.resolveContext(context)
+
+      // Reliable path: remove existing shortcut and re-create with the new name.
+      const unpin = await this.unpinProjectInternal(context, id)
+      if (unpin !== ProjectOperationStatus.Success) { return unpin }
+      if (this.projectStore.getProject(id) === null) { return this.notFound(id) }
+      await callLauncher(resolvedContext, 'addShortcutToDesktop',
+        this.shortcutFor(resolvedContext, project))
+      if (this.projectStore.getProject(id) === null) { return this.notFound(id) }
+      if (!await desktopHas(this.shortcutId(id), bundleName, true)) {
+        throw new Error('Add renamed shortcut')
+      }
+      console.info('VERA-SHORTCUT re-added with new name: ' + id)
+      return ProjectOperationStatus.Success
+    })
+  }
+
   public async deleteProject(context: common.UIAbilityContext | (() => common.UIAbilityContext), id: string): Promise<ProjectOperationStatus> {
     return this.runOperation(id, 'Delete project', async (): Promise<ProjectOperationStatus> => {
       const project = this.projectStore.getProject(id)

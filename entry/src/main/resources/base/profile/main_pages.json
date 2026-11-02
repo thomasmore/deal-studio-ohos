@@ -1,11 +1,5 @@
 {
   "src": [
-    "pages/Index",
-    "pages/ProjectPage",
-    "pages/RunnerPage",
-    "pages/GeneratePage",
-    "pages/ChatPage",
-    "pages/ChatListPage",
-    "pages/AppsPage"
+    "pages/AppShell"
   ]
 }

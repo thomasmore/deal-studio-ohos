@@ -301,6 +301,68 @@ class KitImportCheck(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'missing or ambiguous'):
             GENERATOR['kit_binding'](('@ohos.unknown', 'default'), self.exports())
 
+    def test_mixed_kit_filters_deprecated_imports_not_the_file(self):
+        self.kit('MixedKit',
+                 "import live from '@ohos.live';\n"
+                 "/** @deprecated since 12 */\nimport old from '@ohos.old';\n"
+                 "import { current, /** @deprecated since 12 */ oldNamed } from '@ohos.named';\n"
+                 "export { live as renamed, old, current, oldNamed };\n")
+        exports = self.exports()
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.live', 'default'), exports),
+                         ('@kit.MixedKit', 'renamed'))
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.named', 'current'), exports),
+                         ('@kit.MixedKit', 'current'))
+        self.assertNotIn(('@ohos.old', 'default'), exports)
+        self.assertNotIn(('@ohos.named', 'oldNamed'), exports)
+
+    def test_mixed_kit_filters_deprecated_export_statements(self):
+        self.kit('MixedKit',
+                 "import live from '@ohos.live';\nimport old from '@ohos.old';\n"
+                 "/** @deprecated since 12 */\nexport { old };\n"
+                 "export { live as renamed };\n"
+                 "/** @deprecated since 12 */\nexport { default as oldDirect } from '@ohos.oldDirect';\n"
+                 "export { default as direct } from '@ohos.direct';\n")
+        exports = self.exports()
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.live', 'default'), exports),
+                         ('@kit.MixedKit', 'renamed'))
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.direct', 'default'), exports),
+                         ('@kit.MixedKit', 'direct'))
+        self.assertNotIn(('@ohos.old', 'default'), exports)
+        self.assertNotIn(('@ohos.oldDirect', 'default'), exports)
+
+    def test_mixed_export_list_filters_only_deprecated_specifiers(self):
+        self.kit('MixedKit',
+                 "import live from '@ohos.live';\nexport {\n"
+                 "/** @deprecated since 12 */ live as oldAlias,\n live as currentAlias\n};\n"
+                 "export { /** @deprecated since 12 */ old as oldAlias, current as renamed } "
+                 "from '@ohos.named';\n")
+        exports = self.exports()
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.live', 'default'), exports),
+                         ('@kit.MixedKit', 'currentAlias'))
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.named', 'current'), exports),
+                         ('@kit.MixedKit', 'renamed'))
+        self.assertNotIn(('@ohos.named', 'old'), exports)
+
+    def test_unrelated_deprecation_does_not_leak_to_exports(self):
+        self.kit('MixedKit',
+                 "/** @deprecated since 12 */\ndeclare const old: string;\n"
+                 "import live from '@ohos.live';\n"
+                 "/** Describes a deprecated alternative: @deprecated since 12 */\n"
+                 "/** Current export. */\nexport { live };\n")
+        self.assertEqual(GENERATOR['kit_binding'](('@ohos.live', 'default'), self.exports()),
+                         ('@kit.MixedKit', 'live'))
+
+    def test_generation_with_mixed_deprecation_kit_is_idempotent(self):
+        self.kit('PerformanceAnalysisKit',
+                 "/** @deprecated since 12 */\nimport old from '@ohos.old';\n"
+                 "import actualDebug from '@ohos.hidebug';\nexport { actualDebug as debugExport, old };\n")
+        source = self.backend("import hidebug from '@ohos.hidebug'\n"
+                              "import { fileIo as keepFile } from '@kit.CoreFileKit'\n"
+                              "import { run as keepLocal, VALUE as keepValue } from './manual'\n")
+        result = self.run_generator(source, [candidate()])
+        self.assertIn("import { debugExport as hidebug } from '@kit.PerformanceAnalysisKit'", result)
+        self.assertEqual(self.run_generator(result, [candidate()]), result)
+
     def test_full_generation_with_and_without_marker_is_idempotent(self):
         imports = ("import hidebug from '@ohos.hidebug'\n"
                    "import fs from '@ohos.file.fs'\n"

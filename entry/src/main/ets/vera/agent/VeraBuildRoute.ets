@@ -13,7 +13,7 @@
  * against everything the plan says the screen does. Only then does the route return OUTCOME_NOT_BUILT. Never throws.
  */
 
-import { AgentHost } from './AgentHost'
+import { AgentHost, checkAgent, agentCancellation } from './AgentHost'
 import { AgentRequest, AgentResult, runAgent } from './VeraAgent'
 import { writeHole } from './AgentHole'
 import { assemblePlan, ScreenPlan } from '../ScreenPlan'
@@ -58,6 +58,7 @@ export class RouteOutcome {
  * it served, with the agent's result then holding the program.
  */
 async function writeWholeScreen(request: RouteRequest, host: AgentHost, outcome: RouteOutcome): Promise<boolean> {
+  checkAgent(host)
   let agent = outcome.agent
   if (!wholeScreen || request.agent === null || agent === null || request.mode !== 'deepseek') { return false }
   let prompt = request.agent!.prompt
@@ -78,6 +79,7 @@ async function writeWholeScreen(request: RouteRequest, host: AgentHost, outcome:
   let writeStart = Date.now()
   let writeTools = toolCount()
   let written = await writeHole(plan, prompt, [], host, facts)
+  checkAgent(host)
   let wrote = Date.now() - writeStart
   let lookups = Math.min(toolSpanSince(writeTools), wrote)
   addStage(agent!.stages, 'Looking up phone functions', WHO_PHONE, lookups, 'before the model writes')
@@ -89,7 +91,9 @@ async function writeWholeScreen(request: RouteRequest, host: AgentHost, outcome:
     return false
   }
   let settleStart = Date.now()
+  checkAgent(host)
   let settled = await settleProgram(assemblePlan(plan), prompt, host)
+  checkAgent(host)
   addStage(agent!.stages, 'Compile and run once', WHO_PHONE, settled.checkMs)
   addStage(agent!.stages, 'Repair by edits', WHO_MODEL, Date.now() - settleStart - settled.checkMs)
   agent!.checkMs += settled.checkMs
@@ -119,10 +123,12 @@ async function writeWholeScreen(request: RouteRequest, host: AgentHost, outcome:
  * makes it a need of its own, and the section hole writes it on a surface beside the rest.
  */
 async function buildSurface(request: RouteRequest, host: AgentHost): Promise<RouteOutcome | null> {
+  checkAgent(host)
   if (request.agent === null || request.agent!.widget || request.mode !== 'deepseek') { return null }
   let prompt = request.agent!.prompt
   let started = Date.now()
   let brief = await briefSurface(prompt, host)
+  checkAgent(host)
   let briefMs = Date.now() - started
   if (brief === null || brief.kind !== SURFACE_WHOLE) {
     // The question was asked and answered no, part or not at all: its time is the agent's first stage.
@@ -134,7 +140,9 @@ async function buildSurface(request: RouteRequest, host: AgentHost): Promise<Rou
   let result = new AgentResult()
   outcome.agent = result
   addStage(result.stages, 'Model designs the game', WHO_MODEL, briefMs, brief.title)
+  checkAgent(host)
   let written = await writeSurfaceApp(prompt, brief, host)
+  checkAgent(host)
   addStage(result.stages, 'Model writes the game', WHO_MODEL, written.writeMs, written.attempts.toString() + ' attempt(s)')
   addStage(result.stages, 'Compile and play it', WHO_PHONE, written.checkMs)
   result.note = written.note
@@ -155,24 +163,32 @@ async function buildSurface(request: RouteRequest, host: AgentHost): Promise<Rou
 
 export async function buildScreen(request: RouteRequest, host: AgentHost): Promise<RouteOutcome> {
   let outcome = new RouteOutcome()
-  if (host.cancelled()) { outcome.kind = OUTCOME_CANCELLED; return outcome }
-  let surface = await buildSurface(request, host)
-  if (surface !== null) { return surface }
-  if (host.cancelled()) { outcome.kind = OUTCOME_CANCELLED; return outcome }
-  if (request.agent !== null) {
-    let result = await runAgent(request.agent!, host)
-    outcome.agent = result
-    if (host.cancelled()) { outcome.kind = OUTCOME_CANCELLED; return outcome }
-    if (result.vbc2.length > 0) { outcome.kind = OUTCOME_AGENT; return outcome }
-  }
-  if (await writeWholeScreen(request, host, outcome)) {
-    outcome.kind = host.cancelled() ? OUTCOME_CANCELLED : OUTCOME_AGENT
+  try {
+    checkAgent(host)
+    let surface = await buildSurface(request, host)
+    checkAgent(host)
+    if (surface !== null) { return surface }
+    if (request.agent !== null) {
+      let result = await runAgent(request.agent!, host)
+      checkAgent(host)
+      outcome.agent = result
+      if (result.vbc2.length > 0) { outcome.kind = OUTCOME_AGENT; return outcome }
+    }
+    checkAgent(host)
+    let whole = await writeWholeScreen(request, host, outcome)
+    checkAgent(host)
+    if (whole) { outcome.kind = OUTCOME_AGENT; return outcome }
+    outcome.kind = OUTCOME_NOT_BUILT
+    outcome.reason = notBuiltReason(outcome)
     return outcome
+  } catch (e) {
+    if (agentCancellation(host).isCancelled() || (e as Error).name === 'OperationCancelledError') {
+      let cancelled = new RouteOutcome()
+      cancelled.kind = OUTCOME_CANCELLED
+      return cancelled
+    }
+    throw (e as Error)
   }
-  if (host.cancelled()) { outcome.kind = OUTCOME_CANCELLED; return outcome }
-  outcome.kind = OUTCOME_NOT_BUILT
-  outcome.reason = notBuiltReason(outcome)
-  return outcome
 }
 
 /** What the agent said, for a screen it did not build. */

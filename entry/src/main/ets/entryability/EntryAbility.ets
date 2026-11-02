@@ -1,5 +1,6 @@
 import { UIAbility, Want, AbilityConstant, contextConstant } from '@kit.AbilityKit'
-import { window, router as routerApi } from '@kit.ArkUI'
+import { window } from '@kit.ArkUI'
+import { AppNavigationSession, AppRouteParams } from '../vera/AppNavigation'
 import { hilog } from '@kit.PerformanceAnalysisKit'
 import { refreshForms } from '../vera/FormUpdater'
 import { store } from '../vera/ProjectStore'
@@ -19,22 +20,10 @@ import { setAlignEnabled, setAlignWide } from '../vera/agent/AgentAlign'
 import { loadCatalogFile } from '../vera/VeraCatalogFile'
 import { startPowerKeyProbe } from '../vera/PowerKeyProbe'
 import { compileVeraSource } from '../vera/VeraCompiler'
-import util from '@ohos.util'
+import { util } from '@kit.ArkTS'
 import { enableTemplateSelect, disableTemplateSelect } from '../vera/VeraTemplateSelectFlag'
 
 const DOMAIN = 0x0000
-
-class ProjectNavParams {
-  projectId: string = ''
-}
-
-class RunProjectNavParams {
-  projectId: string = ''
-  versionId: string = ''
-  vbc2: string = ''
-  shortcutMode: string = ''
-  launchError: string = ''
-}
 
 class LaunchRoute {
   kind: string = 'home'
@@ -52,8 +41,7 @@ export default class EntryAbility extends UIAbility {
   private windowStageGeneration: number = 0
   private activeWindowStage: window.WindowStage | null = null
   private routeDrainGeneration: number = -1
-  private isolatedRoot: boolean = false
-  private rootNeedsReset: boolean = false
+  private navigationSession: AppNavigationSession | null = null
   private normalLayoutFullScreen: boolean = false
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -533,11 +521,19 @@ export default class EntryAbility extends UIAbility {
     let generation = ++this.windowStageGeneration
     this.activeWindowStage = windowStage
     this.routeDrainGeneration = -1
-    this.isolatedRoot = false
-    this.rootNeedsReset = false
+    this.navigationSession?.invalidate()
+    let session = new AppNavigationSession()
+    session.onReady = (): void => {
+      if (generation !== this.windowStageGeneration) { return }
+      this.navigateToProject()
+    }
+    this.navigationSession = session
+    let storage = new LocalStorage()
+    storage.setOrCreate('navigationSession', session)
     this.normalLayoutFullScreen = false
     if (this.pendingRoute === null && this.lastDestination !== null) {
       this.queueRoute(this.lastDestination.kind, this.lastDestination.projectId)
+      this.pendingRoute!.vbc2 = this.lastDestination.vbc2
     }
     try {
       this.normalLayoutFullScreen = windowStage.getMainWindowSync().getWindowProperties().isLayoutFullScreen
@@ -557,18 +553,16 @@ export default class EntryAbility extends UIAbility {
       hilog.error(DOMAIN, 'VERA', 'Permission request failed: ' + (e as Error).message)
     }
     try {
-      windowStage.loadContent('pages/Index', (err): void => {
+      windowStage.loadContent('pages/AppShell', storage, (err): void => {
         if (generation !== this.windowStageGeneration) { return }
         if (err?.code) {
           hilog.error(DOMAIN, 'VERA', 'loadContent failed')
           return
         }
         hilog.info(DOMAIN, 'VERA', 'loadContent ok')
-        setTimeout(() => {
-          if (generation !== this.windowStageGeneration) { return }
-          this.contentReady = true
-          this.navigateToProject()
-        }, 100)
+        this.contentReady = true
+        if (this.pendingRoute === null) { this.queueRoute('home', '') }
+        this.navigateToProject()
       })
     } catch (e) {
       hilog.error(DOMAIN, 'VERA', 'loadContent failed: ' + (e as Error).message)
@@ -576,7 +570,8 @@ export default class EntryAbility extends UIAbility {
   }
 
   private routeIsCurrent(generation: number, revision: number): boolean {
-    return this.contentReady && this.activeWindowStage !== null &&
+    return this.contentReady && this.activeWindowStage !== null && this.navigationSession?.pathStack !== null &&
+      this.navigationSession?.pathStack !== undefined &&
       generation === this.windowStageGeneration && revision === this.launchRevision
   }
 
@@ -604,6 +599,7 @@ export default class EntryAbility extends UIAbility {
   private navigateToProject(): void {
     let generation = this.windowStageGeneration
     if (!this.contentReady || this.activeWindowStage === null || this.pendingRoute === null ||
+      this.navigationSession === null || this.navigationSession.pathStack === null ||
       this.routeDrainGeneration === generation) { return }
     this.routeDrainGeneration = generation
     this.drainRoutes(this.activeWindowStage, generation).catch((e: Error): void => {
@@ -621,22 +617,22 @@ export default class EntryAbility extends UIAbility {
       try {
         let mainWindow = windowStage.getMainWindowSync()
         let ui = mainWindow.getUIContext()
-        let router = ui.getRouter()
-        let options: routerApi.RouterOptions = { url: 'pages/Index' }
+        let session = this.navigationSession
+        if (session === null || session.pathStack === null) { return }
+        let pathStack = session.pathStack
+        let paths: NavPathInfo[] = []
         let isolated = request.kind === 'shortcut'
-        let replaceRoot = (request.kind !== 'project' && request.kind !== 'run' && request.kind !== 'proof') ||
-          this.isolatedRoot || this.rootNeedsReset
         let missingProject = false
         if (request.kind === 'proof') {
-          let p = new RunProjectNavParams()
+          let p = new AppRouteParams()
           p.vbc2 = request.vbc2
-          options = { url: 'pages/RunnerPage', params: p }
+          paths.push({ name: 'runner', param: p })
         } else if (request.kind !== 'home') {
           store.init(this.context.filesDir)
           let project = store.getProject(request.projectId)
           missingProject = project === null
           if (isolated) {
-            let p = new RunProjectNavParams()
+            let p = new AppRouteParams()
             p.shortcutMode = 'true'
             if (project === null) {
               p.launchError = 'Mini-app no longer exists.'
@@ -650,42 +646,65 @@ export default class EntryAbility extends UIAbility {
                 p.vbc2 = version.vbc2
               }
             }
-            options = { url: 'pages/RunnerPage', params: p }
+            paths = [{ name: 'isolatedRunner', param: p }]
           } else if (project !== null) {
-            let p = new ProjectNavParams()
+            let p = new AppRouteParams()
             p.projectId = request.projectId
-            options = { url: 'pages/ProjectPage', params: p }
-          } else {
-            replaceRoot = true
+            paths.push({ name: 'project', param: p })
+            if (request.kind === 'run') {
+              let version = store.getLatestRunnableVersion(request.projectId)
+              if (version !== null) {
+                let run = new AppRouteParams()
+                run.projectId = request.projectId
+                run.versionId = version.id
+                run.vbc2 = version.vbc2
+                paths.push({ name: 'runner', param: run })
+              }
+            }
           }
         }
         if (!this.routeIsCurrent(generation, request.revision)) { continue }
-        if (replaceRoot) {
-          this.rootNeedsReset = true
-          await router.replaceUrl(options, routerApi.RouterMode.Standard)
-          if (!this.routeIsCurrent(generation, request.revision)) { continue }
-          router.clear()
-        } else {
-          await router.pushUrl(options, routerApi.RouterMode.Standard)
-          if (!this.routeIsCurrent(generation, request.revision)) { continue }
-        }
-        if (request.kind === 'run' && !missingProject) {
-          // Match ProjectPage's Run button: only the latest version that compiled is run.
-          let version = store.getLatestRunnableVersion(request.projectId)
-          if (version !== null) {
-            let run = new RunProjectNavParams()
-            run.projectId = request.projectId
-            run.versionId = version.id
-            run.vbc2 = version.vbc2
-            await router.pushUrl({ url: 'pages/RunnerPage', params: run }, routerApi.RouterMode.Standard)
-            if (!this.routeIsCurrent(generation, request.revision)) { continue }
-          }
+        if (missingProject && !isolated && pathStack.size() > 0) {
+          this.pendingRoute = null
+          ui.getPromptAction().showToast({ message: 'Mini-app no longer exists.' })
+          continue
         }
         await this.applyWindowMode(mainWindow, isolated, generation, request.revision)
         if (!this.routeIsCurrent(generation, request.revision)) { continue }
-        this.isolatedRoot = isolated
-        this.rootNeedsReset = false
-        this.lastDestination = request
+        if (this.navigationSession !== session || session.pathStack !== pathStack) { return }
+
+        let replaceRoot = request.kind === 'home' || isolated ||
+          pathStack.getAllPathName().indexOf('isolatedRunner') >= 0
+        let previousSize = pathStack.size()
+
+        if (replaceRoot) {
+          pathStack.clear(false)
+        }
+        try {
+          if (!isolated && pathStack.size() === 0) {
+            pathStack.pushPath({ name: 'library', param: new AppRouteParams() }, false)
+          }
+          for (let path of paths) {
+            pathStack.pushPath(path, false)
+          }
+        } catch (e) {
+          if (!replaceRoot) {
+            if (previousSize > 0) {
+              pathStack.popToIndex(previousSize - 1, false)
+            } else {
+              pathStack.clear(false)
+            }
+          }
+          throw (e as Error)
+        }
+
+        if (missingProject && !isolated) {
+          let fallback = new LaunchRoute()
+          fallback.revision = request.revision
+          this.lastDestination = fallback
+        } else {
+          this.lastDestination = request
+        }
         this.pendingRoute = null
         if (missingProject && !isolated) {
           ui.getPromptAction().showToast({ message: 'Mini-app no longer exists.' })
@@ -694,6 +713,13 @@ export default class EntryAbility extends UIAbility {
         hilog.error(DOMAIN, 'VERA', 'Navigate launch route failed: ' + (e as Error).message)
         if (!this.routeIsCurrent(generation, request.revision)) { continue }
         this.pendingRoute = null
+        let pathStack = this.navigationSession?.pathStack
+        if (pathStack !== null && pathStack !== undefined && pathStack.size() === 0) {
+          pathStack.pushPath({ name: 'library', param: new AppRouteParams() }, false)
+          let fallback = new LaunchRoute()
+          fallback.revision = request.revision
+          this.lastDestination = fallback
+        }
       }
     }
   }
@@ -701,10 +727,13 @@ export default class EntryAbility extends UIAbility {
   private invalidateWindowStage(): void {
     this.windowStageGeneration++
     this.contentReady = false
+    this.navigationSession?.invalidate()
+    this.navigationSession = null
     this.activeWindowStage = null
     this.routeDrainGeneration = -1
     if (this.pendingRoute === null && this.lastDestination !== null) {
       this.queueRoute(this.lastDestination.kind, this.lastDestination.projectId)
+      this.pendingRoute!.vbc2 = this.lastDestination.vbc2
     }
   }
 

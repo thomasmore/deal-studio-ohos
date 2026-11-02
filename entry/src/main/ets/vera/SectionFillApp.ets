@@ -1,24 +1,51 @@
-/**
- * The app's calls for filling sections (SectionFill.ets): DeepSeek for the content and the hole bodies, Exa for the search,
- * the phone's own lookup for a hole that may call the phone. The agent makes them.
- */
-
 import { BlockCalls } from './SectionFill'
 import { deepseek, discoveryToolResult } from './DeepSeekEngine'
 import { webSearch } from './VeraWebSearch'
+import { OperationCancellation, PredicateCancellation, throwIfCancelled } from './OperationCancellation'
 
-/** `canSearch` is whether a search can be made at all (an Exa key, and a mode that grounds in one). */
 export function appBlockCalls(canSearch: boolean, status: (text: string) => void = (_text: string): void => {},
-    cancelled: () => boolean = (): boolean => false): BlockCalls {
+    cancelled: () => boolean = (): boolean => false, cancellation?: OperationCancellation): BlockCalls {
   let calls = new BlockCalls()
-  if (canSearch) { calls.search = (query: string, chars: number): Promise<string> => webSearch(query, chars) }
-  calls.content = (system: string, user: string, budget: number): Promise<string | null> => deepseek.extractTemplateContent(system, user, budget)
-  calls.hole = (system: string, user: string): Promise<string | null> =>
-    deepseek.extractTemplateContent(system, user, 500, 'Function bodies for the blocks')
-  // The same lookup the model's own find_sdk_function tool makes, so a hole copies a real target instead of guessing one.
-  calls.sdkContext = async (prompt: string): Promise<string> =>
-    (await discoveryToolResult('find_sdk_function', prompt.substring(0, 300), 0)).substring(0, 2500)
-  calls.status = status
-  calls.cancelled = cancelled
+  calls.cancelled = (): boolean => cancelled() || (cancellation !== undefined && cancellation.isCancelled())
+  let polling: OperationCancellation = new PredicateCancellation(calls.cancelled, cancellation)
+  let operation = cancellation !== undefined ? cancellation : polling
+  calls.cancellation = operation
+  let check = (): void => { throwIfCancelled(polling) }
+  if (canSearch) {
+    calls.search = async (query: string, chars: number): Promise<string> => {
+      check()
+      try {
+        return await webSearch(query, chars, operation)
+      } finally {
+        check()
+      }
+    }
+  }
+  calls.content = async (system: string, user: string, budget: number): Promise<string | null> => {
+    check()
+    try {
+      return await deepseek.extractTemplateContent(system, user, budget, 'Text for the blocks', false, operation)
+    } finally {
+      check()
+    }
+  }
+  calls.hole = async (system: string, user: string): Promise<string | null> => {
+    check()
+    try {
+      return await deepseek.extractTemplateContent(system, user, 500, 'Function bodies for the blocks', false, operation)
+    } finally {
+      check()
+    }
+  }
+  calls.sdkContext = async (prompt: string): Promise<string> => {
+    check()
+    try {
+      let reply = await discoveryToolResult('find_sdk_function', prompt.substring(0, 300), 0, false, operation)
+      return reply.substring(0, 2500)
+    } finally {
+      check()
+    }
+  }
+  calls.status = (text: string): void => { if (!calls.cancelled()) { status(text) } }
   return calls
 }

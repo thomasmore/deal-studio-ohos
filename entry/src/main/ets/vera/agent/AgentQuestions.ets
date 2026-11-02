@@ -6,6 +6,7 @@
  */
 
 import { SketchQuestion, JevAsk } from '../VeraCompose'
+import { OperationCancellation, throwIfCancelled } from '../OperationCancellation'
 
 /** What the host shows the person. */
 export class AgentQuestion {
@@ -77,16 +78,21 @@ export class Asked {
  * plan's default, '' when none does. `log` gets every question asked and its answer.
  */
 export async function askBlocking(prompt: string, questions: SketchQuestion[], askJev: JevAsk, ask: PersonAsk,
-    log: Asked[]): Promise<string> {
+    log: Asked[], cancellation?: OperationCancellation): Promise<string> {
+  throwIfCancelled(cancellation)
   let blocking = blockingOf(await askJev(blockingRequest(prompt, questions)), questions)
+  throwIfCancelled(cancellation)
   let lines: string[] = []
   for (let q of blocking) {
+    throwIfCancelled(cancellation)
     let shown = new AgentQuestion()
     shown.text = q.ask
     shown.options = q.options
     shown.fallback = q.fallback
     let waitStart = Date.now()
+    throwIfCancelled(cancellation)
     let picked = await ask(shown)
+    throwIfCancelled(cancellation)
     let waited = Date.now() - waitStart
     let entry = new Asked()
     entry.question = q.ask

@@ -8,7 +8,7 @@
  * program on the screen as it was.
  */
 
-import { AgentHost } from './AgentHost'
+import { AgentHost, checkAgent, agentCancellation } from './AgentHost'
 import { repairProgram } from './AgentRepair'
 import { checkSurfaceProgram, surfaceLanguage } from './AgentSurface'
 import { SCENE_GUIDE } from './AgentScene'
@@ -81,6 +81,7 @@ export class SurfaceEdit {
  * before it is returned; `failed` says why when no change passed.
  */
 export async function editSurfaceProgram(source: string, change: string, prompt: string, host: AgentHost): Promise<SurfaceEdit> {
+  checkAgent(host)
   let out = new SurfaceEdit()
   let started = Date.now()
   out.game = isWholeGame(source)
@@ -93,11 +94,13 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
   let asked = 'The program:\n' + source + '\n\nIt was made for: ' + prompt + '\n\nThe change asked for now: ' + change +
     '\n\n' + CHANGE_RULES
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
-    if (host.cancelled()) { out.failed = 'cancelled'; break }
+    checkAgent(host)
     let think = attempt > 0
     out.attempts = attempt + 1
     host.status(think ? 'Making the change again, thinking it through...' : 'Making the change...')
+    checkAgent(host)
     let reply = await host.askCode!(system, asked, CHANGE_TOKENS, think)
+    checkAgent(host)
     if (reply === null || reply.trim().length === 0) { out.failed = 'no answer for the change'; continue }
     let applied = applyRepair(source, reply)
     if (applied.source.length === 0) { out.failed = 'the edits did not apply: ' + applied.error; continue }
@@ -105,7 +108,9 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
     let problem = check(current)
     if (problem.length > 0 && !host.cancelled()) {
       host.status('Playing it and fixing what broke...')
-      let repaired = await repairProgram(current, problem, prompt + '\n\nThe change: ' + change, system, host.askCode!, check)
+      checkAgent(host)
+      let repaired = await repairProgram(current, problem, prompt + '\n\nThe change: ' + change, system, host.askCode!, check, agentCancellation(host))
+      checkAgent(host)
       out.rounds += repaired.rounds
       if (repaired.source.length > 0) {
         current = repaired.source
@@ -114,6 +119,7 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
         problem = repaired.failed
       }
     }
+    checkAgent(host)
     if (problem.length > 0) { out.failed = problem.split('\n')[0]; continue }
     out.source = current
     out.vbc2 = compileVeraSource(current).vbc2

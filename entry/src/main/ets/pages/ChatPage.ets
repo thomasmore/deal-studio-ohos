@@ -10,10 +10,11 @@ import { ensureCapabilities } from '../vera/VeraCapabilities'
 import { modelSupportNote } from '../vera/VeraEmbeddings'
 import { WidgetBuildContext, WidgetReference, recentWidgetConversation, earlierSearchResults, SearchedTurn } from '../vera/VeraWidgetContext'
 import { loadCatalogFile } from '../vera/VeraCatalogFile'
-import { ChatTurn, ParsedReply, MiniApp, parseReply, chatReply, buildMiniApp, chatAgentRequest, recordChatAgent } from '../vera/VeraChat'
+import { ChatTurn, ParsedReply, MiniApp, OperationCancellation, parseReply, chatReply, buildMiniApp, chatAgentRequest, recordChatAgent } from '../vera/VeraChat'
 import { AttemptStat, ReplyStats, costOf, formatUsd, formatMs, speedOf } from '../vera/VeraChatStats'
 import { chats, StoredChat, StoredMessage } from '../vera/ChatStore'
 import { store } from '../vera/ProjectStore'
+import { AppRouteParams } from '../vera/AppNavigation'
 import { compileVeraSource } from '../vera/VeraCompiler'
 import { appAgentHost } from '../vera/agent/AgentAppHost'
 import { AgentQuestion, PersonAnswer } from '../vera/agent/AgentQuestions'
@@ -64,6 +65,8 @@ class ChatMessage {
   update: boolean = false
   /** Latest renderer values are reference data, never a revision's initial state. */
   latestState: string = ''
+  /** Fences callbacks from a VeraPreview instance after this page disappears. */
+  previewGeneration: number = 0
   error: string = ''
   // What the turn cost, in the same terms the Generate screen uses.
   chatMs: number = 0
@@ -282,9 +285,19 @@ struct MessageBubble {
   /** Answers the widget's open question and takes the card away. */
   private settle(given: PersonAnswer): void {
     let answer = this.msg.answerQuestion
+    // A null handler means the owning ChatPage has already closed this question.
+    if (answer === null) { return }
     this.msg.answerQuestion = null
     this.msg.question = ''
-    if (answer !== null) { answer(given) }
+    answer(given)
+  }
+
+  private snapshotHandler(generation: number): (encoded: string) => void {
+    return (encoded: string): void => {
+      if (this.msg.previewGeneration === generation) {
+        this.msg.latestState = encoded
+      }
+    }
   }
 
   build() {
@@ -323,7 +336,7 @@ struct MessageBubble {
         .backgroundColor(app.surface)
         .borderRadius(14)
       } else if (this.msg.appState === APP_FAILED) {
-        Text('The widget could not be built: ' + this.msg.error.substring(0, 240))
+        Text(this.msg.error === 'Stopped' ? 'Widget stopped' : 'The widget could not be built: ' + this.msg.error.substring(0, 240))
           .fontSize(12)
           .fontColor(app.dangerInk)
           .padding(10)
@@ -338,7 +351,7 @@ struct MessageBubble {
         VeraPreview({ previewOnly: this.msg.appState !== APP_READY,
           vbc2: this.msg.appState === APP_READY ? this.msg.vbc2 : this.msg.previewVbc2, embedded: true,
           persistKey: this.chatId.length > 0 ? chats.stateKey(this.chatId, this.msg.id) : '',
-          onStateSnapshot: (encoded: string): void => { this.msg.latestState = encoded } })
+          onStateSnapshot: this.snapshotHandler(this.msg.previewGeneration) })
           .width('100%')
           .borderRadius(14)
           .clip(true)
@@ -413,17 +426,75 @@ struct MessageBubble {
   }
 }
 
-@Entry
+class ChatPageParams extends AppRouteParams {
+  prompt: string = ''
+  run: string = ''
+}
+
+/**
+ * Lifetime of one user turn. A turn owns its reply and any widget build
+ * started from that reply. It remains valid after chatReply completes while
+ * its queued widget build is still running.
+ */
+class ChatRunContext implements OperationCancellation {
+  id: number = 0
+  pageGeneration: number = 0
+  cancelled: boolean = false
+  replyFinished: boolean = false
+  pendingBuilds: number = 0
+  private cancelCallbacks: (() => void)[] = []
+
+  constructor(id: number, pageGeneration: number) {
+    this.id = id
+    this.pageGeneration = pageGeneration
+  }
+
+  isCancelled(): boolean {
+    return this.cancelled
+  }
+
+  onCancel(callback: () => void): () => void {
+    if (this.cancelled) {
+      callback()
+      return (): void => {}
+    }
+    this.cancelCallbacks.push(callback)
+    return (): void => {
+      this.cancelCallbacks = this.cancelCallbacks.filter((item: () => void): boolean => item !== callback)
+    }
+  }
+
+  cancel(): void {
+    if (this.cancelled) { return }
+    this.cancelled = true
+    let callbacks = this.cancelCallbacks
+    this.cancelCallbacks = []
+    for (let callback of callbacks) {
+      try { callback() } catch (_e) {}
+    }
+  }
+}
+
 @Component
-struct ChatPage {
+export struct ChatPage {
+  params: AppRouteParams = new AppRouteParams()
+  private disposed: boolean = false
+  /** Monotonically changes on each appearance/disappearance of this page. */
+  private lifecycleGeneration: number = 0
+  private nextRunId: number = 1
+  private activeRuns: ChatRunContext[] = []
+
+  @Consume('navPathStack') pathStack: NavPathStack
+
   @State messages: ChatMessage[] = []
   @State draft: string = ''
   @State busy: boolean = false
+  @State canStop: boolean = false
   @State status: string = ''
   // The active model, mirrored from settings so the idle status line can show it
   // and re-render when it changes (e.g. the model was picked on the Generate page
   // while Chat was in the background). settings is not @State, so reading it
-  // directly would not refresh; synced in aboutToAppear and onPageShow.
+  // directly would not refresh; synced in aboutToAppear and NavDestination.onShow.
   @State selectedModel: string = ''
   @State showStats: boolean = false
   @State chatId: string = ''
@@ -432,11 +503,66 @@ struct ChatPage {
   private scroller: Scroller = new Scroller()
   private skillPrompt: string = ''
   private resourcesReady: Promise<void> | null = null
+  private resourcesLoaded: boolean = false
   private nextId: number = 1
   private lastScrollAt: number = 0
   /** Widget builds run one at a time: the DeepSeek engine has a single generation in flight. */
   private buildQueue: Promise<void> = Promise.resolve()
   /** The composed template a completion started from, kept for when the model cannot finish it. */
+
+  private isPageActive(generation: number): boolean {
+    return !this.disposed && generation === this.lifecycleGeneration
+  }
+
+  private isRunActive(run: ChatRunContext): boolean {
+    return !run.cancelled && this.isPageActive(run.pageGeneration)
+  }
+
+  private createRun(): ChatRunContext {
+    let run = new ChatRunContext(this.nextRunId++, this.lifecycleGeneration)
+    this.activeRuns.push(run)
+    this.canStop = true
+    return run
+  }
+
+  private releaseRunIfIdle(run: ChatRunContext): void {
+    if (run.cancelled || (run.replyFinished && run.pendingBuilds === 0)) {
+      this.activeRuns = this.activeRuns.filter((item: ChatRunContext): boolean => item.id !== run.id)
+    }
+    if (!this.disposed) { this.canStop = this.activeRuns.length > 0 }
+  }
+
+  private cancelActiveRuns(): void {
+    for (let run of this.activeRuns) {
+      run.cancel()
+    }
+    this.activeRuns = []
+    if (!this.disposed) { this.canStop = false }
+  }
+
+  private stopChat(): void {
+    if (this.disposed || !this.canStop) { return }
+    this.cancelActiveRuns()
+    for (let msg of this.messages) {
+      let answer = msg.answerQuestion
+      msg.answerQuestion = null
+      msg.question = ''
+      msg.questionOptions = []
+      msg.questionFallback = 0
+      if (msg.appState === APP_DESCRIBING || msg.appState === APP_BUILDING) {
+        msg.previewGeneration++
+        msg.appState = APP_FAILED
+        msg.error = 'Stopped'
+      }
+      msg.previewVbc2 = ''
+      msg.buildStatus = ''
+      if (answer !== null) { answer(null) }
+    }
+    this.busy = false
+    this.status = 'Stopped'
+    this.scrollDown(true)
+    this.persist()
+  }
 
   private hostContext(): common.Context {
     let context = this.getUIContext().getHostContext()
@@ -451,6 +577,11 @@ struct ChatPage {
   private lastSavedJson: string = ''
 
   aboutToAppear(): void {
+    this.disposed = false
+    this.lifecycleGeneration++
+    this.busy = false
+    this.canStop = false
+    let generation = this.lifecycleGeneration
     let dir = this.hostContext().filesDir
     settings.init(dir)
     this.selectedModel = settings.getModel()
@@ -460,26 +591,40 @@ struct ChatPage {
     chats.init(dir)
     initTrace(dir)
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE)
-    let params = this.getUIContext().getRouter().getParams() as Record<string, string>
+    let params = this.params as ChatPageParams
     let runOnOpen = false
-    if (params !== null && params !== undefined && (params['chatId'] || '').length > 0) {
-      this.openChat(params['chatId'])
-    } else if (params !== null && params !== undefined) {
-      // A message typed on the home screen waits in the box for the person to send it.
-      this.draft = params['prompt'] || ''
-      runOnOpen = (params['run'] || '').length > 0 && this.draft.trim().length > 0
+    if (params.chatId.length > 0) {
+      this.openChat(params.chatId)
+    } else {
+      this.draft = params.prompt || ''
+      runOnOpen = (params.run || '').length > 0 && this.draft.trim().length > 0
     }
-    this.loadResources().then((): void => {
-      // The message came with "send it": it goes now that the prompts are loaded.
-      if (runOnOpen) { this.send().catch((_e: Error): void => {}) }
+    this.loadResources(generation).then((): void => {
+      if (this.isPageActive(generation) && runOnOpen) { this.send().catch((_e: Error): void => {}) }
     }).catch((_e: Error): void => {})
   }
 
   aboutToDisappear(): void {
+    // Fence first: any continuation/callback arriving below this point is stale.
+    this.disposed = true
+    this.lifecycleGeneration++
+    this.cancelActiveRuns()
+    for (let msg of this.messages) {
+      // Invalidate callbacks held by VeraPreview instances from this page lifetime.
+      msg.previewGeneration++
+      let answer = msg.answerQuestion
+      msg.answerQuestion = null
+      msg.question = ''
+      if (answer !== null) { answer(null) }
+    }
+    // A not-yet-completed resource load belonged to the old page generation.
+    // Let its underlying reads finish, but allow a new appearance to retry.
+    if (!this.resourcesLoaded) { this.resourcesReady = null }
     this.persist()
   }
 
-  onPageShow(): void {
+  private destinationShown(): void {
+    if (this.disposed) { return }
     // The model may have been changed on the Generate page while this page was in
     // the background; re-read it so the idle status line shows what a reply will use.
     this.selectedModel = settings.getModel()
@@ -606,7 +751,8 @@ struct ChatPage {
     return chat
   }
 
-  private async loadResources(): Promise<void> {
+  private async loadResources(pageGeneration: number): Promise<void> {
+    if (this.resourcesLoaded) { return }
     if (this.resourcesReady === null) {
       this.resourcesReady = (async (): Promise<void> => {
         try {
@@ -614,19 +760,26 @@ struct ChatPage {
           let capabilities = ensureCapabilities(context)
           loadCatalogFile(context.filesDir)
           let skill = await loadRawfileText(context.resourceManager, 'vera-skill.txt')
+          if (!this.isPageActive(pageGeneration)) { return }
           let widget = await loadRawfileText(context.resourceManager, 'vera-widget.txt')
+          if (!this.isPageActive(pageGeneration)) { return }
           if (skill.trim().length === 0 || widget.trim().length === 0) {
             throw new Error('Widget prompt resources are empty.')
           }
-          this.skillPrompt = skill
+          let prompt = skill
             .replace('{{UI_CATALOG}}', describeCatalogForPrompt())
             .replace('{{UI_TOOL_NOTE}}\n', '') + widget
           await capabilities
+          if (!this.isPageActive(pageGeneration)) { return }
+          this.skillPrompt = prompt
+          this.resourcesLoaded = true
           // The model-support note (stub-build warning) is shown by idleLine()
           // alongside the provider/model, not parked in status where it would
           // hide the ready line on a stub build.
         } catch (e) {
-          this.status = 'Failed to load resources: ' + (e as Error).message
+          if (this.isPageActive(pageGeneration)) {
+            this.status = 'Failed to load resources: ' + (e as Error).message
+          }
           throw e as Error
         }
       })()
@@ -635,10 +788,16 @@ struct ChatPage {
   }
 
   private scrollDown(force: boolean = false): void {
+    let generation = this.lifecycleGeneration
+    if (!this.isPageActive(generation)) { return }
     let now = Date.now()
     if (!force && now - this.lastScrollAt < SCROLL_EVERY_MS) { return }
     this.lastScrollAt = now
-    setTimeout(() => { this.scroller.scrollEdge(Edge.Bottom) }, 60)
+    setTimeout((): void => {
+      if (this.isPageActive(generation)) {
+        this.scroller.scrollEdge(Edge.Bottom)
+      }
+    }, 60)
   }
 
   private history(): ChatTurn[] {
@@ -676,7 +835,9 @@ struct ChatPage {
   }
 
   /** Stream visible text. A widget already handed to the builder keeps its state. */
-  private apply(msg: ChatMessage, parsed: ParsedReply): void {
+  private apply(msg: ChatMessage, parsed: ParsedReply, run: ChatRunContext): void {
+    if (!this.isRunActive(run)) { return }
+    if (this.disposed) { return }
     msg.before = parsed.before + msg.beforeNote
     msg.after = parsed.after
     // A failure the builder already reported (startWidget, run while the reply
@@ -703,14 +864,12 @@ struct ChatPage {
    * list to the projects. The chat is saved on the way out, as on Back.
    */
   private openHistory(): void {
-    let params = this.getUIContext().getRouter().getParams() as Record<string, string>
-    if (params !== null && params !== undefined && (params['fromList'] || '').length > 0) {
-      // The list is already underneath: going back to it is the same as opening it.
-      this.getUIContext().getRouter().back()
+    if (this.disposed) { return }
+    if (this.pathStack.getAllPathName().indexOf('chatList') >= 0) {
+      this.pathStack.popToName('chatList')
       return
     }
-    this.getUIContext().getRouter().replaceUrl({ url: 'pages/ChatListPage' })
-      .catch((e: Error): void => { console.error('Navigate to chat list failed: ' + e.message) })
+    this.pathStack.replacePath({ name: 'chatList', param: new AppRouteParams() })
   }
 
   /** Asks the last message again: it is taken back out of the thread and sent as if just typed. */
@@ -725,7 +884,8 @@ struct ChatPage {
 
   private async send(): Promise<void> {
     let text = this.draft.trim()
-    if (text.length === 0 || this.busy) { return }
+    if (this.disposed || text.length === 0 || this.busy) { return }
+    let run = this.createRun()
     let references = this.referenceSnapshots()
     this.draft = ''
     this.busy = true
@@ -762,64 +922,82 @@ struct ChatPage {
     try {
       let capsStartedAt = Date.now()
       await ensureCapabilities(this.hostContext())
+      if (!this.isRunActive(run)) { return }
       logStep('ensure-capabilities', capsStartedAt)
       let raw = await chatReply(turns, (soFar: string): void => {
+        if (!this.isRunActive(run)) { return }
         if (!sawText) { sawText = true; logMark('chat-first-text') }
         if (this.status === 'Thinking...') { this.status = '' }
         let parsed = parseReply(soFar)
-        this.apply(reply, parsed)
+        this.apply(reply, parsed, run)
         // A JSON marker is complete and final the moment its >> arrives -- a
         // second one would be an error either way -- so the build starts
         // while the rest of the reply is still being written.
         if (!started && parsed.structured && parsed.error.length === 0 && parsed.appDescription.length > 0) {
           started = true
           console.info('VERA-CHAT widget started before the reply ended, at ' + soFar.length.toString() + ' chars')
-          this.startWidget(reply, parsed, references, context)
+          this.startWidget(reply, parsed, references, context, run)
         }
       }, (status: string): void => {
+        if (!this.isRunActive(run)) { return }
         this.status = status.length > 0 ? status : 'Thinking...'
       }, stats, (verified: string): void => {
+        if (!this.isRunActive(run)) { return }
         context.verifiedSearchResults.push(verified)
         reply.searchResults.push(verified)
-      })
+      }, run)
+      if (!this.isRunActive(run)) { return }
       logMark('chat-reply-done')
       console.info('VERA-CHAT reply: ' + raw)
       let parsed = parseReply(raw, true)
-      this.apply(reply, parsed)
+      this.apply(reply, parsed, run)
       if (started && parsed.error.length > 0) {
         // The rest of the reply broke the marker (a second one, say). The
         // build already under way is dropped when it finishes.
         reply.appState = APP_FAILED
         reply.error = parsed.error
       } else if (!started && parsed.error.length === 0 && parsed.appDescription.length > 0) {
-        this.startWidget(reply, parsed, references, context)
+        this.startWidget(reply, parsed, references, context, run)
       }
     } catch (e) {
-      this.status = (e as Error).message
-      if (reply.appState === APP_DESCRIBING) {
-        reply.appState = APP_FAILED
-        reply.error = 'The reply ended before the widget request was complete.'
+      if (this.isRunActive(run)) {
+        this.status = (e as Error).message
+        if (reply.appState === APP_DESCRIBING) {
+          reply.appState = APP_FAILED
+          reply.error = 'The reply ended before the widget request was complete.'
+        }
+        // A reply that never started is not worth an empty row.
+        if (reply.before.length === 0 && reply.appState === APP_NONE) {
+          this.messages = this.messages.filter((m: ChatMessage): boolean => m.id !== reply.id)
+        }
       }
-      // A reply that never started is not worth an empty row.
-      if (reply.before.length === 0 && reply.appState === APP_NONE) {
-        this.messages = this.messages.filter((m: ChatMessage): boolean => m.id !== reply.id)
+    } finally {
+      // chatReply may complete after the page has disappeared. Never publish
+      // its result, stats, status or busy flag into a newer page generation.
+      try {
+        if (this.isRunActive(run)) {
+          reply.chatMs = stats.ms
+          reply.chatTtftMs = stats.ttftMs
+          reply.chatInput = stats.inputTokens
+          reply.chatCached = stats.cachedTokens
+          reply.chatOutput = stats.outputTokens
+          reply.searches = stats.searches
+          reply.searchMs = stats.searchMs
+          this.busy = false
+          this.scrollDown(true)
+          this.persist()
+        }
+      } finally {
+        run.replyFinished = true
+        this.releaseRunIfIdle(run)
       }
     }
-    reply.chatMs = stats.ms
-    reply.chatTtftMs = stats.ttftMs
-    reply.chatInput = stats.inputTokens
-    reply.chatCached = stats.cachedTokens
-    reply.chatOutput = stats.outputTokens
-    reply.searches = stats.searches
-    reply.searchMs = stats.searchMs
-    this.busy = false
-    this.scrollDown(true)
-    this.persist()
   }
 
   /** Resolve the widget a marker asks for and hand it to the builder. */
   private startWidget(reply: ChatMessage, parsed: ParsedReply, references: WidgetReference[],
-      context: WidgetBuildContext): void {
+      context: WidgetBuildContext, run: ChatRunContext): void {
+    if (!this.isRunActive(run)) { return }
     context.brief = parsed.appDescription
     context.request = parsed.appRequest
     // A record line written out for a widget the chat already has is about that widget: it is refined, not built again.
@@ -850,35 +1028,37 @@ struct ChatPage {
     reply.update = parsed.update || parsed.mode === 'refine'
     reply.appState = APP_BUILDING
     logMark('widget-queued')
-    this.queueBuild(reply, context)
+    this.queueBuild(reply, context, run)
   }
 
-  private queueBuild(msg: ChatMessage, context: WidgetBuildContext): void {
-    this.buildQueue = this.buildQueue.then(async (): Promise<void> => {
-      // The rest of the reply invalidated the marker while this waited.
-      if (msg.appState === APP_FAILED) { return }
-      let startedAt = Date.now()
-      logMark('widget-build-start')
+  private queueBuild(msg: ChatMessage, context: WidgetBuildContext, run: ChatRunContext): void {
+    run.pendingBuilds++
+    this.buildQueue = this.buildQueue.catch((_e: Error): void => {}).then(async (): Promise<void> => {
+      let startedAt = 0
       let sawPreview = false
       try {
-        await this.loadResources()
+        // A run can be cancelled while it waits behind another widget build.
+        if (!this.isRunActive(run) || msg.appState === APP_FAILED) { return }
+        startedAt = Date.now()
+        logMark('widget-build-start')
+        await this.loadResources(run.pageGeneration)
+        if (!this.isRunActive(run)) { return }
         logStep('load-resources', startedAt)
-        // The route (agent/VeraBuildRoute.ets): the agent, from the marker's request. What it does not build is reported in the
-        // bubble, not generated; only a refine of an existing widget, which the route does not take, goes to the model.
+        // The route (agent/VeraBuildRoute.ets): the agent, from the marker's request.
         let route = new RouteRequest()
         route.agent = chatAgentRequest(context)
         context.composeTried = true
         let host = appAgentHost((s: string): void => {
-          if (msg.buildStatus !== s) { msg.buildStatus = s }
+          if (this.isRunActive(run) && msg.buildStatus !== s) { msg.buildStatus = s }
         }, (vbc2: string): void => {
-          if (msg.appState !== APP_BUILDING) { return }
+          if (!this.isRunActive(run) || msg.appState !== APP_BUILDING) { return }
           if (!sawPreview) { sawPreview = true; logMark('widget-preview') }
           msg.previewVbc2 = vbc2
           this.scrollDown(true)
-        }, (): boolean => false, this.skillPrompt)
-        // A blocking question goes in the bubble of the widget it is for; an invalidated widget takes the default.
+        }, (): boolean => !this.isRunActive(run), this.skillPrompt, '', run)
+        // A blocking question goes in the bubble of the widget it is for.
         host.ask = (question: AgentQuestion): Promise<PersonAnswer> => new Promise<PersonAnswer>((resolve: (answer: PersonAnswer) => void) => {
-          if (msg.appState !== APP_BUILDING) { resolve(null); return }
+          if (!this.isRunActive(run) || msg.appState !== APP_BUILDING) { resolve(null); return }
           msg.questionOptions = question.options
           msg.questionFallback = question.fallback
           msg.answerQuestion = resolve
@@ -886,6 +1066,7 @@ struct ChatPage {
           this.scrollDown(true)
         })
         let outcome: RouteOutcome = await buildScreen(route, host)
+        if (!this.isRunActive(run)) { return }
         msg.question = ''
         msg.answerQuestion = null
         let composed = new MiniApp()
@@ -898,34 +1079,25 @@ struct ChatPage {
           msg.parentMessageId = context.parentMessageId
           msg.appState = APP_READY
           logMark('widget-ready')
-          msg.widgetMs = Date.now() - startedAt
-          msg.previewVbc2 = ''
-          msg.buildStatus = ''
-          this.scrollDown(true)
-          this.persist()
           return
         }
         if (outcome.kind === OUTCOME_NOT_BUILT && context.source.length === 0 && route.agent !== null) {
           msg.error = 'Not built: ' + outcome.reason
           msg.appState = APP_FAILED
-          msg.widgetMs = Date.now() - startedAt
-          msg.previewVbc2 = ''
-          msg.buildStatus = ''
-          this.scrollDown(true)
-          this.persist()
           return
         }
         let app: MiniApp = await buildMiniApp(this.skillPrompt, context, (s: string): void => {
-          if (msg.buildStatus !== s) { msg.buildStatus = s }
+          if (this.isRunActive(run) && msg.buildStatus !== s) { msg.buildStatus = s }
         }, '', (_s: string): void => {}, (vbc2: string): void => {
-          if (msg.appState !== APP_BUILDING) { return }
+          if (!this.isRunActive(run) || msg.appState !== APP_BUILDING) { return }
           if (!sawPreview) { sawPreview = true; logMark('widget-preview') }
           msg.previewVbc2 = vbc2
           this.scrollDown(true)
-        })
+        }, run)
+        if (!this.isRunActive(run)) { return }
         msg.attempts = app.stats
         if (msg.appState === APP_FAILED) {
-          // Invalidated while it was being built: keep the numbers, not the widget.
+          // The streamed reply invalidated the marker while the build was running.
         } else if (app.error.length === 0 && app.vbc2.length > 0) {
           msg.vbc2 = app.vbc2
           msg.source = app.source
@@ -938,20 +1110,32 @@ struct ChatPage {
           msg.appState = APP_FAILED
         }
       } catch (e) {
-        msg.error = (e as Error).message
-        msg.appState = APP_FAILED
+        if (this.isRunActive(run)) {
+          msg.error = (e as Error).message
+          msg.appState = APP_FAILED
+        }
+      } finally {
+        try {
+          if (startedAt > 0 && this.isRunActive(run)) {
+            msg.widgetMs = Date.now() - startedAt
+            // After appState: the renderer has already been handed the finished program.
+            msg.previewVbc2 = ''
+            msg.buildStatus = ''
+            msg.question = ''
+            msg.answerQuestion = null
+            this.scrollDown(true)
+            this.persist()
+          }
+        } finally {
+          run.pendingBuilds--
+          this.releaseRunIfIdle(run)
+        }
       }
-      msg.widgetMs = Date.now() - startedAt
-      // After appState: the renderer has already been handed the finished program.
-      msg.previewVbc2 = ''
-      msg.buildStatus = ''
-      this.scrollDown(true)
-      this.persist()
     })
   }
 
   build() {
-    Navigation() {
+    NavDestination() {
       Column() {
         // The same numbers the Generate screen shows for a program, for the
         // whole chat; each reply carries its own underneath when this is on.
@@ -1021,18 +1205,28 @@ struct ChatPage {
           TextInput({ placeholder: 'Message', text: this.draft })
             .onChange((value: string) => {
               this.draft = value
-              // The key can arrive while this page is open, and onPageShow does not fire for that.
+              // The key can arrive while this page is open, and NavDestination.onShow does not fire for that.
               if (this.status.startsWith('No cloud API key') && settings.hasApiKey()) { this.status = '' }
             })
             .onSubmit(() => { this.send() })
             .layoutWeight(1)
             .height(44)
+          if (this.canStop) {
+            Button({ type: ButtonType.Circle }) {
+              SymbolGlyph($r('sys.symbol.square_fill')).fontSize(20).fontColor([app.onPrimary])
+            }
+            .width(44).height(44)
+            .backgroundColor(app.primary)
+            .accessibilityText('Stop')
+            .onClick(() => { this.stopChat() })
+          }
           Button({ type: ButtonType.Circle }) {
             SymbolGlyph($r('sys.symbol.arrow_up')).fontSize(20).fontColor([app.onPrimary])
           }
           .width(44).height(44)
           .backgroundColor(app.primary)
           .opacity(!this.busy && this.draft.trim().length > 0 ? 1 : 0.4)
+          .enabled(!this.busy && this.draft.trim().length > 0)
           .accessibilityText('Send')
           .onClick(() => { this.send() })
         }
@@ -1045,11 +1239,11 @@ struct ChatPage {
       .backgroundColor(app.background)
     }
     .title('Chat')
-    .titleMode(NavigationTitleMode.Mini)
     .menus([{
       value: 'History',
       symbolIcon: new SymbolGlyphModifier($r('sys.symbol.clock')),
       action: () => { this.openHistory() }
     }])
+    .onShown(() => { this.destinationShown() })
   }
 }

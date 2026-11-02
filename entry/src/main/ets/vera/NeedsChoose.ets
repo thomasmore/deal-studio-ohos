@@ -9,6 +9,7 @@
  * Jev does not give leaves the part.
  */
 
+import { OperationCancellation, isCancelled, throwIfCancelled } from './OperationCancellation'
 import { Sketch, SketchInput, SketchOption, SketchAsk, JevAsk, PlanReview, ComposeResult, composeFromSketch, closePartialJson, sketchSignature, describeSketch,
   listNeeds, clockOptions, listOptions, choice, askReady, LIST_SECTIONS, PART } from './VeraCompose'
 import { NeedsPlan, Need, NEEDS_PROMPT, plainScenes, WIDGET_ROOM, WIDGET_NEEDS_NOTE, capForWidget, dropUnasked, NEED_COUNTDOWN, NEED_ACTION, NEED_FIGURE, ON_END, ON_ADDED, ON_TAP, parseNeedsPlan, sketchFrom,
@@ -153,9 +154,12 @@ class DrawnPlan {
 }
 
 /** One plan, streamed: each new shape of it goes to onSketch as it arrives. */
-async function drawOnce(askPlan: SketchAsk, prompt: string, onSketch: (partial: Sketch) => void, think: boolean): Promise<string | null> {
+async function drawOnce(askPlan: SketchAsk, prompt: string, onSketch: (partial: Sketch) => void, think: boolean,
+    cancellation?: OperationCancellation): Promise<string | null> {
+  throwIfCancelled(cancellation)
   let shown = ''
   let show = (reply: string): void => {
+    if (isCancelled(cancellation)) { return }
     let plan = parseNeedsPlan(reply)
     if (plan === null) { return }
     let sketch = sketchFrom(plan!)
@@ -169,17 +173,22 @@ async function drawOnce(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
     let closed = closePartialJson(soFar)
     if (closed.length > 0) { show(closed) }
   }, think)
+  throwIfCancelled(cancellation)
   if (reply !== null) { show(reply!) }
   return reply
 }
 
 /** A plan that can be used, asked for until there is one: the first, then once more with what was wrong with it quoted, then once thinking. */
-async function drawPlan(askPlan: SketchAsk, prompt: string, onSketch: (partial: Sketch) => void, note: string = ''): Promise<DrawnPlan> {
+async function drawPlan(askPlan: SketchAsk, prompt: string, onSketch: (partial: Sketch) => void, note: string = '',
+    cancellation?: OperationCancellation): Promise<DrawnPlan> {
+  throwIfCancelled(cancellation)
   let out = new DrawnPlan()
   let user = prompt + note
   for (let attempt = 0; attempt < 3; attempt++) {
     out.tries = attempt + 1
-    let reply = await drawOnce(askPlan, user, onSketch, attempt === 2)
+    throwIfCancelled(cancellation)
+    let reply = await drawOnce(askPlan, user, onSketch, attempt === 2, cancellation)
+    throwIfCancelled(cancellation)
     let plan = reply !== null ? parseNeedsPlan(reply!) : null
     let sketch = plan !== null ? sketchFrom(plan!) : null
     if (plan !== null && sketch !== null) {
@@ -208,23 +217,29 @@ export function sceneNote(scene: string): string {
  */
 export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoices: JevAsk,
     onSketch: (partial: Sketch) => void = (_s: Sketch): void => {}, widget: boolean = false,
-    review: PlanReview | null = null, scene: string = '', sceneAllowed: boolean = true): Promise<ComposeResult> {
+    review: PlanReview | null = null, scene: string = '', sceneAllowed: boolean = true,
+    cancellation?: OperationCancellation): Promise<ComposeResult> {
+  throwIfCancelled(cancellation)
   let result = new ComposeResult()
   let started = Date.now()
   // What the plan is told besides the request: a widget's room, and the scene the route was told part of the screen is.
   let note = (widget ? WIDGET_NEEDS_NOTE : '') + (scene.length > 0 ? sceneNote(scene) : '')
-  let drawn = await drawPlan(askPlan, prompt, onSketch, note)
+  let drawn = await drawPlan(askPlan, prompt, onSketch, note, cancellation)
+  throwIfCancelled(cancellation)
   result.sketchMs = Date.now() - started
   result.planTries = drawn.tries
   if (drawn.plan === null) { result.note = 'no usable plan after ' + drawn.tries.toString() + ' tries'; return result }
   let plan: NeedsPlan = drawn.plan!
   let sketch: Sketch = drawn.sketch!
   let text = drawn.text
+  throwIfCancelled(cancellation)
   let settled = review !== null && sketch.questions.length > 0 ? await review(sketch) : ''
+  throwIfCancelled(cancellation)
   if (settled.length > 0) {
     prompt = prompt + '\n\n' + settled
     let again = Date.now()
-    let redrawn = await drawPlan(askPlan, prompt, onSketch, note)
+    let redrawn = await drawPlan(askPlan, prompt, onSketch, note, cancellation)
+    throwIfCancelled(cancellation)
     result.sketchMs += Date.now() - again
     result.replanned = true
     result.planTries += redrawn.tries
@@ -256,14 +271,22 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   let skipped: string[] = choose.settled
   if (choose.body.length > 0) {
     let asked = Date.now()
+    throwIfCancelled(cancellation)
     let body = await askChoices(choose.body)
-    if (body.length === 0) { body = await askChoices(choose.body) }
+    throwIfCancelled(cancellation)
+    if (body.length === 0) {
+      throwIfCancelled(cancellation)
+      body = await askChoices(choose.body)
+      throwIfCancelled(cancellation)
+    }
     result.jevMs = Date.now() - asked
     answers = body.length > 0 ? readChoices(body) : null
     // Without the choices the parts stay, and the composer asks what a section is for (ready.N, whose.N, real_data) itself.
     if (answers === null) { skipped = [] }
   }
-  let composed = await composeFromSketch(result, prompt, sketch, askChoices, widget, answers, skipped)
+  throwIfCancelled(cancellation)
+  let composed = await composeFromSketch(result, prompt, sketch, askChoices, widget, answers, skipped, cancellation)
+  throwIfCancelled(cancellation)
   if (startedOn.length > 0) { composed.note += '; ' + startedOn + ', as the request says' }
   if (unscened > 0) { composed.note += '; no scene: the request asks for nothing drawn, so ' + unscened.toString() + ' is built as any other need' }
   if (unasked.length > 0) {

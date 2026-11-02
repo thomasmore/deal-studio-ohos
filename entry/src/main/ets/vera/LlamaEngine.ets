@@ -47,6 +47,11 @@ export class GenerateResult {
   text: string = ''
   inputTokens: number = 0
   outputTokens: number = 0
+  cacheHitTokens: number = 0
+  finishReason: string = ''
+  prefillMs: number = 0
+  thinkMs: number = 0
+  toolRounds: number = 0
 }
 
 /**

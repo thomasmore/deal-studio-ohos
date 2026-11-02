@@ -191,16 +191,46 @@ def sdk_kit_exports(api):
     exports = {}
     for path in sorted(kits.glob('@kit.*.d.ts')):
         text = path.read_text(encoding='utf-8')
-        if re.search(r'@deprecated\b', text):
-            continue
         code = code_without_comments(text)
+        comments = list(re.finditer(r'/\*.*?\*/|//[^\n]*', text, re.DOTALL))
+
+        def deprecated_at(start):
+            for comment in reversed(comments):
+                if comment.end() <= start:
+                    return (not code[comment.end():start].strip() and
+                            comment.group().startswith('/**') and
+                            re.search(r'@deprecated\b', comment.group()) is not None)
+            return False
+
+        def deprecated_named_bindings(start, end):
+            deprecated = set()
+            for item in re.finditer(r'[^,]+', code[start:end]):
+                value = item.group()
+                if value.strip() and deprecated_at(start + item.start() + len(value) - len(value.lstrip())):
+                    deprecated.update(named_bindings(value))
+            return deprecated
+
         imports = {}
-        for _, _, source, bindings in parse_imports(code):
+        for start, end, source, bindings in parse_imports(code):
+            if deprecated_at(start + len(code[start:end]) - len(code[start:end].lstrip())):
+                continue
+            match = IMPORT_RE.match(code, start)
+            clause = match['clause']
+            deprecated = set()
+            if '{' in clause:
+                deprecated = deprecated_named_bindings(match.start('clause') + clause.index('{') + 1,
+                                                       match.start('clause') + clause.rindex('}'))
             for imported, local in bindings:
-                imports[local] = (source, imported)
+                if (imported, local) not in deprecated:
+                    imports[local] = (source, imported)
         kit = import_path(path.name)
         for match in EXPORT_RE.finditer(code):
+            if deprecated_at(match.start()):
+                continue
+            deprecated = deprecated_named_bindings(match.start('names'), match.end('names'))
             for local, exported in named_bindings(match['names']):
+                if (local, exported) in deprecated:
+                    continue
                 identity = ((match['path'], local) if match['path'] else imports.get(local))
                 if identity is not None:
                     exports.setdefault(identity, set()).add((kit, exported))

@@ -41,6 +41,17 @@ function writeParam(params: Record<string, Object>, platformName: string, value:
 }
 
 /**
+ * A caught value need to be a BusinessError: formatting must survive a
+ * missing code or message, so the program still gets an "error..." line.
+ */
+function errDetail(e: Object): string {
+  let err = e as BusinessError;
+  let code = err.code === undefined ? '?' : err.code.toString();
+  let message = err.message === undefined || err.message === null ? '' : err.message;
+  return code + ': ' + message;
+}
+
+/**
  * An intent target named by the program, as sdk.call passes it on.
  *
  * Nothing is translated: the parameter names and values go to the platform as
@@ -91,10 +102,9 @@ export async function runRawIntent(target: string, values: Map<string, string>, 
     // program is told 'ok' and should not claim more than that either.
     return payload.length > 0 ? payload : 'ok'
   } catch (e) {
-    let err = e as BusinessError
-    hilog.error(DOMAIN, 'VERA', 'VERA-INTENT-RAW ' + target + ' failed ' +
-      err.code.toString() + ': ' + err.message)
-    return 'error ' + err.code.toString() + ': ' + err.message
+    let str = errDetail(e as Object)
+    hilog.error(DOMAIN, 'VERA', 'VERA-INTENT-RAW ' + target + ' failed ' + str)
+    return 'error ' + str
   }
 }
 
@@ -114,8 +124,8 @@ async function launchRawTarget(bundle: string, ability: string): Promise<string>
     await context.startAbility(want)
     return 'ok'
   } catch (e) {
-    let err = e as BusinessError
-    hilog.error(DOMAIN, 'VERA', 'VERA-LAUNCH failed ' + err.code.toString() + ': ' + err.message)
-    return 'error ' + err.code.toString() + ': ' + err.message
+    let str = errDetail(e as Object)
+    hilog.error(DOMAIN, 'VERA', 'VERA-LAUNCH failed ' + str)
+    return 'error ' + str
   }
 }

@@ -37,7 +37,9 @@
  * the same numbers mean the same thing.
  */
 
-import http from '@ohos.net.http'
+import { OperationCancellation, throwIfCancelled, cancellationError } from './OperationCancellation'
+import { requestWithCancellation } from './VeraWebSearch'
+import { http } from '@kit.NetworkKit'
 import { noteService, SERVICE_JEV } from './ServiceHealth'
 import { settings } from './SettingsStore'
 
@@ -270,8 +272,9 @@ function buildPayload(model: string, messages: Record<string, Object>[], withLog
   return JSON.stringify(payload)
 }
 
-async function sendCloud(base: string, cloudKey: string, payloadJson: string): Promise<CloudReply> {
-  let client = http.createHttp()
+async function sendCloud(base: string, cloudKey: string, payloadJson: string,
+    cancellation?: OperationCancellation): Promise<CloudReply> {
+  throwIfCancelled(cancellation)
   let reply = new CloudReply()
   try {
     let header: Record<string, string> = {}
@@ -282,22 +285,23 @@ async function sendCloud(base: string, cloudKey: string, payloadJson: string): P
       url = url.substring(0, url.length - 1)
     }
     url = url + '/chat/completions'
-    let response = await client.request(url, {
+    let response = await requestWithCancellation(url, {
       method: http.RequestMethod.POST,
       header: header,
       extraData: payloadJson,
       expectDataType: http.HttpDataType.STRING,
       connectTimeout: CONNECT_TIMEOUT,
       readTimeout: READ_TIMEOUT
-    })
+    }, cancellation)
+    throwIfCancelled(cancellation)
     reply.status = response.responseCode as number
     reply.bodyText = String(response.result)
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     console.warn('VERA-JEVPROXY cloud failed: ' + (e as Error).message)
     reply.status = 0
     reply.bodyText = ''
-  } finally {
-    client.destroy()
   }
   return reply
 }
@@ -310,20 +314,26 @@ async function sendCloud(base: string, cloudKey: string, payloadJson: string): P
  * short backoff. Never throws; {} on any failure.
  */
 async function cloudPick(base: string, model: string, cloudKey: string,
-    messages: Record<string, Object>[]): Promise<Record<string, Object>> {
+    messages: Record<string, Object>[], cancellation?: OperationCancellation): Promise<Record<string, Object>> {
+  throwIfCancelled(cancellation)
   let withLogprobs = !logprobsRejected
   let payload = buildPayload(model, messages, withLogprobs)
-  let reply = await sendCloud(base, cloudKey, payload)
+  let reply = await sendCloud(base, cloudKey, payload, cancellation)
+  throwIfCancelled(cancellation)
   if (reply.status === 400 && reply.bodyText.indexOf('logprobs') >= 0) {
     logprobsRejected = true
     payload = buildPayload(model, messages, false)
-    reply = await sendCloud(base, cloudKey, payload)
+    reply = await sendCloud(base, cloudKey, payload, cancellation)
+    throwIfCancelled(cancellation)
   }
   let backoff = 500
   for (let attempt = 0; attempt < 3 && reply.status === 429; attempt++) {
-    await sleep(backoff)
+    throwIfCancelled(cancellation)
+    await sleep(backoff, cancellation)
+    throwIfCancelled(cancellation)
     backoff *= 2
-    reply = await sendCloud(base, cloudKey, payload)
+    reply = await sendCloud(base, cloudKey, payload, cancellation)
+    throwIfCancelled(cancellation)
   }
   if (reply.status !== 200) {
     if (reply.bodyText.length > 0) {
@@ -339,12 +349,33 @@ async function cloudPick(base: string, model: string, cloudKey: string,
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => { setTimeout(resolve, ms) })
+function sleep(ms: number, cancellation?: OperationCancellation): Promise<void> {
+  throwIfCancelled(cancellation)
+  return new Promise<void>((resolve, reject): void => {
+    let settled = false
+    let unsubscribe = (): void => {}
+    let timer = setTimeout((): void => {
+      if (settled) { return }
+      settled = true
+      unsubscribe()
+      resolve()
+    }, ms)
+    if (cancellation !== undefined) {
+      unsubscribe = cancellation.onCancel((): void => {
+        if (settled) { return }
+        settled = true
+        clearTimeout(timer)
+        reject(cancellationError())
+        unsubscribe()
+      })
+      if (settled) { unsubscribe() }
+    }
+  })
 }
 
 async function answerQuestion(key: string, q: Record<string, Object>, state: string,
-    base: string, model: string, cloudKey: string): Promise<QAnswer> {
+    base: string, model: string, cloudKey: string, cancellation?: OperationCancellation): Promise<QAnswer> {
+  throwIfCancelled(cancellation)
   let ans = new QAnswer()
   ans.key = key
   let typeRaw = q['type']
@@ -358,7 +389,8 @@ async function answerQuestion(key: string, q: Record<string, Object>, state: str
       // composer's readNoulProbability (values[1] is the branch taken when the
       // probability clears the threshold).
       let userText = instructions + '\nReply with a single letter: A for yes, B for no. Nothing else.'
-      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, userText))
+      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, userText), cancellation)
+      throwIfCancelled(cancellation)
       let pick = parseChoice(cloud)
       let letters: string[] = ['A', 'B']
       let probs = letterProbs(pick.tokenProbs, letters)
@@ -381,7 +413,8 @@ async function answerQuestion(key: string, q: Record<string, Object>, state: str
         let desc = criteria[criteriaKeys[i]]
         lines.push(letters[i] + ') ' + criteriaKeys[i] + ' — ' + (desc !== undefined ? desc : ''))
       }
-      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, lines.join('\n')))
+      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, lines.join('\n')), cancellation)
+      throwIfCancelled(cancellation)
       let pick = parseChoice(cloud)
       let probs = letterProbs(pick.tokenProbs, letters)
       if (Object.keys(probs).length > 0) {
@@ -405,8 +438,11 @@ async function answerQuestion(key: string, q: Record<string, Object>, state: str
       }
     }
   } catch (_e) {
+    throwIfCancelled(cancellation)
+    if ((_e as Error).name === 'OperationCancelledError') { throw (_e as Error) }
     // One bad question must not sink the batch; defaults stand.
   }
+  throwIfCancelled(cancellation)
   return ans
 }
 
@@ -423,7 +459,8 @@ function emptyAnswersBody(): string {
  * cloud key is set or the body could not be parsed. Never throws; failures are
  * noted through ServiceHealth so the Generate UI's service chip reflects them.
  */
-export async function askJevViaCloud(body: string): Promise<string> {
+export async function askJevViaCloud(body: string, cancellation?: OperationCancellation): Promise<string> {
+  throwIfCancelled(cancellation)
   let cloudKey = settings.getApiKey()
   if (cloudKey.length === 0) {
     noteService(SERVICE_JEV, false, 'no cloud key for Jev proxy')
@@ -456,17 +493,20 @@ export async function askJevViaCloud(body: string): Promise<string> {
   let cursor = 0
   let worker = async (): Promise<void> => {
     while (true) {
+      throwIfCancelled(cancellation)
       let i = cursor
       cursor++
       if (i >= keys.length) { return }
       let q = questions[keys[i]] as Record<string, Object>
-      results[i] = await answerQuestion(keys[i], q, state, base, model, cloudKey)
+      results[i] = await answerQuestion(keys[i], q, state, base, model, cloudKey, cancellation)
+      throwIfCancelled(cancellation)
     }
   }
   let slotCount = Math.min(JEV_CONCURRENCY, keys.length)
   let workers: Promise<void>[] = []
   for (let w = 0; w < slotCount; w++) { workers.push(worker()) }
   await Promise.all(workers)
+  throwIfCancelled(cancellation)
   let answers: Record<string, Object> = {}
   let calibrated = 0
   for (let ans of results) {

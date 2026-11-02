@@ -3,9 +3,11 @@ import window from '@ohos.window'
 import { store } from '../vera/ProjectStore'
 import { consent } from '../vera/VeraConsentStore'
 import { projectIconResource } from '../vera/ProjectIcons'
+import { common } from '@kit.AbilityKit'
 import { app } from '../components/AppStyle'
 import { HOME_STARTERS, HomeStarter } from '../components/ChatStarters'
-import { ProjectNavParams, ProjectRow, confirmDeleteProject, loadProjectRows, tileTint } from '../components/ProjectRows'
+import { ProjectRow, confirmDeleteProject, loadProjectRows, tileTint } from '../components/ProjectRows'
+import { AppRouteParams } from '../vera/AppNavigation'
 
 /** Width of one label in the Chat / App switch, in vp. */
 const MODE_TAB_WIDTH: number = 112
@@ -24,9 +26,13 @@ const SHELF_HEIGHT: number = ZONE_HEIGHT + 160
 /** Side of an app's icon on the shelf, in vp. */
 const SHELF_ICON: number = 120
 
-@Entry
 @Component
-struct Index {
+export struct Index {
+  params: AppRouteParams = new AppRouteParams()
+  private backgroundPending: boolean = false
+
+  @Consume('navPathStack') pathStack: NavPathStack
+
   @State projects: ProjectRow[] = []
   /** What the box at the bottom is for: talking, or making an app. */
   @State makeApp: boolean = true
@@ -58,7 +64,6 @@ struct Index {
       this.keyboardWindow = win
       win.on('keyboardHeightChange', this.keyboardListener)
     }).catch((e: Error) => { console.warn('VERA keyboard listener unavailable: ' + e.message) })
-    this.reload()
   }
 
   aboutToDisappear(): void {
@@ -68,7 +73,7 @@ struct Index {
     }
   }
 
-  onPageShow(): void {
+  destinationShown(): void {
     this.reload()
   }
 
@@ -96,18 +101,18 @@ struct Index {
 
   /** `run` sends what was typed straight away; otherwise it waits in the box of the next page. */
   private openChat(prompt: string, run: boolean): void {
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/ChatPage', params: { prompt: prompt, run: run ? '1' : '' } })
-      .catch((e: Error): void => { console.error('Navigate to chats failed: ' + e.message) })
+    let nav = new AppRouteParams()
+    nav.prompt = prompt
+    nav.run = run ? '1' : ''
+    this.pathStack.pushPath({ name: 'chat', param: nav })
   }
 
   private openHistory(): void {
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/ChatListPage' })
-      .catch((e: Error): void => { console.error('Navigate to chat list failed: ' + e.message) })
+    this.pathStack.pushPath({ name: 'chatList', param: new AppRouteParams() })
   }
 
   private openApps(): void {
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/AppsPage' })
-      .catch((e: Error): void => { console.error('Navigate to apps failed: ' + e.message) })
+    this.pathStack.pushPath({ name: 'apps', param: new AppRouteParams() })
   }
 
   /**
@@ -115,8 +120,10 @@ struct Index {
    * and nothing is made until the first Save, which offers a name taken from the program.
    */
   private openCreate(prompt: string, run: boolean): void {
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/GeneratePage', params: { prompt: prompt, run: run ? '1' : '' } })
-      .catch((e: Error): void => { console.error('Navigate to generate failed: ' + e.message) })
+    let nav = new AppRouteParams()
+    nav.prompt = prompt
+    nav.run = run ? '1' : ''
+    this.pathStack.pushPath({ name: 'generate', param: nav })
   }
 
   /** What the box and a ready-made request do: go to the page of the current mode with the text, and start it if there is any. */
@@ -126,23 +133,47 @@ struct Index {
     if (this.makeApp) { this.openCreate(request, request.length > 0) } else { this.openChat(request, request.length > 0) }
   }
 
-  build() {
-    Column() {
-      this.topBar()
-      this.middle()
-      if (this.showApps) {
-        this.appsShelf()
-      } else {
-        if (!this.typing) {
-          this.zone()
-        }
-        this.promptBox()
-      }
+  private async backgroundAbility(): Promise<void> {
+    if (this.backgroundPending) { return }
+    this.backgroundPending = true
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext
+      if (context === undefined) { return }
+      await context.moveAbilityToBackground()
+    } catch (e) {
+      console.error('Move ability to background failed: ' + (e as Error).message)
+    } finally {
+      this.backgroundPending = false
     }
-    .width('100%')
-    .height('100%')
+  }
+
+  build() {
+    NavDestination() {
+      Column() {
+        this.topBar()
+        this.middle()
+        if (this.showApps) {
+          this.appsShelf()
+        } else {
+          if (!this.typing) {
+            this.zone()
+          }
+          this.promptBox()
+        }
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(app.background)
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    }
+    .hideTitleBar(true)
     .backgroundColor(app.background)
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    .onShown(() => { this.destinationShown() })
+    .onBackPressed(() => {
+      if (this.onBackPress()) { return true }
+      this.backgroundAbility()
+      return true
+    })
   }
 
   /** The saved chats, at the right. */
@@ -348,10 +379,9 @@ struct Index {
     }
     .width(SHELF_ICON + 12)
     .onClick(() => {
-      let nav = new ProjectNavParams()
+      let nav = new AppRouteParams()
       nav.projectId = row.project.id
-      this.getUIContext().getRouter().pushUrl({ url: 'pages/ProjectPage', params: nav })
-        .catch((e: Error): void => { console.error('Navigate to project failed: ' + e.message) })
+      this.pathStack.pushPath({ name: 'project', param: nav })
     })
     // The press that asks is its own confirmation: nothing is deleted before the dialog is answered.
     .gesture(LongPressGesture({ repeat: false }).onAction(() => {

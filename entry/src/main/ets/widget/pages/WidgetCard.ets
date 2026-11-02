@@ -1,4 +1,4 @@
-// VERA home-screen card. Tap to run the latest version, or open its project if unavailable.
+// VERA home-screen card. Tap to run the latest version in the same immersive mode as a desktop shortcut.
 // Binding data (injected via LocalStorage): { count, hasProjects, projects: [{id, name, icon}] }
 let widgetStorage = new LocalStorage()
 
@@ -31,15 +31,18 @@ struct WidgetCard {
           .width('100%')
           .padding({ left: 12, right: 12, top: 8, bottom: 8 })
           .onClick(() => {
-            // Navigation is a router action: a message callback runs in the
-            // background form extension, whose startAbility can be denied.
+            // Use the same launch mode as a desktop shortcut. EntryAbility
+            // then routes to isolatedRunner and enables immersive full-screen mode.
             postCardAction(this, {
               'action': 'router',
               'abilityName': 'EntryAbility',
-              'params': { 'projectId': project['id'], 'veraRun': '1' }
+              'params': { 'projectId': project['id'], 'launchMode': 'runLatest' }
             })
           })
-        }, (project: Record<string, string>) => project['id'])
+        // Include the display name and icon in the key: changing project properties must recreate its row.
+        }, (project: Record<string, string>) => project['id'] + ':' + project['name'] + ':' + project['icon'])
+
+
       } else {
         Column() {
           Text('No projects yet').fontSize(13).fontColor('#AAAAAA')

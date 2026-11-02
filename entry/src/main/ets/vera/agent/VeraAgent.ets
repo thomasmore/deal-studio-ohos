@@ -9,7 +9,7 @@
  * so those can change behind it. Never throws.
  */
 
-import { AgentHost } from './AgentHost'
+import { agentCancellation, checkAgent, AgentHost } from './AgentHost'
 import { BlockRequest, BlockFill } from '../SectionFill'
 import { CustomResult } from './AgentCustom'
 import { writeHole } from './AgentHole'
@@ -131,31 +131,39 @@ function withoutDeadInputs(comp: Composition, values: Map<string, string>[], pla
 }
 
 export async function runAgent(request: AgentRequest, host: AgentHost): Promise<AgentResult> {
+  checkAgent(host)
+  let cancellation = agentCancellation(host)
   let result = new AgentResult()
   let started = Date.now()
   // The picture of the screen while it is being made: the plan as it streams, then the parts and sections Jev chose, then
   // those sections with their content. Each is a whole program; one that does not compile is skipped and the next replaces it.
   let preview = (source: string): void => {
-    if (host.cancelled() || source.length === 0) { return }
+    if (cancellation.isCancelled() || source.length === 0) { return }
     try {
       host.preview(compileVeraSource(source).vbc2)
+      checkAgent(host)
       result.previews++
       if (result.firstPreviewMs === 0) { result.firstPreviewMs = Date.now() - started }
     } catch (_e) {
+      checkAgent(host)
+      if ((_e as Error).name === 'OperationCancelledError') { throw (_e as Error) }
     }
   }
   host.status(request.widget ? 'Sketching the widget...' : 'Composing...')
   let composed = await composeNeeds(request.prompt, host.askPlan, host.askJev, (partial: Sketch): void => {
     preview(provisionalProgram(partial, request.widget))
   }, request.widget, async (sketch: Sketch): Promise<string> => {
-    if (host.cancelled()) { return '' }
+    checkAgent(host)
     let settled = await askBlocking(request.prompt, sketch.questions, host.askJev, (q: AgentQuestion): Promise<PersonAnswer> => {
       host.status('Waiting for your answer...')
+      checkAgent(host)
       return host.ask(q)
-    }, result.asked)
+    }, result.asked, cancellation)
+    checkAgent(host)
     if (settled.length > 0) { host.status('Planning again with your answer...') }
     return settled
-  }, request.scene, request.sceneAllowed)
+  }, request.scene, request.sceneAllowed, cancellation)
+  checkAgent(host)
   result.composed = composed
   result.note = composed.note
   let planning = Date.now() - started
@@ -169,7 +177,8 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
   if (composed.composition !== null && alignIsEnabled() && !host.cancelled() && alignCandidates(composed.composition!).length > 0) {
     host.status('Looking for ready-made parts...')
     let alignStart = Date.now()
-    let aligned = await alignLeftovers(composed.composition!, request.prompt, host.askJev)
+    let aligned = await alignLeftovers(composed.composition!, request.prompt, host.askJev, cancellation)
+    checkAgent(host)
     addStage(result.stages, 'Looking for ready-made parts', WHO_JEV, Date.now() - alignStart)
     if (aligned.asked.length > 0 || aligned.note.length > 0) {
       result.align = aligned
@@ -201,7 +210,10 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
       // does: the composer counts on the section for what it left out of the plan, and the defaults leave it off.
       if (specsOf(comp.blocks).some((sp: FragmentSpec | null): boolean => sp !== null && sp.slots.length > 0)) {
         let slotStart = Date.now()
-        blocks.slotValues = readSlotValues(await host.askJev(buildSlotRequest(request.prompt, comp.blocks)), comp.blocks)
+        checkAgent(host)
+        let slotReply = await host.askJev(buildSlotRequest(request.prompt, comp.blocks))
+        checkAgent(host)
+        blocks.slotValues = readSlotValues(slotReply, comp.blocks)
         addStage(result.stages, 'What each section offers', WHO_JEV, Date.now() - slotStart)
         let specs = specsOf(comp.blocks)
         let provided: string[] = []
@@ -217,7 +229,9 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
       }
       let fillStart = Date.now()
       let fillTools = toolCount()
+      checkAgent(host)
       let fill = await host.fillBlocks(blocks)
+      checkAgent(host)
       let fillMs = Date.now() - fillStart
       let named = Math.max(0, fill.searchMs) + fill.contentMs + fill.holesMs
       // The phone-function lookups a hole makes before the model writes it are the phone's wait, not the model's.
@@ -240,7 +254,8 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
     // What was left out because a section is said to do it is checked against the screen the sections make.
     let claimStart = Date.now()
     if (ready && comp.claimed.length > 0 && !host.cancelled()) {
-      let missing = await claimsUndone(comp.claimed, request.prompt, assemblePlan(plan, true), host.askJev)
+      let missing = await claimsUndone(comp.claimed, request.prompt, assemblePlan(plan, true), host.askJev, cancellation)
+      checkAgent(host)
       if (missing.length > 0) {
         putBack(plan, missing)
         result.note += '; not done by the sections said to do it: ' + missing.join('; ')
@@ -254,7 +269,8 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
       let byPart = own < 0
       if (byPart) { own = plan.components.findIndex((c: PlanComponent): boolean => c.fill === FILL_PART) }
       let open = plan.toWrite().filter((s: PlanSlot): boolean => !s.phone && s.id.startsWith('custom.') && !s.need.startsWith('the figure "'))
-      let done = own < 0 || open.length === 0 ? [] : await claimsDone(open.map((s: PlanSlot): string => s.need), request.prompt, assemblePlan(plan, true), host.askJev)
+      let done = own < 0 || open.length === 0 ? [] : await claimsDone(open.map((s: PlanSlot): string => s.need), request.prompt, assemblePlan(plan, true), host.askJev, cancellation)
+      checkAgent(host)
       if (done.length > 0) {
         for (let slot of open) { if (done.indexOf(slot.need) >= 0) { plan.fillWith(slot, byPart ? FILL_PART : FILL_BLOCK, own, 'already on the screen') } }
         result.note += '; already on the screen: ' + done.join('; ')
@@ -265,7 +281,9 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
       host.status('Writing the rest...')
       let writeStart = Date.now()
       let writeTools = toolCount()
+      checkAgent(host)
       let written = await writeHole(plan, request.prompt, customInputs(comp), host, [], partsContract(comp))
+      checkAgent(host)
       result.custom = written
       let wrote = Date.now() - writeStart
       let lookups = Math.min(toolSpanSince(writeTools), wrote)
@@ -287,7 +305,9 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
   }
   if (composed.source.length > 0) {
     let settleStart = Date.now()
+    checkAgent(host)
     let settled = await settleProgram(composed.source, request.prompt, host)
+    checkAgent(host)
     addStage(result.stages, 'Compile and run once', WHO_PHONE, settled.checkMs)
     addStage(result.stages, 'Repair by edits', WHO_MODEL, Date.now() - settleStart - settled.checkMs)
     result.checkMs = settled.checkMs
@@ -304,6 +324,7 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
       result.note += '; ' + settled.errors
     }
   }
+  checkAgent(host)
   result.ms = Date.now() - started
   return result
 }

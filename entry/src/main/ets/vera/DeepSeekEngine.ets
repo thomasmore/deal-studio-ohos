@@ -48,7 +48,8 @@ import { findIntentFunctionByEmbedding } from './VeraIntentEmbeddingCache'
 import { findUiComponentsByEmbedding } from './VeraUiIndex'
 import { describeComponents, optionalComponents } from './VeraUiCatalog'
 import { TurnTiming, logTurn, logStep, trace, traceTurn } from './VeraTiming'
-import { searchToolSchema, webSearch, SEARCH_TOOL_NAME } from './VeraWebSearch'
+import { searchToolSchema, webSearch, SEARCH_TOOL_NAME, SEARCH_CHARS } from './VeraWebSearch'
+import { OperationCancellation, OperationController, isCancelled, throwIfCancelled, cancellationError } from './OperationCancellation'
 import { noteService, httpFailure, SERVICE_DEEPSEEK } from './ServiceHealth'
 import { noteTool } from './ToolLog'
 import { LIVE_QUERY_PROMPT, parseLiveQuery } from './LiveFigures'
@@ -375,12 +376,15 @@ const SDK_ALSO_LIMIT = 3
  * intentResultsJson. Only an extra: a failing SDK search gives none rather than
  * taking the intent answer down with it.
  */
-async function curatedSdkAlso(need: string): Promise<SdkEntry[]> {
+async function curatedSdkAlso(need: string, cancellation?: OperationCancellation): Promise<SdkEntry[]> {
+  throwIfCancelled(cancellation)
   let ranked: SdkEntry[] = []
   try {
     let embedded = await findSdkFunctionByEmbedding(need, SDK_ALSO_DEPTH, isSdkTargetImplemented)
+    throwIfCancelled(cancellation)
     ranked = embedded !== null ? embedded : findSdkFunctionFromCache(need, SDK_ALSO_DEPTH, isSdkTargetImplemented)
   } catch (e) {
+    throwIfCancelled(cancellation)
     console.warn('VERA-INTENT-SDK-ALSO failed: ' + (e as Error).message)
     return []
   }
@@ -406,13 +410,16 @@ function mergedIntents(embedded: IntentEntry[] | null, token: IntentEntry[], bot
  * embedding ranking alone once left out MeeTime's SendTextMessage, which the keywords had first, for "sends a text message
  * to the partner's number".
  */
-export async function discoveryToolResult(name: string, need: string, round: number = 0, both: boolean = false): Promise<string> {
+export async function discoveryToolResult(name: string, need: string, round: number = 0, both: boolean = false,
+    cancellation?: OperationCancellation): Promise<string> {
+  throwIfCancelled(cancellation)
   let startedAt = Date.now()
   if (name === INTENT_TOOL_NAME) {
     let tokenResults = findIntentFunction(need, INTENT_SEARCH_LIMIT)
     let tokenMs = Date.now() - startedAt
     let embedStartedAt = Date.now()
     let embedResults = await findIntentFunctionByEmbedding(need, INTENT_SEARCH_LIMIT)
+    throwIfCancelled(cancellation)
     let embedMs = Date.now() - embedStartedAt
     console.info('VERA-INTENT-EMBED-CMP need="' + need + '" token=' + intentKeysList(tokenResults) +
       ' embedding=' + (embedResults === null ? 'n/a' : intentKeysList(embedResults)))
@@ -424,13 +431,17 @@ export async function discoveryToolResult(name: string, need: string, round: num
       ' embeddingFullMs=' + embedMs.toString() + ' callTotalMs=' + (Date.now() - startedAt).toString())
     noteTool(name, need, Date.now() - startedAt, true, 'found ' + results.length.toString() + ' via ' + (embedResults !== null ? 'embedding' : 'keywords') +
       ' (keywords ' + tokenMs.toString() + ' ms, embedding ' + embedMs.toString() + ' ms)')
-    return intentResultsJson(results, await curatedSdkAlso(need))
+    throwIfCancelled(cancellation)
+    let sdkAlso = await curatedSdkAlso(need, cancellation)
+    throwIfCancelled(cancellation)
+    return intentResultsJson(results, sdkAlso)
   }
   if (name === SDK_TOOL_NAME) {
     let tokenResults = findSdkFunctionFromCache(need, SDK_SEARCH_LIMIT, isSdkTargetImplemented)
     let tokenMs = Date.now() - startedAt
     let embedStartedAt = Date.now()
     let embedResults = await findSdkFunctionByEmbedding(need, SDK_SEARCH_LIMIT, isSdkTargetImplemented)
+    throwIfCancelled(cancellation)
     let embedMs = Date.now() - embedStartedAt
     console.info('VERA-SDK-EMBED-CMP need="' + need + '" token=' + sdkKeysList(tokenResults) +
       ' embedding=' + (embedResults === null ? 'n/a' : sdkKeysList(embedResults)))
@@ -517,7 +528,11 @@ export class DeepSeekEngine {
   private progress: GenerateProgress = new GenerateProgress()
   private onProgress: ProgressCallback = noProgress
   private generating: boolean = false
-  private cancelled: boolean = false
+  private operationCancellation: OperationController = new OperationController()
+  private ownerCancellation?: OperationCancellation
+  private activeOperations: DeepSeekEngine[] = []
+  private generationVersion: number = 0
+  private sideCallsVersion: number = 0
   private buffer: string = ''
   private rawBody: string = ''
   private text: string = ''
@@ -544,7 +559,9 @@ export class DeepSeekEngine {
    */
   setThinking(enabled: boolean): void { this.thinking = enabled }
 
-  isGenerating(): boolean { return this.generating }
+  isGenerating(): boolean {
+    return this.generating || this.activeOperations.some((worker: DeepSeekEngine): boolean => !isCancelled(worker.operationCancellation))
+  }
   isReady(): boolean { return settings.hasApiKey() }
   lastCacheHitTokens(): number { return this.cacheHitTokens }
   /** Time until the model said anything at all -- reading the prompt. */
@@ -562,10 +579,26 @@ export class DeepSeekEngine {
   lastInputTokens(): number { return this.inputTokens }
 
   private sideCalls: SideCall[] = []
+  private sideCallOwners: Map<SideCall, OperationCancellation> = new Map<SideCall, OperationCancellation>()
   /** Forget the small calls of the previous run; the Generate screen calls it when a run starts. */
-  clearSideCalls(): void { this.sideCalls = [] }
+  clearSideCalls(): void {
+    this.sideCalls = []
+    this.sideCallOwners.clear()
+    this.sideCallsVersion++
+  }
   /** The small calls of this run, oldest first. */
-  getSideCalls(): SideCall[] { return this.sideCalls.slice() }
+  getSideCalls(cancellation?: OperationCancellation): SideCall[] {
+    return cancellation === undefined ? this.sideCalls.slice() :
+      this.sideCalls.filter((call: SideCall): boolean => this.sideCallOwners.get(call) === cancellation)
+  }
+
+  private publishSideCalls(worker: DeepSeekEngine, version: number): void {
+    if (version !== this.sideCallsVersion) { return }
+    for (let call of worker.sideCalls) {
+      this.sideCalls.push(call)
+      if (worker.ownerCancellation !== undefined) { this.sideCallOwners.set(call, worker.ownerCancellation) }
+    }
+  }
   private recordSideCall(purpose: string, startedAt: number, turn: StreamTurn | null): void {
     let call = new SideCall()
     call.purpose = purpose
@@ -580,22 +613,79 @@ export class DeepSeekEngine {
     this.sideCalls.push(call)
   }
 
+  private newOperation(cancellation?: OperationCancellation): DeepSeekEngine {
+    throwIfCancelled(cancellation)
+    let worker = new DeepSeekEngine()
+    worker.thinking = this.thinking
+    worker.ownerCancellation = cancellation
+    worker.generating = true
+    this.activeOperations.push(worker)
+    return worker
+  }
+
+  private async runOperation<T>(worker: DeepSeekEngine, operation: () => Promise<T>,
+      publish: () => void): Promise<T> {
+    let unsubscribe = (): void => {}
+    let unsubscribeOwner = (): void => {}
+    try {
+      let interrupted = new Promise<T>((_resolve, reject): void => {
+        unsubscribe = worker.operationCancellation.onCancel((): void => {
+          reject(cancellationError())
+          let client = worker.client
+          if (client !== null) { worker.cleanup(client) }
+        })
+      })
+      if (worker.ownerCancellation !== undefined) {
+        unsubscribeOwner = worker.ownerCancellation.onCancel((): void => { worker.operationCancellation.cancel() })
+      }
+      let running = Promise.resolve().then((): Promise<T> => {
+        throwIfCancelled(worker.operationCancellation)
+        return operation()
+      })
+      let result = await Promise.race([running, interrupted])
+      throwIfCancelled(worker.operationCancellation)
+      publish()
+      return result
+    } finally {
+      unsubscribeOwner()
+      unsubscribe()
+      worker.operationCancellation.cancel()
+      worker.onProgress = noProgress
+      worker.generating = false
+      let client = worker.client
+      if (client !== null) { worker.cleanup(client) }
+      this.activeOperations = this.activeOperations.filter((item: DeepSeekEngine): boolean => item !== worker)
+    }
+  }
+
+  private publishMetrics(worker: DeepSeekEngine): void {
+    this.inputTokens = worker.inputTokens
+    this.outputTokens = worker.outputTokens
+    this.cacheHitTokens = worker.cacheHitTokens
+    this.finishReason = worker.finishReason
+    this.toolRounds = worker.toolRounds
+    this.startedAt = worker.startedAt
+    this.firstAnyAt = worker.firstAnyAt
+    this.firstContentAt = worker.firstContentAt
+  }
+
   async generate(request: GenerateRequest, onToken: TokenCallback,
-      onProgress: ProgressCallback = noProgress): Promise<GenerateResult> {
+      onProgress: ProgressCallback = noProgress, cancellation?: OperationCancellation): Promise<GenerateResult> {
+    throwIfCancelled(cancellation)
     let key = settings.getApiKey()
     if (key.length === 0) {
       throw new Error('No cloud API key. Send one with: aa start -a EntryAbility -b com.vera.probe.dyn --ps deepseekKey <key> (or --ps cloudKey <key>)')
     }
-    this.progress = new GenerateProgress()
-    this.onProgress = onProgress
-    try {
-      return await this.generateRounds(request, onToken)
-    } finally {
-      this.onProgress = noProgress
-    }
+    let worker = this.newOperation(cancellation)
+    let version = ++this.generationVersion
+    worker.onProgress = onProgress
+    return this.runOperation<GenerateResult>(worker, (): Promise<GenerateResult> => worker.generateRounds(request, onToken), (): void => {
+      if (version === this.generationVersion) { this.publishMetrics(worker) }
+    })
   }
 
   private report(phase: string): void {
+    if (isCancelled(this.operationCancellation)) { return }
     this.progress.phase = phase
     this.onProgress(this.progress)
   }
@@ -607,7 +697,7 @@ export class DeepSeekEngine {
     this.outputTokens = 0
     this.cacheHitTokens = 0
     this.finishReason = ''
-    this.cancelled = false
+    throwIfCancelled(this.operationCancellation)
     this.generating = true
     this.uiToolOffered = request.uiTool
     this.toolRounds = 0
@@ -641,9 +731,11 @@ export class DeepSeekEngine {
     }
 
     let round = 0
+    let cachedTokens = 0
     let turn: StreamTurn = new StreamTurn()
     let stillAsking = false
     while (round < MAX_TOOL_ROUNDS) {
+      throwIfCancelled(this.operationCancellation)
       round++
       this.searchToolOffered = canSearch && searches < MAX_SEARCHES_GEN
       this.progress.round = round
@@ -658,11 +750,12 @@ export class DeepSeekEngine {
         this.generating = false
         throw e as Error
       }
+      throwIfCancelled(this.operationCancellation)
       this.inputTokens = this.inputTokens + turn.inputTokens
       this.outputTokens = this.outputTokens + turn.outputTokens
       this.cacheHitTokens = turn.cacheHitTokens
+      cachedTokens += turn.cacheHitTokens
       this.finishReason = turn.finishReason
-      if (this.cancelled) { break }
       if (turn.finishReason !== 'tool_calls' || turn.toolCalls.length === 0) {
         this.text += turn.content
         stillAsking = false
@@ -677,6 +770,7 @@ export class DeepSeekEngine {
       // in the order they were asked.
       let pendingResults: Promise<Record<string, Object>>[] = []
       for (let call of turn.toolCalls) {
+        throwIfCancelled(this.operationCancellation)
         toolNames.push(call.name)
         if (call.name === SEARCH_TOOL_NAME) {
           // One round can ask for several searches; the budget counts each call, not each round.
@@ -686,9 +780,10 @@ export class DeepSeekEngine {
           }
           searches++
         }
-        pendingResults.push(this.runToolCall(call, request, round))
+        pendingResults.push(Promise.resolve().then((): Promise<Record<string, Object>> => this.runToolCall(call, request, round)))
       }
       let results = await Promise.all(pendingResults)
+      throwIfCancelled(this.operationCancellation)
       for (let r of results) { messages.push(r) }
       logStep('tools', toolsStartedAt, 'src=gen round=' + round.toString() + ' calls=' + toolNames.join(','))
     }
@@ -705,7 +800,8 @@ export class DeepSeekEngine {
     // place of a program, losing the attempt.
     // TODO: belongs in a proper harness -- a lookup budget the model is told
     // about up front, not a cut-off it discovers in the last round.
-    if (stillAsking && !this.cancelled) {
+    throwIfCancelled(this.operationCancellation)
+    if (stillAsking) {
       this.progress.round = round + 1
       this.report('request')
       messages.push(plainMessage('user', 'The lookup budget is used up. Do not call or write out any tool call. ' +
@@ -713,8 +809,10 @@ export class DeepSeekEngine {
         'use what the catalogue offers and show the limitation in the app.'))
       try {
         let final = await this.streamOnce(messages, request.temperature, request.maxTokens, onToken, TOOLS_NONE, 'gen', round + 1)
+        throwIfCancelled(this.operationCancellation)
         this.inputTokens = this.inputTokens + final.inputTokens
         this.outputTokens = this.outputTokens + final.outputTokens
+        cachedTokens += final.cacheHitTokens
         this.finishReason = final.finishReason
         this.text += final.content
       } catch (e) {
@@ -729,12 +827,18 @@ export class DeepSeekEngine {
     result.text = request.repairByEdit ? this.text.trim() : extractVeraSource(this.text)
     result.inputTokens = this.inputTokens
     result.outputTokens = this.outputTokens
+    result.cacheHitTokens = cachedTokens
+    result.finishReason = this.finishReason
+    result.prefillMs = this.lastPrefillMs()
+    result.thinkMs = this.lastThinkMs()
+    result.toolRounds = this.toolRounds
     return result
   }
 
   /** Runs one discovery call of a tool round and returns its tool message. */
   private async runToolCall(call: ToolCallAccumulator, request: GenerateRequest,
       round: number): Promise<Record<string, Object>> {
+    throwIfCancelled(this.operationCancellation)
     let need = ''
     let query = ''
     try {
@@ -751,15 +855,18 @@ export class DeepSeekEngine {
     this.progress.tool = call.name
     this.progress.need = need
     this.report('tool')
+    throwIfCancelled(this.operationCancellation)
     let callStartedAt = Date.now()
     if (call.name === INTENT_TOOL_NAME || call.name === SDK_TOOL_NAME) {
-      let result = await discoveryToolResult(call.name, need, round)
+      let result = await discoveryToolResult(call.name, need, round, false, this.operationCancellation)
+      throwIfCancelled(this.operationCancellation)
       traceTool('gen', round, call.name, need, callStartedAt, result)
       return toolResultMessage(call.id, result)
     }
     if (call.name === SEARCH_TOOL_NAME) {
       console.info('VERA-SEARCH-TOOL round=' + round.toString() + ' query="' + query + '"')
-      let found = await webSearch(query)
+      let found = await webSearch(query, SEARCH_CHARS, this.operationCancellation)
+      throwIfCancelled(this.operationCancellation)
       traceTool('gen', round, call.name, query, callStartedAt, found)
       return toolResultMessage(call.id, found)
     }
@@ -771,6 +878,7 @@ export class DeepSeekEngine {
         note = 'Every component is already described in the system prompt.'
       } else {
         let found = await findUiComponentsByEmbedding(need, UI_SEARCH_LIMIT, shown)
+        throwIfCancelled(this.operationCancellation)
         if (found !== null) {
           names = found
         } else {
@@ -799,7 +907,21 @@ export class DeepSeekEngine {
    * budget, like extractUiNeeds; null on any failure, and the caller generates from scratch.
    */
   async extractSketch(systemPrompt: string, userPrompt: string,
-      onText: (soFar: string) => void = (_t: string): void => {}, thinking: boolean = false): Promise<string | null> {
+      onText: (soFar: string) => void = (_t: string): void => {}, thinking: boolean = false,
+      cancellation?: OperationCancellation): Promise<string | null> {
+    throwIfCancelled(cancellation)
+    if (!settings.hasApiKey()) { return null }
+    let worker = this.newOperation(cancellation)
+    let version = this.sideCallsVersion
+    return this.runOperation<string | null>(worker,
+      (): Promise<string | null> => worker.extractSketchInternal(systemPrompt, userPrompt, onText, thinking), (): void => {
+        this.publishSideCalls(worker, version)
+      })
+  }
+
+  private async extractSketchInternal(systemPrompt: string, userPrompt: string,
+      onText: (soFar: string) => void, thinking: boolean): Promise<string | null> {
+    throwIfCancelled(this.operationCancellation)
     if (!settings.hasApiKey()) { return null }
     let messages: Record<string, Object>[] = []
     messages.push(plainMessage('system', systemPrompt))
@@ -807,19 +929,22 @@ export class DeepSeekEngine {
     let savedThinking = this.thinking
     // Off, except for the last try at a plan when the quick ones could not be used (VeraCompose.ets's usablePlan).
     this.thinking = thinking
-    this.cancelled = false
+    throwIfCancelled(this.operationCancellation)
     this.generating = true
     let startedAt = Date.now()
     try {
       let soFar = ''
       let turn = await this.streamOnce(messages, 0, thinking ? 6000 : 1500, (token: string): void => {
+        if (isCancelled(this.operationCancellation)) { return }
         soFar += token
         onText(soFar)
       }, TOOLS_OFF, 'sketch', 1)
+      throwIfCancelled(this.operationCancellation)
       console.info('VERA-COMPOSE sketch ms=' + (Date.now() - startedAt).toString())
       this.recordSideCall(thinking ? 'Plan of needs, thinking' : 'Plan of needs', startedAt, turn)
       return turn.content
     } catch (e) {
+      throwIfCancelled(this.operationCancellation)
       console.warn('VERA-COMPOSE sketch failed: ' + (e as Error).message)
       this.recordSideCall(thinking ? 'Plan of needs, thinking' : 'Plan of needs', startedAt, null)
       return null
@@ -830,18 +955,29 @@ export class DeepSeekEngine {
   }
 
   async extractUiNeeds(userPrompt: string): Promise<string[] | null> {
-    // Same guard as extractTemplateContent: a stale run must not take the engine's flags from a generation.
-    if (!settings.hasApiKey() || this.generating) { return null }
+    if (!settings.hasApiKey() || this.isGenerating()) { return null }
+    let worker = this.newOperation()
+    let version = this.sideCallsVersion
+    return this.runOperation<string[] | null>(worker,
+      (): Promise<string[] | null> => worker.extractUiNeedsInternal(userPrompt), (): void => {
+        this.publishSideCalls(worker, version)
+      })
+  }
+
+  private async extractUiNeedsInternal(userPrompt: string): Promise<string[] | null> {
+    throwIfCancelled(this.operationCancellation)
+    if (!settings.hasApiKey()) { return null }
     let messages: Record<string, Object>[] = []
     messages.push(plainMessage('system', UI_NEEDS_PROMPT))
     messages.push(plainMessage('user', userPrompt))
     let savedThinking = this.thinking
     this.thinking = false
-    this.cancelled = false
+    throwIfCancelled(this.operationCancellation)
     this.generating = true
     let startedAt = Date.now()
     try {
       let turn = await this.streamOnce(messages, 0, 300, (_token: string): void => {}, TOOLS_OFF, 'uineeds', 1)
+      throwIfCancelled(this.operationCancellation)
       this.recordSideCall('Pick the UI components', startedAt, turn)
       let text = extractVeraSource(turn.content)
       let start = text.indexOf('[')
@@ -855,6 +991,7 @@ export class DeepSeekEngine {
       console.info('VERA-UI-NEEDS ms=' + (Date.now() - startedAt).toString() + ' needs=[' + needs.join(' | ') + ']')
       return needs.length > 0 ? needs : null
     } catch (e) {
+      throwIfCancelled(this.operationCancellation)
       console.warn('VERA-UI-NEEDS failed: ' + (e as Error).message)
       this.recordSideCall('Pick the UI components', startedAt, null)
       return null
@@ -868,30 +1005,11 @@ export class DeepSeekEngine {
    * The search query for a current figure the requested app shows (LiveFigures.ets), '' when it shows none or on any
    * failure. Thinking off and a small budget, like extractUiNeeds.
    */
-  async extractLiveQuery(userPrompt: string): Promise<string> {
-    if (!settings.hasApiKey() || this.generating) { return '' }
-    let messages: Record<string, Object>[] = []
-    messages.push(plainMessage('system', LIVE_QUERY_PROMPT))
-    messages.push(plainMessage('user', userPrompt))
-    let savedThinking = this.thinking
-    this.thinking = false
-    this.cancelled = false
-    this.generating = true
-    let startedAt = Date.now()
-    try {
-      let turn = await this.streamOnce(messages, 0, 60, (_token: string): void => {}, TOOLS_OFF, 'livequery', 1)
-      this.recordSideCall('Does it need current figures', startedAt, turn)
-      let query = parseLiveQuery(turn.content)
-      console.info('VERA-LIVE-QUERY ms=' + (Date.now() - startedAt).toString() + ' query=' + query)
-      return query
-    } catch (e) {
-      console.warn('VERA-LIVE-QUERY failed: ' + (e as Error).message)
-      this.recordSideCall('Does it need current figures', startedAt, null)
-      return ''
-    } finally {
-      this.thinking = savedThinking
-      this.generating = false
-    }
+  async extractLiveQuery(userPrompt: string, cancellation?: OperationCancellation): Promise<string> {
+    let answer = await this.extractTemplateContent(LIVE_QUERY_PROMPT, userPrompt, 60,
+      'Does it need current figures', false, cancellation)
+    throwIfCancelled(cancellation)
+    return parseLiveQuery(answer === null ? '' : answer)
   }
 
   /**
@@ -905,24 +1023,39 @@ export class DeepSeekEngine {
    * request this engine makes, not a second generation attempt.
    */
   async extractTemplateContent(systemPrompt: string, userPrompt: string, maxTokens: number,
-      purpose: string = 'Text for the blocks', thinking: boolean = false): Promise<string | null> {
-    // The engine holds one request and one set of flags: a stale template run must not take them from a generation.
-    if (!settings.hasApiKey() || this.generating) { return null }
+      purpose: string = 'Text for the blocks', thinking: boolean = false,
+      cancellation?: OperationCancellation): Promise<string | null> {
+    throwIfCancelled(cancellation)
+    if (!settings.hasApiKey()) { return null }
+    let worker = this.newOperation(cancellation)
+    let version = this.sideCallsVersion
+    return this.runOperation<string | null>(worker,
+      (): Promise<string | null> => worker.extractTemplateContentInternal(systemPrompt, userPrompt, maxTokens, purpose, thinking), (): void => {
+        this.publishSideCalls(worker, version)
+      })
+  }
+
+  private async extractTemplateContentInternal(systemPrompt: string, userPrompt: string, maxTokens: number,
+      purpose: string, thinking: boolean): Promise<string | null> {
+    throwIfCancelled(this.operationCancellation)
+    if (!settings.hasApiKey()) { return null }
     let messages: Record<string, Object>[] = []
     messages.push(plainMessage('system', systemPrompt))
     messages.push(plainMessage('user', userPrompt))
     let savedThinking = this.thinking
     // Off, except for the agent's last try at a section that failed without it (agent/AgentCustom.ets).
     this.thinking = thinking
-    this.cancelled = false
+    throwIfCancelled(this.operationCancellation)
     this.generating = true
     let startedAt = Date.now()
     try {
       let turn = await this.streamOnce(messages, 0.2, maxTokens, (_token: string): void => {}, TOOLS_OFF, 'template', 1)
+      throwIfCancelled(this.operationCancellation)
       this.recordSideCall(purpose, startedAt, turn)
       console.info('VERA-TEMPLATE-CONTENT ms=' + (Date.now() - startedAt).toString())
       return extractVeraSource(turn.content)
     } catch (e) {
+      throwIfCancelled(this.operationCancellation)
       this.recordSideCall(purpose, startedAt, null)
       console.warn('VERA-TEMPLATE-CONTENT failed: ' + (e as Error).message)
       return null
@@ -932,25 +1065,25 @@ export class DeepSeekEngine {
     }
   }
 
-  stop(): void {
-    if (!this.generating) { return }
-    this.cancelled = true
-    let client = this.client
-    if (client !== null) {
-      try { client!.destroy() } catch (_e) {}
+  stop(cancellation?: OperationCancellation): void {
+    for (let worker of this.activeOperations.slice()) {
+      if (cancellation === undefined || worker.ownerCancellation === cancellation) {
+        worker.operationCancellation.cancel()
+      }
     }
-    this.generating = false
   }
 
   private cleanup(client: http.HttpRequest): void {
+    if (this.client !== client) { return }
+    this.client = null
     try { client.off('dataReceive') } catch (_e) {}
     try { client.destroy() } catch (_e) {}
-    this.client = null
   }
 
   /** One request/response cycle: sends `messages`, returns what streamed back. */
   private async streamOnce(messages: Record<string, Object>[], temperature: number,
       maxTokens: number, onToken: TokenCallback, tools: string, src: string, round: number): Promise<StreamTurn> {
+    throwIfCancelled(this.operationCancellation)
     let key = settings.getApiKey()
     this.buffer = ''
     this.rawBody = ''
@@ -962,6 +1095,7 @@ export class DeepSeekEngine {
     let decoder = util.TextDecoder.create('utf-8')
 
     client.on('dataReceive', (chunk: ArrayBuffer): void => {
+      if (isCancelled(this.operationCancellation) || this.client !== client) { return }
       let piece = ''
       try {
         piece = decoder.decodeToString(new Uint8Array(chunk), { stream: true })
@@ -978,6 +1112,7 @@ export class DeepSeekEngine {
     turn.timing.bodyChars = body.length
     turn.timing.sentAt = Date.now()
     try {
+      throwIfCancelled(this.operationCancellation)
       let header: Record<string, string> = {}
       header['Content-Type'] = 'application/json'
       header['Accept'] = 'text/event-stream'
@@ -989,17 +1124,15 @@ export class DeepSeekEngine {
         connectTimeout: 15000,
         readTimeout: 300000
       })
+      throwIfCancelled(this.operationCancellation)
     } catch (e) {
-      if (this.cancelled) {
-        // stop() destroyed the client mid-flight; keep whatever streamed in.
-        code = 200
-      } else {
-        this.cleanup(client)
-        noteService(SERVICE_DEEPSEEK, false, (e as Error).message)
-        throw new Error(settings.providerLabel() + ' request failed: ' + (e as Error).message)
-      }
+      throwIfCancelled(this.operationCancellation)
+      noteService(SERVICE_DEEPSEEK, false, (e as Error).message)
+      throw new Error(settings.providerLabel() + ' request failed: ' + (e as Error).message)
+    } finally {
+      this.cleanup(client)
     }
-    this.cleanup(client)
+    throwIfCancelled(this.operationCancellation)
     if (code !== 200) {
       noteService(SERVICE_DEEPSEEK, false, httpFailure(code, this.rawBody))
       throw new Error(httpErrorMessage(code, this.rawBody))
@@ -1077,6 +1210,7 @@ export class DeepSeekEngine {
     this.buffer += piece
     let nl = this.buffer.indexOf('\n')
     while (nl >= 0) {
+      if (isCancelled(this.operationCancellation)) { return }
       let line = this.buffer.substring(0, nl)
       this.buffer = this.buffer.substring(nl + 1)
       this.handleLine(line.trim(), turn, pending, onToken)
@@ -1086,6 +1220,7 @@ export class DeepSeekEngine {
 
   private handleLine(line: string, turn: StreamTurn, pending: Map<number, ToolCallAccumulator>,
       onToken: TokenCallback): void {
+    if (isCancelled(this.operationCancellation)) { return }
     if (line.length === 0 || !line.startsWith('data:')) { return }
     let payload = line.substring(5).trim()
     if (payload.length === 0 || payload === '[DONE]') { return }
@@ -1108,6 +1243,7 @@ export class DeepSeekEngine {
           turn.reasoning += reasoning as string
           if (this.firstAnyAt === 0) { this.firstAnyAt = Date.now() }
           if (this.progress.phase !== 'thinking') { this.report('thinking') }
+          if (isCancelled(this.operationCancellation)) { return }
         }
         let content = delta['content']
         if (typeof content === 'string') {
