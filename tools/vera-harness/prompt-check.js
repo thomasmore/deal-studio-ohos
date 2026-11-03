@@ -213,16 +213,16 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     const src=read('entry/src/main/ets/pages/GeneratePage.ets');
     const icons=read('entry/src/main/ets/components/IconPicker.ets');
     const prefix=icons.slice(0,icons.indexOf('@Component')).replace(/^import .*$/gm,'').replace(/^export /gm,'')+'\n'+src.slice(0,src.indexOf('@Component')).replace(/^import .*$/gm,'');
-    const code=prefix+'\nclass Controller { saveIcon = DEFAULT_APP_ICON; '+['beginOperation','doServerGenerate','aboutToDisappear','hostContext','callModel','runAttempt','doRefine','traceEnd','closeRun','doGenerate','tryLiveFigures','tryRoute','traceAgent','showAgent','settleQuestion','askPerson','startAttemptOne','tryStructuralEdit','refineWithModel','stopGeneration','originLabel','measuredTotal','addMetricUsage','metricWork','collectMetricSideCalls','beginMetricAttempt','recordMetricResult','finishMetrics','acceptRequest','copyMetrics','prepareRequest','currentBase','ratePerMillion','modeLabel','hasResult','doSave','confirmName','cancelName','afterSave','close','commitSave','versionCount','isSaved'].map(n=>method(src,n)).join('\n')+' } module.exports=Controller;';
+    const code=prefix+'\nclass Controller { saveIcon = DEFAULT_APP_ICON; '+['beginOperation','resetRunMetrics','startFresh','startNew','doServerGenerate','aboutToDisappear','hostContext','callModel','runAttempt','doRefine','traceEnd','closeRun','doGenerate','tryLiveFigures','tryRoute','traceAgent','showAgent','settleQuestion','askPerson','startAttemptOne','tryStructuralEdit','refineWithModel','stopGeneration','originLabel','measuredTotal','addMetricUsage','metricWork','collectMetricSideCalls','beginMetricAttempt','recordMetricResult','finishMetrics','acceptRequest','copyMetrics','prepareRequest','currentBase','ratePerMillion','modeLabel','hasResult','doSave','confirmName','cancelName','afterSave','close','commitSave','versionCount','isSaved'].map(n=>method(src,n)).join('\n')+' } module.exports=Controller;';
     const compiled=ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020},reportDiagnostics:true});
     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'Extracted generation controller syntax');
-    const versions=[],projects=[],toasts=[];
+    const versions=[],projects=[],toasts=[],scrollEdges=[];
     const globals={AppRouteParams:load(path.join(base,'AppNavigation.ets')).AppRouteParams,
       ...load(path.join(base,'AppName.ets')),refreshForms:()=>{},
       store:{createProject(name,icon){const project={id:'project-'+(projects.length+1),name,icon};projects.push(project);return project;},
         createVersion(projectId,source,vbc2,note,prompt,origin,composition,lastPrompt,parentVersionId,metrics){const version={id:'version-'+(versions.length+1),projectId,source,vbc2,note,prompt,origin,composition,lastPrompt,parentVersionId,metrics};versions.push(version);return version;},
         listVersions:projectId=>versions.filter(version=>version.projectId===projectId)},
-      animateTo:(options,update)=>update(),Curve:{EaseInOut:0},ensureCapabilities:async()=>{},logStep:()=>{},logMark:()=>{},trace:(name,fields)=>{traces.push({name,fields});},
+      animateTo:(options,update)=>update(),Curve:{EaseInOut:0},Edge:{Top:'top'},ensureCapabilities:async()=>{},logStep:()=>{},logMark:()=>{},trace:(name,fields)=>{traces.push({name,fields});},
       OperationController,throwIfCancelled,http,surfaceRouteEnabled:()=>false,drawsSurface:()=>false,
       composeEnabled:()=>side.compose,composePlanEnabled:()=>false,templateSelectEnabled:()=>true,
       buildScreen:(...a)=>tpl.build(...a),RouteRequest:route.RouteRequest,OUTCOME_AGENT:route.OUTCOME_AGENT,OUTCOME_CANCELLED:route.OUTCOME_CANCELLED,
@@ -238,7 +238,7 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     const c=new mod.exports();
     const host={filesDir:'/fixture',resourceManager:{}};
     c.getUIContext=()=>({getHostContext:()=>host,animateTo:(options,update)=>update(),getPromptAction:()=>({showToast:toast=>toasts.push(toast)})});
-    Object.assign(c,{resourcesLoaded:true,runOnOpen:false,projectId:'',baseVersionId:'',baseVersionNumber:0,nextVersionNumber:1,savedVbc2:'',naming:false,saveName:'',iconsOpen:false,leaveAfterSave:false,closing:false,pendingBase:null,acceptedBase:null,versions,projects,toasts,pathStack:{pop(){}},activeOperation:new OperationController(),activeServerAbort:null,activeServerAbortRun:-1,modelReady:true,skillText:'',promptTemplate:skill,surfaceGuide:'',liveState:'',stages:[],sideCalls:[],disposed:false,keyboardWindow:null,lastRequest:'',questionText:'',questionOptions:[],questionFallback:0,answerQuestion:null,mode:'deepseek',attempt:1,systemPrompt:skill,uiSelected:[],grammar:'',previousSource:'',failedSource:'',
+    Object.assign(c,{resourcesLoaded:true,runOnOpen:false,projectId:'',baseVersionId:'',baseVersionNumber:0,nextVersionNumber:1,savedVbc2:'',naming:false,saveName:'',iconsOpen:false,leaveAfterSave:false,closing:false,pendingBase:null,acceptedBase:null,versions,projects,toasts,scrollEdges,scroller:{scrollEdge:edge=>scrollEdges.push(edge)},pathStack:{pop(){}},activeOperation:new OperationController(),activeServerAbort:null,activeServerAbortRun:-1,modelReady:true,skillText:'',promptTemplate:skill,surfaceGuide:'',liveState:'',stages:[],sideCalls:[],disposed:false,keyboardWindow:null,lastRequest:'',questionText:'',questionOptions:[],questionFallback:0,answerQuestion:null,mode:'deepseek',attempt:1,systemPrompt:skill,uiSelected:[],grammar:'',previousSource:'',failedSource:'',
       attempts:[],compiledVbc2:'',cancelRequested:false,completionBase:'',completionBaseVbc2:'',completionComposition:'',compositionJson:'',templateKinds:[],modelWrote:false,runId:0,prompt:'',refinePrompt:'',repairByEdit:true,genStartTime:Date.now(),generatedSource:'',generating:true,
       metricTotals:{runs:0,attempts:0,elapsedMs:0,inputTokens:-1,cacheHitTokens:-1,outputTokens:-1,estimatedUsd:-1,partial:false},metricRunId:-1,metricMode:'',metricModel:'',metricPriced:false,metricRates:[0,0,0],metricSeenSideCalls:new Set(),metricPendingRuns:new Set(),metricStaleRuns:new Set(),
       requestHistory:'',pendingHistory:'',pendingRequest:'',acceptedRequest:'',acceptedComposition:'',acceptedOrigin:'',acceptedMetrics:null,compiledSource:'',totalMs:0,baseError:''});
@@ -250,6 +250,113 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     return c;
   }
   function compilerError(source){try{compiler.compileVeraSource(source);throw Error('Fixture compiled unexpectedly');}catch(e){assert(e instanceof compiler.CompileError);return e.message;}}
+  const serviceHealth=load(path.join(base,'ServiceHealth.ets')),toolLog=load(path.join(base,'ToolLog.ets'));
+  function staleRunMetrics(c){
+    serviceHealth.resetServiceHealth();toolLog.resetToolLog();
+    serviceHealth.noteService(serviceHealth.SERVICE_JEV,false,'stale service failure');
+    toolLog.noteTool('find_sdk_function','stale lookup',37,false,'stale tool failure');
+    Object.assign(c,{attempt:3,attempts:[{attempt:3,success:false}],totalMs:9876,sideCalls:[{inputTokens:71}],stages:[{name:'stale stage',ms:123}],
+      services:serviceHealth.serviceNotes(),troubleNote:serviceHealth.serviceTrouble(),tools:toolLog.toolCalls()});
+    for(const key of ['attempts','sideCalls','stages','services','tools'])assert.equal(c[key].length,1);
+    assert(c.troubleNote.length>0);
+  }
+  function assertRunMetricsCleared(c){
+    assert.equal(c.attempt,1);assert.equal(c.totalMs,0);assert.equal(c.troubleNote,'');
+    for(const key of ['attempts','sideCalls','stages','services','tools'])assert.deepEqual(c[key],[],key);
+    assert.deepEqual(serviceHealth.serviceNotes(),[]);assert.equal(serviceHealth.serviceTrouble(),'');assert.deepEqual(toolLog.toolCalls(),[]);
+  }
+  function acceptedState(c){
+    const keys=['compiledSource','compiledVbc2','requestHistory','acceptedRequest','acceptedBase','acceptedComposition','acceptedOrigin','acceptedMetrics'];
+    return Object.fromEntries(keys.map(key=>[key,c[key]]));
+  }
+  function staleAcceptedState(c){
+    Object.assign(c,{compiledSource:example,compiledVbc2:'accepted bytecode',requestHistory:'Original request',acceptedRequest:'Accepted request',
+      acceptedBase:{compiledSource:'Earlier source'},acceptedComposition:'accepted composition',acceptedOrigin:'accepted origin',
+      acceptedMetrics:{provider:'DeepSeek',model:'test-model',runs:2,attempts:4,elapsedMs:3456,inputTokens:101,cacheHitTokens:61,outputTokens:23,estimatedUsd:0.25,partial:false}});
+    Object.assign(c.metricTotals,c.acceptedMetrics);
+  }
+  await runAsync('Generate resetRunMetrics clears snapshots and real logs idempotently without resetting cumulative or accepted state',async()=>{
+    reset();const c=page();staleRunMetrics(c);staleAcceptedState(c);
+    c.metricRunId=17;c.metricSeenSideCalls.add(c.sideCalls[0]);c.metricPendingRuns.add(17);c.metricStaleRuns.add(16);
+    c.program={runs:2,attempts:4,ms:3456,llmMs:3000,compileMs:456,inputTokens:101,cacheHitTokens:61,outputTokens:23};c.runs=[{request:'Accepted run'}];
+    const totals=c.metricTotals,accepted=structuredClone(acceptedState(c)),program=structuredClone(c.program),runs=structuredClone(c.runs);
+    const tracked={metricRunId:c.metricRunId,metricMode:c.metricMode,metricModel:c.metricModel,metricPriced:c.metricPriced,metricRates:[...c.metricRates],
+      metricSeenSideCalls:[...c.metricSeenSideCalls],metricPendingRuns:[...c.metricPendingRuns],metricStaleRuns:[...c.metricStaleRuns]};
+    const before=structuredClone(totals),owner=c.activeOperation,run=c.runId;
+    for(let i=0;i<2;i++){
+      c.resetRunMetrics();assertRunMetricsCleared(c);assert.equal(c.metricTotals,totals);assert.deepEqual(c.metricTotals,before);
+      assert.deepEqual(acceptedState(c),accepted);assert.deepEqual(c.program,program);assert.deepEqual(c.runs,runs);assert.equal(c.activeOperation,owner);assert.equal(c.runId,run);
+      for(const [key,value] of Object.entries(tracked))assert.deepEqual(c[key] instanceof Set?[...c[key]]:c[key],value,key);
+    }
+    assert.equal(requests.length,0);return {resets:2,realLogsCleared:true,cumulativeAndAcceptedStatePreserved:true};
+  });
+  await runAsync('Generate New clears stale run metrics and saved project state through actual startFresh and startNew before any generation',async()=>{
+    reset();const c=page();c.generating=false;staleRunMetrics(c);staleAcceptedState(c);
+    Object.assign(c,{projectId:'saved-project',savedVbc2:'saved bytecode',historyOpen:true,liveState:'live',carriedState:'carried',baseVersionId:'saved-version',baseVersionNumber:5,
+      baseError:'stale error',previousSource:'previous source',pendingHistory:'pending history',pendingRequest:'pending request',pendingBase:{compiledSource:'pending base'},rewriting:true,
+      generatedSource:'generated source',compositionJson:'composition',templateKinds:['chart'],modelWrote:true,previewVbc2:'preview bytecode',previewNote:'preview',compiled:true,
+      compileErrors:'old errors',prompt:'old prompt',refinePrompt:'old refinement',lastRequest:'last request',status:'Old status',draft:'old draft',fullscreen:true,requestOpen:true,
+      runs:[{request:'old run'}],program:{runs:2,attempts:4,ms:3456,inputTokens:101},metricRunId:17});
+    c.metricSeenSideCalls.add(c.sideCalls[0]);
+    c.projects.push({id:'saved-project',name:'Saved app'});c.versions.push({id:'saved-version',projectId:'saved-project'});
+    let starts=0,generations=0,transports=0,resets=0;
+    const startNew=c.startNew,resetMetrics=c.resetRunMetrics,originalFactory=transportFactory,owner=c.activeOperation,run=c.runId;
+    c.startNew=()=>{starts++;return startNew.call(c);};c.resetRunMetrics=()=>{resets++;return resetMetrics.call(c);};
+    const unexpected=()=>{generations++;throw Error('New must not generate');};
+    c.doGenerate=c.doServerGenerate=c.refineWithModel=c.startAttemptOne=c.runAttempt=c.callModel=unexpected;
+    transportFactory=()=>{transports++;throw Error('New must not create a transport');};
+    try{
+      for(let i=0;i<2;i++){
+        c.startFresh();assertRunMetricsCleared(c);
+        for(const key of ['projectId','savedVbc2','liveState','carriedState','baseVersionId','baseError','previousSource','requestHistory','pendingHistory','pendingRequest','acceptedRequest',
+          'acceptedComposition','acceptedOrigin','compiledSource','compiledVbc2','generatedSource','compositionJson','previewVbc2','previewNote','compileErrors','prompt','refinePrompt','lastRequest','status','draft'])assert.equal(c[key],'',key);
+        for(const key of ['pendingBase','acceptedBase','acceptedMetrics'])assert.equal(c[key],null,key);
+        for(const key of ['historyOpen','rewriting','modelWrote','compiled','fullscreen','requestOpen','composerOpen','generating'])assert.equal(c[key],false,key);
+        assert.deepEqual(c.templateKinds,[]);assert.deepEqual(c.runs,[]);
+        assert.deepEqual({...c.program},{runs:0,attempts:0,ms:0,llmMs:0,compileMs:0,inputTokens:0,cacheHitTokens:0,outputTokens:0});
+        assert.deepEqual({...c.metricTotals},{provider:'',model:'',elapsedMs:0,runs:0,attempts:0,inputTokens:-1,cacheHitTokens:-1,outputTokens:-1,estimatedUsd:-1,partial:false});
+        assert.equal(c.metricRunId,-1);assert.equal(c.metricSeenSideCalls.size,0);assert.equal(c.baseVersionNumber,0);assert.equal(c.nextVersionNumber,1);assert.equal(c.tab,'preview');
+        assert.equal(c.activeOperation,owner);assert.equal(owner.isCancelled(),false);assert.equal(c.runId,run);
+      }
+      assert.equal(starts,2);assert.equal(resets,2);assert.deepEqual(c.scrollEdges,['top','top']);
+      assert.equal(generations,0);assert.equal(transports,0);assert.equal(requests.length,0);assert.equal(c.projects.length,1);assert.equal(c.versions.length,1);
+    }finally{transportFactory=originalFactory;}
+    return {actualStartNewCalls:starts,resets,realLogsCleared:true,generations,transports,savedDataNotDeleted:true};
+  });
+  await runAsync('Generate entry points share resetRunMetrics while held transports preserve cumulative and accepted metrics',async()=>{
+    let scenarios=0;
+    for(const action of ['doGenerate','doServerGenerate','refineWithModel']){
+      reset();const c=page(),clients=[],originalFactory=transportFactory;staleRunMetrics(c);staleAcceptedState(c);c.generating=false;
+      c.mode=action==='doServerGenerate'?'server':'deepseek';c.prompt='A new request';
+      const totals=c.metricTotals,before=structuredClone(totals),accepted=structuredClone(acceptedState(c)),resetMetrics=c.resetRunMetrics;
+      let resets=0,pending;
+      c.resetRunMetrics=()=>{
+        const cumulative=structuredClone(c.metricTotals);resets++;resetMetrics.call(c);assertRunMetricsCleared(c);
+        assert.equal(c.metricTotals,totals);assert.deepEqual(c.metricTotals,cumulative);assert.deepEqual(acceptedState(c),accepted);
+      };
+      transportFactory=()=>{
+        assert.equal(resets,1,action+' must use the common reset once');assertRunMetricsCleared(c);
+        if(action!=='doServerGenerate'){const client=transport();clients.push(client);return client;}
+        let finish;const held=new Promise(resolve=>{finish=resolve;});
+        const client={destroyed:0,request(url,options){assert.equal(url,'https://server-test.invalid/compile');requests.push(options.extraData);return held;},
+          destroy(){this.destroyed++;},finish(){finish({responseCode:503,result:'held server response'});}};
+        clients.push(client);return client;
+      };
+      try{
+        await patched([[settings,'getServerUrl',()=> 'https://server-test.invalid']],async()=>{
+          if(action==='doServerGenerate')pending=c.doServerGenerate('A server change');
+          else {c[action](...(action==='refineWithModel'?['A model change']:[]));pending=c.pending;}
+          await until(()=>requests.length===1);assertRunMetricsCleared(c);assert.equal(resets,1);assert.equal(c.generating,true);
+          assert.equal(c.metricTotals,totals);assert.deepEqual(acceptedState(c),accepted);
+          assert.equal(c.metricTotals.runs,before.runs+1);assert.equal(c.metricTotals.attempts,before.attempts+1);
+          for(const key of ['elapsedMs','inputTokens','cacheHitTokens','outputTokens','estimatedUsd'])assert.equal(c.metricTotals[key],before[key],action+' '+key);
+          c.stopGeneration();clients.forEach(client=>client.finish());await promptly(pending);
+          assert.deepEqual(acceptedState(c),accepted);assert.equal(clients[0].destroyed,1);scenarios++;
+        });
+      }finally{c.activeOperation.cancel();clients.forEach(client=>client.finish());if(pending)await pending;transportFactory=originalFactory;}
+    }
+    return {scenarios,commonResetCalls:scenarios,heldTransports:true,cumulativeAndAcceptedMetricsPreserved:true};
+  });
   await runAsync('Shared generation token limit is 32768',async()=>{
     assert.equal(deep.DEEPSEEK_GENERATION_MAX_TOKENS,32768);return {maxTokens:32768};
   });

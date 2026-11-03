@@ -631,17 +631,22 @@ export class DeepSeekEngine {
       let interrupted = new Promise<T>((_resolve, reject): void => {
         unsubscribe = worker.operationCancellation.onCancel((): void => {
           reject(cancellationError())
-          let client = worker.client
-          if (client !== null) { worker.cleanup(client) }
+          // This is the only place that reacts to a cancel() coming from
+          // anywhere but stop() (e.g. the finally below, or a future caller).
+          worker.disposeClient()
         })
       })
+
       if (worker.ownerCancellation !== undefined) {
         unsubscribeOwner = worker.ownerCancellation.onCancel((): void => { worker.operationCancellation.cancel() })
       }
+      
       let running = Promise.resolve().then((): Promise<T> => {
         throwIfCancelled(worker.operationCancellation)
         return operation()
       })
+      running.catch((): void => {})   // absorbs a late rejection when `interrupted` wins the race
+
       let result = await Promise.race([running, interrupted])
       throwIfCancelled(worker.operationCancellation)
       publish()
@@ -652,8 +657,9 @@ export class DeepSeekEngine {
       worker.operationCancellation.cancel()
       worker.onProgress = noProgress
       worker.generating = false
-      let client = worker.client
-      if (client !== null) { worker.cleanup(client) }
+      // Belt and braces: even if no cancel() callback fired (e.g. a synchronous
+      // throw before `interrupted` was attached), the client is destroyed here.
+      worker.disposeClient()
       this.activeOperations = this.activeOperations.filter((item: DeepSeekEngine): boolean => item !== worker)
     }
   }
@@ -1068,16 +1074,39 @@ export class DeepSeekEngine {
   stop(cancellation?: OperationCancellation): void {
     for (let worker of this.activeOperations.slice()) {
       if (cancellation === undefined || worker.ownerCancellation === cancellation) {
+        // Cancelling rejects the worker's `interrupted` promise in runOperation,
+        // and that callback also disposes the client. Disposing here as well
+        // makes stop() self-contained and means cleanup does not silently stop
+        // happening if the callback is ever changed. disposeClient() is
+        // idempotent, so the second call is a no-op.
         worker.operationCancellation.cancel()
+        worker.disposeClient()
       }
     }
   }
 
-  private cleanup(client: http.HttpRequest): void {
-    if (this.client !== client) { return }
+  /**
+   * Destroy this worker's in-flight HTTP client, if it has one, and forget it.
+   *
+   * Idempotent: safe to call more than once, and from more than one place.
+   * The client is forgotten (this.client = null) BEFORE it is destroyed, so
+   * cleanup() -- which guards on identity to protect a newer round's client
+   * -- becomes a no-op for the stale one. off('dataReceive') is what actually
+   * stops a cancelled generation from continuing to feed tokens into state
+   * that will be discarded.
+   */
+  private disposeClient(): void {
+    let client = this.client
     this.client = null
+    if (client === null) { return }
     try { client.off('dataReceive') } catch (_e) {}
     try { client.destroy() } catch (_e) {}
+  }
+
+  private cleanup(client: http.HttpRequest): void {
+    // A streamOnce's finally must not destroy a client a later round installed.
+    if (this.client !== client) { return }
+    this.disposeClient()
   }
 
   /** One request/response cycle: sends `messages`, returns what streamed back. */

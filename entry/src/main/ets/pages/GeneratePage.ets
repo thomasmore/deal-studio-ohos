@@ -974,6 +974,19 @@ export struct GeneratePage {
     }
   }
 
+  private resetRunMetrics(): void {
+    this.attempt = 1
+    this.attempts = []
+    this.totalMs = 0
+    this.sideCalls = []
+    this.stages = []
+    this.services = []
+    resetServiceHealth()
+    this.troubleNote = ''
+    this.tools = []
+    resetToolLog()
+  }
+
   private doGenerate(): void {
     if (this.disposed || this.prompt.trim().length === 0 || this.baseError.length > 0 || this.generating) { return }
     // Sent before the prompt and the catalogue were read: it goes when they are (aboutToAppear).
@@ -995,16 +1008,7 @@ export struct GeneratePage {
     this.generatedSource = ''
     this.compiled = false
     this.compileErrors = ''
-    this.attempt = 1
-    this.attempts = []
-    this.totalMs = 0
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
+    this.resetRunMetrics()
     this.serverBytecode = ''
     this.previewVbc2 = ''
     this.previewNote = ''
@@ -1024,13 +1028,6 @@ export struct GeneratePage {
     this.startRun(this.prompt.trim())
     this.genStartTime = Date.now()
     logMark('gen-start', 'chars=' + this.prompt.trim().length.toString())
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
     let startFields: Record<string, Object> = {}
     startFields['prompt'] = this.prompt.trim()
     startFields['refining'] = this.previousSource.length > 0
@@ -1245,15 +1242,7 @@ export struct GeneratePage {
     this.generatedSource = ''
     this.compiled = false
     this.compileErrors = ''
-    this.attempts = []
-    this.totalMs = 0
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
+    this.resetRunMetrics()
     this.serverBytecode = ''
     this.program = new RunTotals()
     this.delta = new SourceDelta()
@@ -1955,16 +1944,7 @@ export struct GeneratePage {
     this.generating = true
     this.compiled = false
     this.compileErrors = ''
-    this.attempt = 1
-    this.attempts = []
-    this.totalMs = 0
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
+    this.resetRunMetrics()
     this.serverBytecode = ''
     this.cancelRequested = false
     if (!continuing) { this.runId++ }
@@ -3369,8 +3349,7 @@ export struct GeneratePage {
     this.startNew()
     this.runs = []
     this.program = new RunTotals()
-    this.attempts = []
-    this.stages = []
+    this.resetRunMetrics()
     this.status = ''
     this.draft = ''
     this.tab = TAB_PREVIEW

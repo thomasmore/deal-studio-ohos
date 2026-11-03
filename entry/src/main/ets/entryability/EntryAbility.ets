@@ -67,12 +67,14 @@ export default class EntryAbility extends UIAbility {
     startPowerKeyProbe()
     this.extractProjectId(want)
     this.extractDevParameters(want)
+    this.navigateToProject()
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'VERA', 'EntryAbility onNewWant')
     this.extractProjectId(want)
     this.extractDevParameters(want)
+    this.navigateToProject()
   }
 
   /**
@@ -107,7 +109,6 @@ export default class EntryAbility extends UIAbility {
     this.extractExaKey(want)
     this.extractReasoningEffort(want)
     this.extractServerUrl(want)
-    this.extractProjectId(want)
     this.extractProbe(want)
     this.extractSdkProbe(want)
     this.extractSdkSearchProbe(want)
@@ -118,7 +119,6 @@ export default class EntryAbility extends UIAbility {
     this.extractCompose(want)
     this.extractTemplateSelect(want)
     this.extractProof(want)
-    this.navigateToProject()
   }
 
   /**
@@ -507,7 +507,7 @@ export default class EntryAbility extends UIAbility {
         return
       }
     }
-    let homeAction = want.action === 'action.system.home'
+    let homeAction = want.action === 'ohos.want.action.home' || want.action === 'action.system.home'
     let homeEntity = want.entities !== null && want.entities !== undefined &&
       want.entities.indexOf('entity.system.home') >= 0
     let emptyAction = want.action === null || want.action === undefined || want.action.length === 0

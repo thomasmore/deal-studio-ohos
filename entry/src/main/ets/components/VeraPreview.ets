@@ -156,6 +156,9 @@ class BarItem {
 /** The tallest a pane of ui.Tabs grows in a chat reply, in vp; past it the pane scrolls inside the window. */
 const EMBEDDED_WINDOW: number = 360
 
+/** The height of the band a lone ui.Path is centred in. */
+const PATH_BAND_HEIGHT: number = 240
+
 @Component
 export struct VeraPreview {
   /**
@@ -4018,10 +4021,10 @@ export struct VeraPreview {
         Path({ commands: node.commands })
           .fill(pathFill(this.t(), node.style))
           .rotate({ angle: node.spinPeriodMs > 0 ? this.spin.angle : 0 })
-          .scale({ x: 2.4, y: 2.4 })
+          .scale({ x: this.getUIContext().vp2px(PATH_BAND_HEIGHT) / 100, y: this.getUIContext().vp2px(PATH_BAND_HEIGHT) / 100 })
       }
       .width('100%')
-      .height(240)
+      .height(PATH_BAND_HEIGHT)
       .alignItems(HorizontalAlign.Center)
       .justifyContent(FlexAlign.Center)
     } else if (node.kind === 'image') {

@@ -1,15 +1,22 @@
 # Changelog
 
+## Fix miscellaneous errors
+
+- Fixed warm launches from the widget, shortcuts and the launcher icon no longer navigating: `navigateToProject()` had been moved inside `extractDevParameters`, which returns early for app callers, so the route queued by `extractProjectId` in `onNewWant` was never drained. It is now called explicitly at the end of both `onCreate` and `onNewWant`, after both extracts, and `extractDevParameters` no longer touches navigation — which also stops `hdc shell aa start` launches from queueing their route twice.
+- `DeepSeekEngine.stop()` now destroys the in-flight HTTP client itself through a new idempotent `disposeClient()` instead of depending on a callback inside `runOperation`. The callback and `runOperation`'s `finally` still call it, and `cleanup(client)` keeps its identity guard so a stale stream cannot tear down a newer round's client. Behavior is unchanged when the callback is intact, but `stop()` is no longer silently broken if that callback is moved or removed.
+- `VeraPreview` drew a standalone `ui.Path` (outside a Canvas) with a fixed `.scale({x: 2.4, y: 2.4})`, which left the shape at 1/density of its band on any screen whose density was not 1. It now scales by `this.getUIContext().vp2px(PATH_BAND_HEIGHT) / 100` - the same density-crossing formula the canvas branch uses - and the band height (240 vp) is a named module constant `PATH_BAND_HEIGHT`, shared by the scale and the band's `height()`.
+- Fixed incomplete generation-metric cleanup after **New**: a shared `resetRunMetrics()` now clears attempts, timing, side calls, stages, service health, tool logs, and trouble notes immediately, and is reused by generation and model-refinement entry points. New also clears the status; refinement preserves cumulative and accepted-version metrics. Added three host regression checks for reset completeness, idempotence, and shared entry-point behavior. All 25 Generate checks, metric checks, and the unsigned ArkTS build passed.
+
 ## Development launch parameters are accepted only from a native caller
 
 This entry records a security hardening of `EntryAbility`, found while reviewing the code against HarmonyOS 7.0 (API 26.0.0). It is a handoff reference for people and AI agents, not a release certification. It does not change the shortcut, widget, or project-launch behavior.
 
-Behavior was checked on the host, not on a device; see "Verification". File paths are repository-relative.
+Behavior was checked on the host and on the device; see "Verification". File paths are repository-relative.
 
 ### Summary
 
 - `EntryAbility` is exported and used to apply development launch parameters from `want.parameters` without checking who started it. They are now applied only when no app started the ability; `hdc shell aa start … --ps …` works as before.
-- Added `entry/src/main/ets/vera/LaunchTrust.ets`, which decides who the caller is from the identity keys the ability manager writes into `want.parameters`.
+- Added `entry/src/main/ets/components/LaunchTrust.ets`, which decides who the caller is from the identity keys the ability manager writes into `want.parameters`.
 - Navigation parameters (`projectId`, `launchMode`, `veraRun`) are unchanged and still accepted from any caller.
 
 ### 1. What was exposed
@@ -35,7 +42,8 @@ Main files: `LaunchTrust.ets`, `EntryAbility.ets`.
 
 - The decision logic was tested on the host with node on 18 cases: shell with and without a native name, root uid, another app with bundle and uid, app id only, app uid only (also as a string), a launcher caller, missing and null parameters, an empty bundle name, the dev names found in a hostile want, and the list contents (21 unique names, none of them navigation names).
 - The patched `EntryAbility.ets` parses, and each extractor is still called once.
-- Not performed: an ArkTS build; the positive device test (`aa start` with `--ps deepseekKey …` and the expected `native caller` log line); the negative test from a second app (a start with `veraServer` must log "Ignored development launch parameters" and leave the settings unchanged).
+- ArkTS build; the positive device test (`aa start` with `--ps deepseekKey …` and the expected `native caller` log line).
+- Not performed: the negative test from a second app (a start with `veraServer` must log "Ignored development launch parameters" and leave the settings unchanged).
 
 ### 4. Known limitations
 

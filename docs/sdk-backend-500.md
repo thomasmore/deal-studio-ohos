@@ -1,8 +1,8 @@
-# 485 real sdk.call targets
+# 484 real sdk.call targets
 
 Selected by `tools/select-sdk-backend-candidates.py` from 536 candidates that a generator can safely turn into a real backend call: a namespace-level function (not a class/interface method needing an instance), at most 2 simple-typed parameters, a primitive or void return. Implemented by `tools/generate-sdk-backend.py` into `VeraSdkBackend.ets`.
 
-**485 selected**, across 31 kits.
+**484 selected**, across 31 kits.
 
 ## TelephonyKit (55)
 
@@ -220,7 +220,7 @@ Selected by `tools/select-sdk-backend-candidates.py` from 536 candidates that a 
 - `AbilityKit.wantAgent.setWantAgentMultithreading(isMultithreadingSupported: boolean): void` -- Enables or disables the WantAgent multithreading feature.
 - `AbilityKit.dataUriUtils.updateId(uri: string, id: double): string` -- Updates the ID in a given URI.
 
-## PerformanceAnalysisKit (49)
+## PerformanceAnalysisKit (48)
 
 - `PerformanceAnalysisKit.hichecker.addCheckRule(rule: bigint): void` -- Adds one or more check rules. HiChecker detects unexpected operations or gives feedback based on the added rules.
 - `PerformanceAnalysisKit.hiAppEvent.addProcessorFromConfig(processorName: string, configName: string?): Promise<long>` -- Adds the configuration information of the data processor. The configuration file contains information such as the
@@ -230,7 +230,6 @@ Selected by `tools/select-sdk-backend-candidates.py` from 536 candidates that a 
 - `PerformanceAnalysisKit.hiTraceChain.clearId(): void` -- Clears the trace ID. This API returns the result synchronously.
 - `PerformanceAnalysisKit.hichecker.containsCheckRule(rule: bigint): boolean` -- Checks whether the specified rule exists in the collection of added rules. If the rule is of the thread level, this
 - `PerformanceAnalysisKit.hidebug.disableGwpAsanGrayscale(): void` -- Disables GWP-ASan. This API is used to cancel the custom configuration and restore the default parameter
-- `PerformanceAnalysisKit.hidebug.dumpJsHeapData(filename: string): void` -- Dumps VM heap data.
 - `PerformanceAnalysisKit.hidebug.dumpJsRawHeapData(needGC: boolean?): Promise<string>` -- Dumps the original heap snapshot of the VM for the current thread and generates a .rawheap file. This API uses a
 - `PerformanceAnalysisKit.jsLeakWatcher.enable(isEnable: boolean): void` -- Enables the detection for JS object leaks. This function is disabled by default.
 - `PerformanceAnalysisKit.hiTraceMeter.finishTrace(name: string, taskId: int): void` -- Stops an asynchronous trace.
