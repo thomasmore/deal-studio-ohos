@@ -96,3 +96,12 @@ else()
     libhilog_ndk.z.so
   )
 endif()
+
+# USB network (napi_usbnet.cpp): copies packets between UsbNetAbility's VPN and
+# the gnirehtet relay on the computer. Needs nothing but libc, so it is built
+# whether or not llama.cpp is present.
+add_library(usbnet SHARED napi_usbnet.cpp)
+target_link_libraries(usbnet PRIVATE
+  libace_napi.z.so
+  libhilog_ndk.z.so
+)

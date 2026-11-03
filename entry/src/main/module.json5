@@ -97,6 +97,12 @@
     ],
     "extensionAbilities": [
       {
+        "name": "UsbNetAbility",
+        "srcEntry": "./ets/usbnetability/UsbNetAbility.ets",
+        "type": "vpn",
+        "exported": false
+      },
+      {
         "name": "VeraFormAbility",
         "srcEntry": "./ets/formability/VeraFormAbility.ets",
         "type": "form",

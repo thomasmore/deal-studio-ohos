@@ -6,6 +6,7 @@
   "author": "",
   "license": "",
   "dependencies": {
-    "libllama.so": "file:./src/main/cpp/types/libllama"
+    "libllama.so": "file:./src/main/cpp/types/libllama",
+    "libusbnet.so": "file:./src/main/cpp/types/libusbnet"
   }
 }

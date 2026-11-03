@@ -131,6 +131,55 @@ Development launch parameters are ignored when another app starts the ability; o
 **Prompts typed into the Generate screen are written in English**, even when the
 conversation is not.
 
+## Internet through the computer (USB network)
+
+When the phone's Wi-Fi is poor, its whole traffic can go over the USB cable:
+run `./usb-net.sh` on the computer (needs java; leave it running) and switch
+on Generate > Settings > Advanced > **USB network** on the phone. Off by
+default; the first start asks the person to allow the VPN.
+
+- The computer side is the relay from gnirehtet (`tools/gnirehtet/`), on
+  127.0.0.1:31416. The phone side is ours: `UsbNetAbility.ets` (a
+  VpnExtensionAbility) and `libusbnet.so`: `usbnet_tunnel.h` copies IPv4
+  packets between the tun and the relay and reconnects by itself,
+  `usbnet_packets.h` splits the relay's stream into packets, and
+  `napi_usbnet.cpp` is only the NAPI glue.
+- Host tests, no phone needed (run both after touching the C++):
+  `g++ -std=c++17 -Wall -Wextra -Werror -I entry/src/main/cpp tools/usbnet-packets-test.cpp -o /tmp/t && /tmp/t`,
+  and `tools/usbnet-tunnel-test.cpp` (fake tun and relay; the build line for
+  ThreadSanitizer and AddressSanitizer is at its top; TSan needs
+  `setarch "$(uname -m)" -R` on recent kernels).
+- The phone reaches the relay as its own 127.0.0.1:28416 (`hdc rport`), not
+  31416: the phone reserves 31150-31950 and hdc cannot listen there.
+- Because the app is system-signed, `startVpnExtensionAbility` must carry
+  `callingUid`/`callingPid` (`UsbNet.ets`), or every start after the consent
+  dialog fails with 2200003.
+- Give the VPN no `routes`: netmanager adds the default route itself, and a
+  route with an unreachable gateway leaves nothing routed into the tun.
+- IPv4 only. Apps go through the VPN; the shell (`hdc shell`) and system
+  services running under system UIDs (HMS, for one) do not.
+- After `./update-phone.sh` the VPN is gone; switch it on again.
+- With several devices attached, run `VERA_PHONE=<serial> ./usb-net.sh`.
+- The page and the VPN (separate processes) share two files in filesDir:
+  `usbnet-want.txt` (what the person asked for; the VPN stops itself when it
+  reads 'off', which settles a stop that raced a start or the consent dialog)
+  and `usbnet-status.txt` (written on change). Whether the VPN is up is asked
+  of the system, not inferred from the file.
+
+What it exposes, and what it does not:
+
+- Both ends listen on loopback only (127.0.0.1:28416 on the phone,
+  127.0.0.1:31416 on the computer); nothing on the Wi-Fi or LAN can reach them.
+- While it is on, the phone's apps reach the internet *as the computer*, so
+  they also reach whatever the computer's network reaches (its LAN, a VPN it
+  is on). They do not reach the computer's own localhost: gnirehtet's relay
+  maps 10.0.2.2 there, and `napi_usbnet.cpp` drops every packet to 10.0.2.2.
+- Traffic between the phone and the relay is plain IP over the cable; HTTPS
+  stays encrypted end to end. Any local program on the computer could also use
+  the relay as a way out, which gives it nothing it did not already have.
+- `tools/gnirehtet/gnirehtet.jar` is checked against the release's
+  SHA256SUMS.txt (see the README beside it). Replace it only the same way.
+
 ## Checking things without a device
 
 The ArkTS build leaves plain TypeScript in
@@ -162,6 +211,7 @@ minute-long generations does not converge — that mistake has been made here.
 | `docs/agent.md` | how a new screen is built now: the route (`vera/agent/VeraBuildRoute.ets`: the agent, then the whole screen as one hole), the agent (`vera/agent/VeraAgent.ets`, which draws the plan of needs the model writes knowing neither parts nor catalogue, `NeedsPlan.ets`, then chooses the composer's parts and the catalogue's sections for each need, `NeedsChoose.ets`, `chooseSections` in `VeraCompose.ets`, `agent/AgentAlign.ets`), the plan format (`vera/ScreenPlan.ets`), holes the model writes (`vera/agent/AgentHole.ets`, `AgentCustom.ets`), the terms, the measured results and the switches. Host checks `tools/vera-harness/{agent,plan,parts,compose,merge,needs-plan,needs-choose,length-feeders}-check.js` (they need `VERA_TYPESCRIPT_PATH`); live runs `tools/vera-harness/agent-run.js` |
 | `docs/prompts/needs-plan-25.md` | 25 fixed short prompts and the first phone run of the old path against the plan of needs, with a verdict for each. The list is fixed: do not reword or add to it after a run, and do not tune a threshold on it |
 | `docs/examples/shanghai-layover.vera` | a program the model actually wrote, kept verbatim |
+| `usb-net.sh`, `entry/src/main/ets/usbnetability/UsbNetAbility.ets`, `entry/src/main/ets/vera/UsbNet.ets`, `entry/src/main/cpp/{napi_usbnet.cpp,usbnet_tunnel.h,usbnet_packets.h}`, `tools/usbnet-*-test.cpp` | USB network: the phone's whole traffic through the computer (see "Internet through the computer" above) |
 | `docs/intent-call-contract.md` | `intent.call`'s signature and its four-shape answer contract (JSON / `"ok"` / `"declined code=N"` / `"error N: ..."`), with two confirmed device cases of generated code checking for `"ok"` or not checking at all — read before touching a handler that reports success or failure |
 
 Adding a component means editing the catalogue, adding a case in
