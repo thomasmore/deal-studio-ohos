@@ -84,6 +84,15 @@ class SceneFrame {
   layers: SceneLayer[] = []
 }
 
+class TimerConfig {
+  interval: number
+  action: string
+  constructor(interval: number, action: string) {
+    this.interval = interval
+    this.action = action
+  }
+}
+
 /** How often a running surface re-runs view() for what is drawn around it, in ms: a score in a header, not the scene. */
 const SURFACE_VIEW_MS: number = 100
 /** How often a running surface's state is saved, in ms. Every frame would write the project sixty times a second. */
@@ -242,7 +251,7 @@ export struct VeraPreview {
   // Live tickers, keyed by the program's own id for each: handle, interval and
   // the moment of the last fire, so a handler can be told how long really passed.
   private timers: Map<string, number> = new Map<string, number>()
-  private timerIntervals: Map<string, number> = new Map<string, number>()
+  private timerConfigs: Map<string, TimerConfig> = new Map<string, TimerConfig>()
   private timerLastFire: Map<string, number> = new Map<string, number>()
   private ticking: boolean = false
   private spin: SpinAngle = new SpinAngle()
@@ -466,22 +475,25 @@ export struct VeraPreview {
    * ticker under a stream of taps would never reach a full second.
    */
   private reconcileTimers(root: VeraUiNode | null): void {
-    let wanted = new Map<string, number>()
-    let actions = new Map<string, string>()
-    if (root !== null) { this.collectTickers(root!, wanted, actions) }
+    let wanted = new Map<string, TimerConfig>()
+    if (root !== null) { this.collectTickers(root!, wanted) }
 
     let live = Array.from(this.timers.keys())
     for (let id of live) {
       let want = wanted.get(id)
-      let current = this.timerIntervals.get(id)
-      if (want === undefined || want !== current) { this.stopTimer(id) }
+      let current = this.timerConfigs.get(id)
+      if (want === undefined || current === undefined || want.interval !== current.interval) {
+        this.stopTimer(id)
+      }
     }
     let ids = Array.from(wanted.keys())
     for (let id of ids) {
-      if (this.timers.has(id)) { continue }
-      let interval = wanted.get(id) as number
-      let action = actions.get(id) as string
-      this.startTimer(id, interval, action)
+      let config = wanted.get(id) as TimerConfig
+      if (this.timers.has(id)) {
+        this.timerConfigs.set(id, config)
+        continue
+      }
+      this.startTimer(id, config)
     }
   }
 
@@ -728,40 +740,40 @@ export struct VeraPreview {
     }
   }
 
-  private collectTickers(node: VeraUiNode, wanted: Map<string, number>,
-      actions: Map<string, string>): void {
+  private collectTickers(node: VeraUiNode, wanted: Map<string, TimerConfig>): void {
     if (node.kind === 'ticker' && node.checked && node.minimum > 0 &&
         node.tickerId.length > 0 && node.action.length > 0) {
-      wanted.set(node.tickerId, node.minimum)
-      actions.set(node.tickerId, node.action)
+      wanted.set(node.tickerId, new TimerConfig(node.minimum, node.action))
     }
-    for (let child of node.children) { this.collectTickers(child, wanted, actions) }
+    for (let child of node.children) { this.collectTickers(child, wanted) }
   }
 
-  private startTimer(id: string, intervalMs: number, action: string): void {
-    let safe = intervalMs < 16 ? 16 : intervalMs
+  private startTimer(id: string, config: TimerConfig): void {
+    let safe = config.interval < 16 ? 16 : config.interval
+    this.timerConfigs.set(id, config)
     this.timerLastFire.set(id, Date.now())
     let handle = setInterval(() => {
       // A tick that arrives while the previous one is still running would
       // re-enter the VM with a half-applied state.
       if (this.ticking) { return }
+      let current = this.timerConfigs.get(id)
+      if (current === undefined) { return }
       let last = this.timerLastFire.get(id)
       let now = Date.now()
       let elapsed = last !== undefined ? now - (last as number) : safe
       this.timerLastFire.set(id, now)
       this.ticking = true
-      this.dispatch(action, new VeraNumberValue(Math.round(elapsed)))
+      this.dispatch(current.action, new VeraNumberValue(Math.round(elapsed)))
       this.ticking = false
     }, safe)
     this.timers.set(id, handle)
-    this.timerIntervals.set(id, intervalMs)
   }
 
   private stopTimer(id: string): void {
     let handle = this.timers.get(id)
     if (handle !== undefined) { clearInterval(handle as number) }
     this.timers.delete(id)
-    this.timerIntervals.delete(id)
+    this.timerConfigs.delete(id)
     this.timerLastFire.delete(id)
   }
 
@@ -3862,7 +3874,7 @@ export struct VeraPreview {
                   .stroke(toneEdge(this.t(), node.series2Style, this.t().primary))
                   .strokeWidth('3px')
                   .strokeLineCap(LineCapStyle.Round)
-                  .strokeLineJoin(LineJoinStyle.Round)
+                  .strokeLineJoin(LineJoinStyle.Round) 
                 Path({ commands: this.sparklineDotCommands(node.series, node.maximum, node.minimum, this.chartWidth()) })
                   .fill(toneEdge(this.t(), node.style, this.t().primary))
                   .stroke(Color.Transparent)

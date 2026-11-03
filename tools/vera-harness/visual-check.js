@@ -156,6 +156,139 @@ if (!baseline) {
    probe.aboutToDisappear();assert.equal(probe.disposed,true);assert.equal(probe.darkListener,null);assert.deepEqual(events,['change','stop','off:change'])
    change({matches:true});assert.equal(renders,1)
   })
+   function tickerProbe() {
+    const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
+    const timerConfig=declaration(renderer,'class TimerConfig')
+    const fields=['timers','timerConfigs','timerLastFire','ticking'].map(name=>{
+     const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
+     return field[0].replace('  private ','')
+    }).join('\n')
+    const methods=['reconcileTimers','collectTickers','startTimer','stopTimer','stopAllTimers'].map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).join('\n')
+    const compiled=ts.transpileModule(timerConfig+'\nclass Probe { '+fields+'\n'+methods+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
+    assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'ticker probe syntax')
+    let now=10000, nextHandle=0, surfaceStops=0
+    const scheduled=new Map(), starts=[], stops=[], calls=[]
+    function schedule(callback,interval) {
+     const handle=++nextHandle
+     scheduled.set(handle,{callback,interval,nextAt:now+interval});starts.push(handle)
+     return handle
+    }
+    function cancel(handle) { stops.push(handle);scheduled.delete(handle) }
+    const Probe=new Function('setInterval','clearInterval','Date','VeraNumberValue',compiled.outputText+'; return Probe')(schedule,cancel,{now:()=>now},V.VeraNumberValue)
+    const probe=new Probe()
+    Object.assign(probe,{spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),sceneFrames:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
+    function advance(ms) {
+     const end=now+ms
+     while(true) {
+      const due=[...scheduled.values()].filter(timer=>timer.nextAt<=end).sort((a,b)=>a.nextAt-b.nextAt)[0]
+      if(!due)break
+      now=due.nextAt;due.nextAt+=due.interval;due.callback()
+     }
+     now=end
+    }
+    return {probe,scheduled,starts,stops,calls,schedule,advance,elapse(ms){now+=ms},fire(handle){assert(scheduled.has(handle));scheduled.get(handle).callback()},surfaceStops:()=>surfaceStops}
+   }
+   function ticker(id='clock',interval=1000,action='old',checked=true) {
+    return Object.assign(new U.VeraUiNode(),{kind:'ticker',tickerId:id,minimum:interval,action,checked,children:[]})
+   }
+   function tickerTree(children) { return Object.assign(new U.VeraUiNode(),{kind:'column',children}) }
+   function assertNoTickers(probe) {
+    for(const name of ['timers','timerConfigs','timerLastFire'])assert.equal(probe[name].size,0,name)
+   }
+   test('native tickers: handler replacement preserves handle, phase and last fire', () => {
+    const {probe,scheduled,starts,stops,calls,advance}=tickerProbe()
+    probe.reconcileTimers(ticker())
+    const handle=probe.timers.get('clock')
+    advance(1000);assert.deepEqual(calls,[{action:'old',elapsed:1000,at:11000}])
+    advance(250);probe.reconcileTimers(ticker('clock',1000,'new'))
+    assert.equal(probe.timers.get('clock'),handle);assert.deepEqual(starts,[handle]);assert.deepEqual(stops,[])
+    assert.equal(scheduled.get(handle).nextAt,12000);assert.equal(probe.timerLastFire.get('clock'),11000)
+    assert.equal(probe.timerConfigs.get('clock').interval,1000);assert.equal(probe.timerConfigs.get('clock').action,'new')
+    advance(749);assert.equal(calls.length,1)
+    advance(1);assert.deepEqual(calls[1],{action:'new',elapsed:1000,at:12000});assert.equal(probe.ticking,false)
+   })
+   test('native tickers: stable handler never restarts under repeated reconciliation', () => {
+    const {probe,scheduled,starts,stops,calls,advance}=tickerProbe()
+    probe.reconcileTimers(ticker())
+    const handle=probe.timers.get('clock')
+    for(let i=0;i<4;i++) {
+     advance(200);probe.reconcileTimers(ticker())
+     assert.equal(probe.timers.get('clock'),handle);assert.equal(probe.timerLastFire.get('clock'),10000)
+     assert.equal(scheduled.get(handle).nextAt,11000)
+    }
+    assert.deepEqual(starts,[handle]);assert.deepEqual(stops,[]);assert.equal(calls.length,0)
+    advance(200);assert.deepEqual(calls,[{action:'old',elapsed:1000,at:11000}])
+   })
+   test('native tickers: interval change restarts and dispatches the new action', () => {
+    const {probe,scheduled,starts,stops,calls,advance}=tickerProbe()
+    probe.reconcileTimers(ticker())
+    const old=probe.timers.get('clock')
+    advance(400);probe.reconcileTimers(ticker('clock',250,'faster'))
+    const handle=probe.timers.get('clock')
+    assert.notEqual(handle,old);assert.deepEqual(starts,[old,handle]);assert.deepEqual(stops,[old]);assert(!scheduled.has(old))
+    assert.equal(probe.timerConfigs.get('clock').interval,250);assert.equal(probe.timerLastFire.get('clock'),10400)
+    assert.equal(probe.timerConfigs.get('clock').action,'faster');assert.equal(scheduled.get(handle).nextAt,10650)
+    advance(249);assert.equal(calls.length,0)
+    advance(1);assert.deepEqual(calls,[{action:'faster',elapsed:250,at:10650}])
+   })
+   test('native tickers: removal and disable clear all maps and cancel callbacks', () => {
+    for(const root of [null,tickerTree([]),ticker('clock',1000,'old',false)]) {
+     const {probe,scheduled,stops,calls,advance}=tickerProbe()
+     probe.reconcileTimers(ticker())
+     const handle=probe.timers.get('clock')
+     advance(400);probe.reconcileTimers(root)
+     assertNoTickers(probe);assert.equal(scheduled.size,0);assert.deepEqual(stops,[handle])
+     advance(2000);assert.equal(calls.length,0)
+     probe.stopTimer('clock');assertNoTickers(probe);assert.deepEqual(stops,[handle])
+    }
+   })
+   test('native tickers: readding an id starts a fresh phase and action', () => {
+    const {probe,scheduled,starts,stops,calls,advance}=tickerProbe()
+    probe.reconcileTimers(ticker())
+    const old=probe.timers.get('clock')
+    advance(400);probe.reconcileTimers(null);assertNoTickers(probe)
+    advance(300);probe.reconcileTimers(ticker('clock',1000,'readded'))
+    const handle=probe.timers.get('clock')
+    assert.notEqual(handle,old);assert.deepEqual(starts,[old,handle]);assert.deepEqual(stops,[old])
+    assert.equal(probe.timerLastFire.get('clock'),10700);assert.equal(scheduled.get(handle).nextAt,11700)
+    assert.equal(probe.timerConfigs.get('clock').action,'readded')
+    advance(999);assert.equal(calls.length,0)
+    advance(1);assert.deepEqual(calls,[{action:'readded',elapsed:1000,at:11700}])
+   })
+   test('native tickers: collection visits nested nodes and rejects inactive or invalid tickers', () => {
+    const {probe,scheduled,calls,advance}=tickerProbe()
+    probe.reconcileTimers(tickerTree([tickerTree([ticker('nested',100,'nestedTick')]),ticker('disabled',100,'disabled',false),ticker('zero',0),ticker('negative',-1),ticker('',100),ticker('noAction',100,'')]))
+    assert.deepEqual([...probe.timerConfigs].map(([id,config])=>[id,{interval:config.interval,action:config.action}]),[['nested',{interval:100,action:'nestedTick'}]]);assert.equal(scheduled.size,1)
+    advance(100);assert.deepEqual(calls,[{action:'nestedTick',elapsed:100,at:10100}])
+   })
+   test('native tickers: real elapsed time, minimum interval, ticking and missing config guards', () => {
+    const {probe,scheduled,calls,elapse,fire}=tickerProbe()
+    probe.startTimer('direct',{interval:1,action:'fast'})
+    const handle=probe.timers.get('direct')
+    assert.equal(probe.timerConfigs.get('direct').action,'fast');assert.equal(probe.timerConfigs.get('direct').interval,1);assert.equal(scheduled.get(handle).interval,16)
+    elapse(19.6);fire(handle);assert.deepEqual(calls,[{action:'fast',elapsed:20,at:10019.6}])
+    const last=probe.timerLastFire.get('direct')
+    probe.ticking=true;elapse(30);fire(handle)
+    assert.equal(calls.length,1);assert.equal(probe.timerLastFire.get('direct'),last);assert.equal(probe.ticking,true)
+    probe.ticking=false;elapse(10)
+    const dispatch=probe.dispatch
+    probe.dispatch=(action,value)=>{assert.equal(probe.ticking,true);fire(handle);dispatch(action,value)}
+    fire(handle);assert.deepEqual(calls[1],{action:'fast',elapsed:40,at:10059.6});assert.equal(probe.ticking,false)
+    probe.timerConfigs.delete('direct');elapse(20);fire(handle)
+    assert.equal(calls.length,2);assert.equal(probe.ticking,false)
+   })
+   test('native tickers: stopAllTimers clears configs and other animation state', () => {
+    const f=tickerProbe(), {probe,scheduled,stops,calls,advance}=f
+    probe.reconcileTimers(tickerTree([ticker('one',1000,'oneTick'),ticker('two',1500,'twoTick')]))
+    probe.spinTimer=f.schedule(()=>assert.fail('spin survived cleanup'),16);probe.spinPeriod=1000
+    probe.motionTimer=f.schedule(()=>assert.fail('motion survived cleanup'),16)
+    for(const name of ['motionTriggers','poseAnims','sceneFrames'])probe[name].set('fixture',{})
+    probe.stopAllTimers();assertNoTickers(probe);assert.equal(scheduled.size,0);assert.equal(stops.length,4)
+    assert.equal(probe.spinTimer,-1);assert.equal(probe.spinPeriod,0);assert.equal(probe.motionTimer,-1);assert.equal(f.surfaceStops(),1)
+    for(const name of ['motionTriggers','poseAnims','sceneFrames'])assert.equal(probe[name].size,0,name)
+    advance(3000);assert.equal(calls.length,0)
+    probe.stopAllTimers();assertNoTickers(probe);assert.equal(stops.length,4);assert.equal(f.surfaceStops(),2)
+   })
   test('native declarations match all nine C++ exports and local package wiring', () => {
    const root=path.resolve(sourceRoot,'../../../..'), nativeDir=path.join(root,'entry/src/main/cpp/types/libllama')
    const cpp=fs.readFileSync(path.join(root,'entry/src/main/cpp/napi_llama.cpp'),'utf8')

@@ -1,5 +1,4 @@
-import { KeyboardAvoidMode } from '@ohos.arkui.UIContext'
-import window from '@ohos.window'
+import { KeyboardAvoidMode, window } from '@kit.ArkUI'
 import { store } from '../vera/ProjectStore'
 import { consent } from '../vera/VeraConsentStore'
 import { projectIconResource } from '../vera/ProjectIcons'

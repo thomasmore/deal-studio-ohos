@@ -1627,7 +1627,7 @@ class Analyzer {
       else { scope.values.set(p.name, ft.parameters[i]); scope.readOnly.add(p.name) }
     }
     let returns = this.checkBlock(decl.body, scope)
-    if (!identical(this.returnType, VOID) && !returns) this.addError('E2018', 'function ' + decl.name + ' may not return a value', decl.body.span)
+    if (!identical(this.returnType, VOID) && !returns) this.addError('E2018', 'function ' + decl.name + ' must return a value', decl.body.span)
     this.returnType = prevRet
     this.inAsyncFunction = prevAsync
   }

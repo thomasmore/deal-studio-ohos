@@ -57,6 +57,8 @@ Main files: `LaunchTrust.ets`, `EntryAbility.ets`.
 - Added request-scoped cancellation: Stop cancels the active chat or generation without interrupting independent requests or a newer run.
 - Cancellation aborts supported network requests, stops queued work, closes pending questions, and rejects late results and preview updates. Chat drafts, completed widgets, and the last successful generation remain intact.
 - Added host regression tests for cancellation, overlapping requests, and screen disposal.
+- Fixed tickers retaining an outdated handler when their ID and interval stayed unchanged: each tick now uses the latest handler without restarting the timer or resetting its phase. Added host regression coverage for handler changes and timer lifecycle cleanup.
+- Project deletion now reports filesystem errors instead of silently succeeding, ignores only an already-missing directory, and removes the project directory before updating the index so failed removal remains retryable. Added 25 host regression checks for deletion, error propagation, cache invalidation, and retries.
 
 ## Navigation and kit imports
 
