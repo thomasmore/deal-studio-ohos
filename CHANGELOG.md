@@ -71,6 +71,7 @@ Main files: `LaunchTrust.ets`, `EntryAbility.ets`.
 
 - Replaced app page-router navigation with a single `AppShell`, shared `Navigation`/`NavPathStack`, and `NavDestination` screens. External launches replace the stack while preserving isolated shortcut launches, widget launch behavior, and mini-app Back handling.
 - Bound navigation readiness to the active window stage and shared storage; hidden or removed screens ignore stale asynchronous updates.
+- Surface frame loops now follow `NavDestination.onShown` / `onHidden` instead of router-page events, pausing covered Generate, Runner, and Chat previews and resuming when shown. Previews created while hidden honor that state before loading, and late frames do no work while hidden. Added 22 host regression checks for visibility propagation, initialization, and pause/resume with both display sync and the interval fallback.
 - Migrated application imports from `@ohos.*` to named `@kit` exports, preserving aliases. Updated SDK backend generation and host mocks, added explicit socket result types, and switched remaining Generate animations to scoped UI APIs.
 
 ## Shortcut processing

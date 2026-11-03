@@ -143,7 +143,7 @@ if (!baseline) {
    let change, renders=0, density=1
    const listener={matches:true,on(event,cb){events.push(event);change=cb},off(event){events.push('off:'+event)}}
    probe.getUIContext=()=>({getMediaQuery:()=>({matchMediaSync(query){queries.push(query);return listener}}),vp2px:value=>value*density})
-    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.invalidateEffects=()=>{};probe.dark=false;probe.disposed=false;probe.liveSurfaces=[];probe.pageListener=null
+    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.invalidateEffects=()=>{};probe.dark=false;probe.disposed=false;probe.liveSurfaces=[]
    probe.watchDarkMode();assert.deepEqual(queries,['(dark-mode: true)']);assert.equal(probe.dark,true);assert.equal(probe.darkListener,listener)
    change({matches:true});assert.equal(renders,0);change({matches:false});assert.equal(renders,1);assert.equal(probe.dark,false)
    for(density of [1,2,3.5]) {
@@ -184,7 +184,7 @@ if (!baseline) {
     const mocks={UiHostEnvironment:U.UiHostEnvironment,VirtualMachine:Machine,deserializeVbc2:V.deserializeVbc2,VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
     const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
     probe=new Probe()
-    Object.assign(probe,{pending:null,programId:7,revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',pageListener:null,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},watchPage(){events.push(['page',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2})
+    Object.assign(probe,{pending:null,programId:7,revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2})
     const bytecode=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
     function load() { probe.vbc2=bytecode;probe.load() }
     function observeDispatch() { probe.dispatch=(action,value)=>{assert(value instanceof V.VeraStringValue);delivered.push([action,value.value])} }
@@ -294,16 +294,15 @@ if (!baseline) {
    test('renderer effects: disappear invalidates before timer and listener cleanup', () => {
     const f=effectProbe(), {probe,events}=f
     f.load();events.length=0
-    const host=probe.host, generation=probe.effectGeneration, programId=probe.programId, pageListener=()=>{}
+    const host=probe.host, generation=probe.effectGeneration, programId=probe.programId
     host.pendingEffects=[hostEffect()];probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
-    probe.pageListener=pageListener;probe.darkListener={off:event=>events.push(['darkOff',event])};probe.liveSurfaces=[{}]
-    probe.getUIContext=()=>({getUIObserver:()=>({off:(event,listener)=>{assert.equal(listener,pageListener);events.push(['pageOff',event])}})})
+    probe.darkListener={off:event=>events.push(['darkOff',event])};probe.liveSurfaces=[{}]
     probe.stopAllTimers=()=>{
      assert.equal(probe.disposed,true);assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(host.pendingEffects,[]);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);events.push(['stop'])
     }
     probe.aboutToDisappear()
-    assert.equal(probe.programId,programId);assert.equal(probe.pageListener,null);assert.equal(probe.darkListener,null)
-    assert.deepEqual(events,[['stop'],['persist'],['pageOff','routerPageUpdate'],['darkOff','change']])
+    assert.equal(probe.programId,programId);assert.equal(probe.darkListener,null)
+    assert.deepEqual(events,[['stop'],['persist'],['darkOff','change']])
    })
    for(const method of ['dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']) test('renderer effects: disposed '+method+' does no work', () => {
     const f=effectProbe(), {probe,events,executions,platform}=f
@@ -342,10 +341,169 @@ if (!baseline) {
     const generation=probe.effectGeneration, load=probe.load
     probe.load=function() { events.push(['load',this.disposed]);assert.equal(this.disposed,false);return load.call(this) }
     probe.aboutToAppear()
-    assert.deepEqual(events.slice(0,4),[['catalogue',false],['dark',false],['page',false],['load',false]])
+    assert.deepEqual(events.slice(0,3),[['catalogue',false],['dark',false],['load',false]])
     assert.equal(probe.disposed,false);assert.equal(probe.effectGeneration,generation+1);assert(probe.vm);assert(probe.host)
    })
-   function tickerProbe() {
+    function surfaceProbe(route='displaySync') {
+     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
+     const names=['disposed','effectGeneration','heldEffects','vm','host','currentState','pageHidden','surfaces','liveSurfaces','surfaceSync','surfaceTimer','lastFrameAt','lastViewAt','lastSurfaceSave','framing','frameCount','frameWork','frameWorst','frameSplit','frameReportAt']
+     const fields=names.map(name=>{
+      const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
+      return field[0].replace('  private ','')
+     }).join('\n')
+     const constants=['SURFACE_VIEW_MS','SURFACE_SAVE_MS','SURFACE_MAX_ELAPSED_MS'].map(name=>{
+      const value=renderer.match(new RegExp('^const '+name+':[^\\n]+','m'));assert(value,name);return value[0]
+     }).join('\n')
+     const methods=['invalidateEffects','load','renderView','onDestinationHidden','reconcileSurfaces','collectSurfaces','startSurfaceLoop','stopSurfaceLoop','surfaceFrame'].map(name=>declaration(renderer,'  private '+name+'(').replace('  private ',''))
+     const body=methods.concat(['aboutToAppear','aboutToDisappear','onProgramChanged','onPreviewOnlyChanged'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
+     const compiled=ts.transpileModule(constants+'\nclass Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
+     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'surface probe syntax')
+     global.ObservedV2=c=>c;global.Trace=()=>{}
+     const L=loadSource(path.join(sourceRoot,'components/VeraLiveTree.ets'))
+     let now=10000, probe, nextHandle=0
+     const events=[], executions=[], syncs=[], scheduled=new Map()
+     const mocks={...V,UiHostEnvironment:U.UiHostEnvironment,decodeVeraUi:U.decodeVeraUi,toLive:L.toLive,reconcile:L.reconcile,Date:{now:()=>now},catalogKinds:()=>{events.push(['catalogue',probe.disposed,probe.pageHidden]);return []},console:{info(){},warn(){},error(){}},displaySync:{create(){
+      events.push(['create'])
+      if(route==='interval')throw Error('fixture: no displaySync')
+      const sync={callback:null,active:false,setExpectedFrameRateRange(range){assert.deepEqual(range,{expected:60,min:30,max:120})},on(event,callback){assert.equal(event,'frame');this.callback=callback},start(){this.active=true;events.push(['start'])},stop(){this.active=false;events.push(['stop'])},off(event){assert.equal(event,'frame');events.push(['off'])}}
+      syncs.push(sync);return sync
+     }},setInterval(callback,interval){assert.equal(interval,16);const handle=++nextHandle;scheduled.set(handle,callback);events.push(['start']);return handle},clearInterval(handle){assert(scheduled.delete(handle));events.push(['stop'])}}
+     const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
+     probe=new Probe()
+     Object.assign(probe,{destinationHidden:false,previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',darkListener:null,pending:null,
+      stopAllTimers(){events.push(['cleanup',this.disposed,this.pageHidden]);this.stopSurfaceLoop()},watchDarkMode(){events.push(['dark',this.disposed,this.pageHidden])},restoreState(){return null},seeded:value=>value,notifyStateSnapshot(){events.push(['snapshot'])},persistState(){events.push(['persist'])},paintSurfaces(){events.push(['paint'])},drainEffects(){events.push(['drain'])},countFrame(){events.push(['count'])},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},reconcileBackHandler(){}})
+     probe.vbc2=C.compileVeraSource(`
+@jsonable class AppState { n: number; }
+function init(): AppState { return {n: 0}; }
+function tick(state: AppState, elapsed: number): AppState { return {n: state.n + elapsed}; }
+function draw(state: AppState): gfx.Shape[] { return []; }
+function view(state: AppState): ui.View { return ui.Column("default", [ui.Surface("default", 100, 100, "draw", "tick", "")]); }
+`).vbc2
+     const load=probe.load
+     probe.load=function() {
+      events.push(['load',this.disposed,this.pageHidden]);load.call(this)
+      assert.equal(this.error,'');assert(this.vm instanceof V.VirtualMachine)
+      const execute=this.vm.execute.bind(this.vm)
+      this.vm.execute=(action,args)=>{executions.push({action,args});return execute(action,args)}
+     }
+     function callback() { return route==='interval'?scheduled.get(probe.surfaceTimer):probe.surfaceSync?.callback }
+     return {probe,events,executions,syncs,scheduled,callback,elapse(ms){now+=ms},active(){return syncs.filter(sync=>sync.active).length+scheduled.size},transition(hidden){probe.destinationHidden=hidden;probe.onDestinationHidden()}}
+    }
+    function surfaceSnapshot(f) {
+     const p=f.probe
+     return {state:p.currentState,lastFrameAt:p.lastFrameAt,lastViewAt:p.lastViewAt,lastSurfaceSave:p.lastSurfaceSave,framing:p.framing,frameSplit:[...p.frameSplit],effectsAllowed:p.host.effectsAllowed,pending:[...p.host.pendingEffects],events:[...f.events],executions:[...f.executions]}
+    }
+    for(const route of ['displaySync','interval']) {
+     test(`destination surfaces/${route}: initially hidden gate precedes watchers and real load`, () => {
+      const f=surfaceProbe(route), {probe,events}=f
+      probe.destinationHidden=true;probe.disposed=true;probe.aboutToAppear()
+      assert.deepEqual(events.slice(0,4),[['catalogue',false,true],['dark',false,true],['load',false,true],['cleanup',false,true]])
+      assert.equal(probe.pageHidden,true);assert.equal(probe.disposed,false);assert.equal(probe.liveSurfaces.length,1);assert.equal(f.active(),0)
+      assert(!events.some(event=>event[0]==='create'||event[0]==='start'))
+      f.transition(false);assert.equal(probe.pageHidden,false);assert.equal(f.active(),1)
+      f.callback()();assert.equal(f.executions[0].action,'tick');assert.equal(f.executions[0].args[1].value,16);assert.equal(probe.error,'')
+      probe.aboutToDisappear();assert.equal(f.active(),0)
+     })
+     test(`destination surfaces/${route}: hidden program loads and rerenders never restart frames`, () => {
+      const f=surfaceProbe(route), {probe,events}=f
+      probe.aboutToAppear();f.transition(true)
+      const starts=events.filter(event=>event[0]==='start').length
+      for(let i=0;i<3;i++) {
+       probe.onProgramChanged();probe.renderView()
+       for(const previewOnly of [true,false]) {
+        probe.previewOnly=previewOnly;probe.onPreviewOnlyChanged()
+        assert.equal(probe.error,'');assert.equal(probe.pageHidden,true);assert.equal(f.active(),0);assert.equal(probe.liveSurfaces.length,1)
+       }
+      }
+      assert.equal(events.filter(event=>event[0]==='start').length,starts)
+      f.transition(false);assert.equal(f.active(),1);assert.equal(events.filter(event=>event[0]==='start').length,starts+1)
+      probe.aboutToDisappear()
+     })
+     test(`destination surfaces/${route}: repeated hide/show pauses, resumes and resets real loop elapsed`, () => {
+      const f=surfaceProbe(route), {probe,events}=f
+      probe.aboutToAppear()
+      for(let i=0;i<3;i++) {
+       const frame=f.callback(), starts=events.filter(event=>event[0]==='start').length
+       frame();assert.equal(f.executions.filter(call=>call.action==='tick').at(-1).args[1].value,16)
+       f.elapse(37);frame();assert.equal(f.executions.filter(call=>call.action==='tick').at(-1).args[1].value,37)
+       const last=probe.lastFrameAt
+       probe.reconcileSurfaces(false);assert.equal(f.callback(),frame);assert.equal(probe.lastFrameAt,last)
+       f.transition(true);assert.equal(f.active(),0);assert.equal(probe.pageHidden,true)
+       const stopped=events.length;f.transition(true);assert.equal(events.length,stopped)
+       f.elapse(60000);const hidden=surfaceSnapshot(f);frame();assert.deepEqual(surfaceSnapshot(f),hidden)
+       f.transition(false);assert.equal(f.active(),1);assert.equal(probe.pageHidden,false);assert.equal(probe.lastFrameAt,0)
+       const resumed=events.length;f.transition(false);assert.equal(events.length,resumed);assert.equal(events.filter(event=>event[0]==='start').length,starts+1)
+      }
+      assert.equal(events.filter(event=>event[0]==='stop').length,3)
+      if(route==='displaySync')assert.equal(events.filter(event=>event[0]==='off').length,3)
+      f.callback()();assert.equal(f.executions.filter(call=>call.action==='tick').at(-1).args[1].value,16);assert.equal(probe.error,'')
+      assert.equal(probe.currentState.fields.get('n').value,175)
+      probe.aboutToDisappear();assert.equal(f.active(),0)
+     })
+     for(const gate of ['hidden','disposed']) test(`destination surfaces/${route}: late frame does no work while ${gate}`, () => {
+      const f=surfaceProbe(route), {probe}=f
+      probe.aboutToAppear();const frame=f.callback();frame()
+      if(gate==='hidden')f.transition(true);else probe.aboutToDisappear()
+      assert.equal(f.active(),0)
+      f.elapse(60000);const before=surfaceSnapshot(f)
+      frame();probe.surfaceFrame();assert.deepEqual(surfaceSnapshot(f),before);assert.equal(probe.error,'')
+     })
+     test(`destination surfaces/${route}: disposed destination watcher is inert in both directions`, () => {
+      for(const hidden of [false,true]) {
+       const f=surfaceProbe(route), {probe}=f
+       probe.destinationHidden=hidden;probe.aboutToAppear();probe.aboutToDisappear()
+       const before=surfaceSnapshot(f)
+       f.transition(!hidden);assert.equal(probe.pageHidden,hidden);assert.equal(f.active(),0);assert.deepEqual(surfaceSnapshot(f),before)
+      }
+     })
+     for(const hidden of [false,true]) test(`destination surfaces/${route}: reappearance refreshes ${hidden?'hidden':'visible'} gate before load`, () => {
+      const f=surfaceProbe(route), {probe,events}=f
+      probe.destinationHidden=!hidden;probe.aboutToAppear();probe.aboutToDisappear();events.length=0
+      probe.destinationHidden=hidden;probe.onDestinationHidden();assert.equal(probe.pageHidden,!hidden)
+      probe.aboutToAppear()
+      assert.deepEqual(events.slice(0,4),[['catalogue',false,hidden],['dark',false,hidden],['load',false,hidden],['cleanup',false,hidden]])
+      assert.equal(probe.pageHidden,hidden);assert.equal(probe.disposed,false);assert.equal(f.active(),hidden?0:1)
+      if(!hidden) { assert.equal(probe.lastFrameAt,0);f.callback()();assert.equal(f.executions[0].args[1].value,16) }
+      probe.aboutToDisappear();assert.equal(f.active(),0)
+     })
+    }
+    test('destination visibility: Chat passes state through MessageBubble to VeraPreview', () => {
+     const chat=fs.readFileSync(path.join(sourceRoot,'pages/ChatPage.ets'),'utf8')
+     const page=declaration(chat,'export struct ChatPage'), bubble=declaration(chat,'struct MessageBubble')
+     assert.match(page,/@State\s+destinationHidden:\s*boolean\s*=\s*false/)
+     assert.match(bubble,/@Prop\s+destinationHidden:\s*boolean\s*=\s*false/)
+     for(const [source,component] of [[page,'MessageBubble'],[bubble,'VeraPreview']]) {
+      const calls=[...source.matchAll(new RegExp('\\b'+component+'\\(\\{','g'))]
+      assert(calls.length>0,component+' wiring')
+      for(const call of calls)assert.match(declaration(source.slice(call.index),component+'('),/\bdestinationHidden:\s*this\.destinationHidden\b/)
+     }
+     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
+     assert.match(renderer,/@Prop\s+@Watch\('onDestinationHidden'\)\s+destinationHidden:\s*boolean\s*=\s*false/)
+    })
+    for(const page of ['Chat','Generate','Runner']) test(`destination visibility: ${page} host onShown/onHidden and preview wiring`, () => {
+     const source=fs.readFileSync(path.join(sourceRoot,'pages/'+page+'Page.ets'),'utf8')
+     assert.match(source,/@State\s+destinationHidden:\s*boolean\s*=\s*false/)
+     assert.match(declaration(source,'.onHidden('),/\.onHidden\(\(\)\s*=>\s*\{\s*this\.destinationHidden\s*=\s*true\s*\}$/)
+     assert.match(declaration(source,'.onShown('),page==='Runner'?/\.onShown\(\(\)\s*=>\s*\{\s*this\.destinationHidden\s*=\s*false\s*\}$/:/\.onShown\(\(\)\s*=>\s*\{\s*this\.destinationShown\(\)\s*\}$/)
+     if(page!=='Chat') {
+      const calls=[...source.matchAll(/\bVeraPreview\(\{/g)].map(call=>declaration(source.slice(call.index),'VeraPreview(')).filter(call=>! /previewOnly:\s*true\b/.test(call))
+      assert(calls.length>0,'runnable previews')
+      for(const call of calls)assert.match(call,/\bdestinationHidden:\s*this\.destinationHidden\b/)
+     }
+    })
+    for(const page of ['Chat','Generate']) test(`destination visibility: ${page} real destinationShown resumes only an active host`, () => {
+     const source=fs.readFileSync(path.join(sourceRoot,'pages/'+page+'Page.ets'),'utf8')
+     const method=declaration(source,'  private destinationShown(').replace('  private ','')
+     const compiled=ts.transpileModule('class Probe { '+method+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
+     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,page+' destinationShown syntax')
+     const events=[], settings={getModel(){events.push('model');return 'fixture'},hasApiKey(){events.push('configured');return true}}
+     const Probe=new Function('settings','MODE_DEEPSEEK',compiled.outputText+';return Probe')(settings,'cloud'), probe=new Probe()
+     Object.assign(probe,{disposed:true,destinationHidden:true,mode:'cloud',generating:false,status:'',selectedModel:'',checkDeepSeek(){events.push('check')}})
+     probe.destinationShown();assert.equal(probe.destinationHidden,true);assert.deepEqual(events,[])
+     probe.disposed=false;probe.destinationShown();assert.equal(probe.destinationHidden,false);assert(events.length>0)
+     if(page==='Chat')assert.equal(probe.selectedModel,'fixture');else assert.deepEqual(events,['check'])
+    })
+    function tickerProbe() {
     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
     const timerConfig=declaration(renderer,'class TimerConfig')
     const fields=['timers','timerConfigs','timerLastFire','ticking'].map(name=>{

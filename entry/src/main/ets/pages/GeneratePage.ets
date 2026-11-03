@@ -391,6 +391,8 @@ export struct GeneratePage {
   @State fullscreen: boolean = false
   /** Full screen with the request box folded away; see composer. */
   @State composerHidden: boolean = false
+  /** True while another destination covers this page; flows to VeraPreview so its surface frame loop stops underneath. */
+  @State destinationHidden: boolean = false
   /** The result card's request line is open to the whole history of requests. */
   @State requestOpen: boolean = false
   private scroller: Scroller = new Scroller()
@@ -715,6 +717,7 @@ export struct GeneratePage {
   // foreground, so re-read it whenever the page comes back into view.
   private destinationShown(): void {
     if (this.disposed) { return }
+    this.destinationHidden = false
     if (this.mode === MODE_DEEPSEEK && !this.generating) {
       this.checkDeepSeek()
     }
@@ -2942,7 +2945,8 @@ export struct GeneratePage {
     Column() {
       Stack({ alignContent: Alignment.TopEnd }) {
         // With the box folded, the round button lies over the bottom corner: the program gets room to scroll clear of it.
-        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState, bottomRoom: this.composerHidden ? FOLD_ROOM : 0,
+        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState, destinationHidden: this.destinationHidden,
+          bottomRoom: this.composerHidden ? FOLD_ROOM : 0,
           onStateSnapshot: (encoded: string): void => { if (!this.disposed) { this.liveState = encoded } } })
           .width('100%')
           .height('100%')
@@ -3068,7 +3072,7 @@ export struct GeneratePage {
 
       Stack() {
         // Kept built under the other tabs, hidden, so what was typed into the running program is still there on return.
-        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState,
+        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState, destinationHidden: this.destinationHidden,
           onStateSnapshot: (encoded: string): void => { if (!this.disposed) { this.liveState = encoded } } })
           .width('100%')
           .height('100%')
@@ -3455,5 +3459,6 @@ export struct GeneratePage {
     .menus(this.barMenus())
     .onBackPressed((): boolean => this.handleBack())
     .onShown(() => { this.destinationShown() })
+    .onHidden(() => { this.destinationHidden = true })
   }
 }

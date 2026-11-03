@@ -280,6 +280,7 @@ struct MessageBubble {
   @ObjectLink msg: ChatMessage
   @Prop showStats: boolean = false
   @Prop chatId: string = ''
+  @Prop destinationHidden: boolean = false
   @State showCode: boolean = false
 
   /** Answers the widget's open question and takes the card away. */
@@ -348,7 +349,7 @@ struct MessageBubble {
       // renderer is handed the finished program in place instead of a new one
       // appearing where the picture was.
       if (this.msg.appState === APP_READY || (this.msg.appState === APP_BUILDING && this.msg.previewVbc2.length > 0)) {
-        VeraPreview({ previewOnly: this.msg.appState !== APP_READY,
+        VeraPreview({ previewOnly: this.msg.appState !== APP_READY, destinationHidden: this.destinationHidden,
           vbc2: this.msg.appState === APP_READY ? this.msg.vbc2 : this.msg.previewVbc2, embedded: true,
           persistKey: this.chatId.length > 0 ? chats.stateKey(this.chatId, this.msg.id) : '',
           onStateSnapshot: this.snapshotHandler(this.msg.previewGeneration) })
@@ -497,6 +498,7 @@ export struct ChatPage {
   // directly would not refresh; synced in aboutToAppear and NavDestination.onShow.
   @State selectedModel: string = ''
   @State showStats: boolean = false
+  @State destinationHidden: boolean = false
   @State chatId: string = ''
   @State title: string = ''
   private createdAt: number = 0
@@ -625,6 +627,7 @@ export struct ChatPage {
 
   private destinationShown(): void {
     if (this.disposed) { return }
+    this.destinationHidden = false
     // The model may have been changed on the Generate page while this page was in
     // the background; re-read it so the idle status line shows what a reply will use.
     this.selectedModel = settings.getModel()
@@ -1168,7 +1171,8 @@ export struct ChatPage {
           }
           ForEach(this.messages, (m: ChatMessage) => {
             ListItem() {
-              MessageBubble({ msg: m, showStats: this.showStats, chatId: this.chatId })
+              MessageBubble({ msg: m, showStats: this.showStats, chatId: this.chatId,
+                destinationHidden: this.destinationHidden })
             }
           }, (m: ChatMessage) => m.id.toString())
           // A question with nothing under it (the chat was closed before the answer came): say so, and offer to ask again.
@@ -1245,5 +1249,6 @@ export struct ChatPage {
       action: () => { this.openHistory() }
     }])
     .onShown(() => { this.destinationShown() })
+    .onHidden(() => { this.destinationHidden = true })
   }
 }

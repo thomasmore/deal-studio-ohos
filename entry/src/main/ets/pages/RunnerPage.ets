@@ -21,6 +21,7 @@ export struct RunnerPage {
   // See VeraPreview's backPressSignal/onBackHandlerChanged for the other half.
   @State hasBackHandler: boolean = false
   @State backPressSignal: number = 0
+  @State destinationHidden: boolean = false
   @State shortcutMode: boolean = false
   /** The project's name, once known; a program run from nowhere in a project is just "App". */
   @State title: string = 'App'
@@ -84,6 +85,7 @@ export struct RunnerPage {
           VeraPreview({
             vbc2: this.vbc2, persistKey: this.persistKey,
             backPressSignal: this.backPressSignal,
+            destinationHidden: this.destinationHidden,
             onBackHandlerChanged: (active: boolean) => { this.hasBackHandler = active },
           })
         }
@@ -93,5 +95,7 @@ export struct RunnerPage {
     .hideTitleBar(this.shortcutMode)
     .hideBackButton(this.shortcutMode)
     .onBackPressed((): boolean => this.handleBack())
+    .onShown(() => { this.destinationHidden = false })
+    .onHidden(() => { this.destinationHidden = true })
   }
 }

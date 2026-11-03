@@ -15,7 +15,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, VeraNumberValue, VeraStr
 import { UiHostEnvironment, HostEffect, VeraUiNode, decodeVeraUi, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
 import { runRawIntent } from '../vera/VeraIntents'
 import { runSdkAdapter } from '../vera/VeraSdkBackend'
-import { LengthMetrics, mediaquery, matrix4, uiObserver } from '@kit.ArkUI'
+import { LengthMetrics, mediaquery, matrix4 } from '@kit.ArkUI'
 
 import { catalogKinds } from '../vera/VeraUiCatalog'
 import { iconPath, ICON_STROKE, ICON_VIEWPORT, ICON_ORIGIN } from '../vera/VeraIcons'
@@ -199,6 +199,12 @@ export struct VeraPreview {
    */
   @Prop @Watch('onBackPressSignal') backPressSignal: number = 0
   /**
+   * Set by the hosting page's NavDestination.onHidden() and cleared its onShown(): while another destination
+   * covers this one, the surface frame loop stops instead of drawing underneath it and halving the top screen's
+   * frame rate. A plain boolean is enough -- unlike backPressSignal it is a state, not an event.
+   */
+  @Prop @Watch('onDestinationHidden') destinationHidden: boolean = false
+  /**
    * Told whether a ui.BackHandler is currently part of the tree, so the
    * hosting page's onBackPress() can return the right thing synchronously --
    * swallow the gesture and bump backPressSignal, or let the system handle it
@@ -340,9 +346,9 @@ export struct VeraPreview {
   // Where the frames' time went since the last report: the frame handlers, draw() and its decoding, the painting,
   // and the view refreshes in between.
   private frameSplit: number[] = [0, 0, 0, 0]
-  // The router page this preview is on is covered by another; its frame loop stops until the page shows again.
+  // The destination this preview is on is covered by another; its frame loop stops until the destination shows again.
+  // Driven by the destinationHidden @Prop, set by the hosting page's onHidden()/onShown().
   private pageHidden: boolean = false
-  private pageListener: ((info: uiObserver.RouterPageInfo) => void) | null = null
   private frameReportAt: number = 0
 
   // Kinds renderNode has a branch for. Checked against the catalogue on mount so
@@ -360,6 +366,7 @@ export struct VeraPreview {
 
   aboutToAppear(): void {
     this.disposed = false
+    this.pageHidden = this.destinationHidden
     let missing: string[] = []
     for (let kind of catalogKinds()) {
       if (VeraPreview.RENDERED.indexOf(kind) < 0) { missing.push(kind) }
@@ -369,35 +376,7 @@ export struct VeraPreview {
       this.error = 'Renderer is missing: ' + missing.join(', ')
     }
     this.watchDarkMode()
-    this.watchPage()
     this.load()
-  }
-
-  /**
-   * A page pushed over this one leaves this component alive, and a surface's frame loop with it: a game in the
-   * Generate preview, or a proof opened over another, went on drawing underneath and halved the frame rate of the
-   * one on top. The loop stops while this preview's own router page is hidden and starts again when it shows.
-   */
-  private watchPage(): void {
-    let page = this.queryRouterPageInfo()
-    if (page === undefined) { return }
-    let pageId = page.pageId
-    let listener = (info: uiObserver.RouterPageInfo): void => {
-      if (info.pageId !== pageId || this.disposed) { return }
-      if (info.state === uiObserver.RouterPageState.ON_PAGE_HIDE && !this.pageHidden) {
-        this.pageHidden = true
-        this.stopSurfaceLoop()
-      } else if (info.state === uiObserver.RouterPageState.ON_PAGE_SHOW && this.pageHidden) {
-        this.pageHidden = false
-        this.reconcileSurfaces(true)
-      }
-    }
-    try {
-      this.getUIContext().getUIObserver().on('routerPageUpdate', listener)
-      this.pageListener = listener
-    } catch (e) {
-      console.warn('VERA-SURFACE no page observer: ' + (e as Error).message)
-    }
   }
 
   onProgramChanged(): void {
@@ -751,6 +730,26 @@ export struct VeraPreview {
     }
   }
 
+  /**
+   * The hosting page's NavDestination.onHidden()/onShown() set destinationHidden; the surface frame loop follows it.
+   * This replaces the old routerPageUpdate observer, which only fired when the whole app went away: every screen now
+   * lives inside one router page, so a proof opened over this one never stopped the loop underneath.
+   */
+  private onDestinationHidden(): void {
+    if (this.disposed) { return }
+    if (this.destinationHidden) {
+      if (!this.pageHidden) {
+        this.pageHidden = true
+        this.stopSurfaceLoop()
+      }
+    } else {
+      if (this.pageHidden) {
+        this.pageHidden = false
+        this.reconcileSurfaces(true)
+      }
+    }
+  }
+
   private collectTickers(node: VeraUiNode, wanted: Map<string, TimerConfig>): void {
     if (node.kind === 'ticker' && node.checked && node.minimum > 0 &&
         node.tickerId.length > 0 && node.action.length > 0) {
@@ -806,14 +805,6 @@ export struct VeraPreview {
     this.stopAllTimers()
     // A running surface saves every few seconds; the frames since the last save would otherwise be lost.
     if (this.liveSurfaces.length > 0 && !this.previewOnly) { this.persistState() }
-    if (this.pageListener !== null) {
-      try {
-        this.getUIContext().getUIObserver().off('routerPageUpdate', this.pageListener!)
-      } catch (e) {
-        console.info('VERA-SURFACE page observer off failed: ' + (e as Error).message)
-      }
-      this.pageListener = null
-    }
     // The same applies to the dark-mode listener: it holds this component, and
     // its callback re-enters the VM.
     if (this.darkListener !== null) {
@@ -996,7 +987,7 @@ export struct VeraPreview {
    * does, rather than trapping again sixty times a second.
    */
   private surfaceFrame(): void {
-    if (this.disposed || this.framing || this.vm === null || this.currentState === null) { return }
+    if (this.disposed || this.pageHidden || this.framing || this.vm === null || this.currentState === null) { return }
     let now = Date.now()
     let elapsed = this.lastFrameAt > 0 ? Math.min(SURFACE_MAX_ELAPSED_MS, Math.max(0, now - this.lastFrameAt)) : 16
     this.lastFrameAt = now
@@ -3892,7 +3883,7 @@ export struct VeraPreview {
                   .stroke(toneEdge(this.t(), node.series2Style, this.t().primary))
                   .strokeWidth('3px')
                   .strokeLineCap(LineCapStyle.Round)
-                  .strokeLineJoin(LineJoinStyle.Round) 
+                  .strokeLineJoin(LineJoinStyle.Round)
                 Path({ commands: this.sparklineDotCommands(node.series, node.maximum, node.minimum, this.chartWidth()) })
                   .fill(toneEdge(this.t(), node.style, this.t().primary))
                   .stroke(Color.Transparent)
