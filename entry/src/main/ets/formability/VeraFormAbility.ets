@@ -41,7 +41,7 @@ export default class VeraFormAbility extends FormExtensionAbility {
         return
       }
       // The periodic update: the program's widgetRefresh, if it has one, brings the state up to date with the clock.
-      let refreshed: LiveRefresh = liveFormRefresh(formId)
+      let refreshed: LiveRefresh = await liveFormRefresh(formId)
       await formProvider.updateForm(formId, refreshed.binding)
       if (refreshed.ran) { await refreshProjectCards(formBindings.projectFor(formId), formId) }
     } catch (e) { console.warn('VERA-FORM update: ' + (e as Error).message) }
@@ -59,7 +59,7 @@ export default class VeraFormAbility extends FormExtensionAbility {
     let projectId = formBindings.projectFor(formId)
     if (projectId.length === 0) { return }
     try {
-      await formProvider.updateForm(formId, liveFormTap(formId, message))
+      await formProvider.updateForm(formId, await liveFormTap(formId, message))
       await refreshProjectCards(projectId, formId)
     } catch (e) { console.error('VERA-FORM event: ' + (e as Error).message) }
   }

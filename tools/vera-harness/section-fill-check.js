@@ -29,10 +29,9 @@ function request(kinds, extra = {}) {
   assert.equal(fill.needsGrounding(['checklist'], false), false)
   assert.equal(fill.needsGrounding(['checklist'], true), true)
   assert.equal(fill.needsGrounding(['checklist', 'trend_chart'], false), true)
-  assert.equal(fill.needsGrounding(['live_facts'], false), true)
 
   // Real-world facts with no search to ground them are refused, and nothing else is asked.
-  for (const kind of ['trend_chart', 'live_facts']) {
+  for (const kind of ['trend_chart']) {
     const c = calls({search: null})
     const f = await fill.fillSections(request([kind]), c)
     assert.match(f.failed, /real data and no search/, kind)
@@ -49,7 +48,7 @@ function request(kinds, extra = {}) {
     await fill.fillSections(request(['trend_chart']), c)
     assert.deepEqual(c.searches, [['usd rub', 2400]])
     const d = calls(); d.reply = JSON.stringify({title: 'T'})
-    await fill.fillSections(request(['live_facts']), d)
+    await fill.fillSections(request(['checklist'], {realData: true}), d)
     assert.deepEqual(d.searches, [['usd rub', 400]])
   }
 
@@ -70,20 +69,6 @@ function request(kinds, extra = {}) {
     const d = calls(); d.reply = JSON.stringify({title: 'T'})
     const g = await fill.fillSections(request(['trend_chart']), d)
     assert.equal(g.searched, true); assert.match(g.note, /search=ok/); assert.equal(g.searchText, SEARCH_TEXT)
-  }
-
-  // A live block shows a figure or a source only if the search said so.
-  {
-    const c = calls()
-    c.reply = JSON.stringify({title: 'T', section1_label1: 'USD/RUB', section1_value1: '95,00', section1_source_url: 'https://invented.example/fx'})
-    const f = await fill.fillSections(request(['live_facts']), c)
-    assert.equal(f.values[0].get('__V1_IDX__'), '-', 'a figure the search did not say is not shown')
-    assert.equal(f.values[0].get('__SRC_URL_IDX__'), '', 'a source the search did not contain is dropped')
-    assert.match(f.note, /live=checked\(source=none figures=0\)/); assert.equal(f.liveNotes.length, 1)
-    const d = calls()
-    d.reply = JSON.stringify({title: 'T', section1_label1: 'USD/RUB', section1_value1: '92,45', section1_source_url: 'https://www.cbr.ru/currency_base/daily/'})
-    const g = await fill.fillSections(request(['live_facts']), d)
-    assert.equal(g.values[0].get('__V1_IDX__'), '92,45'); assert.match(g.note, /source=ok figures=1/)
   }
 
   // Whose choice wins: the catalogue's default, under Jev's, under what the content call wrote; and the screen's tokens likewise.

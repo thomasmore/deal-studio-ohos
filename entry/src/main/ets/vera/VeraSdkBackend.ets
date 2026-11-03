@@ -148,6 +148,7 @@ import { certificateManagerDialog } from '@kit.DeviceCertificateKit'
 import { huksExternalCrypto } from '@kit.UniversalKeystoreKit'
 import { sensor, vibrator } from '@kit.SensorServiceKit'
 import { call, data, eSIM, radio, sim, sms } from '@kit.TelephonyKit'
+import { SOURCE_TARGET, sourceFetch } from './VeraSource'
 
 /** One row's real implementation: sdk.call's parameters in, its answer string out. */
 export type SdkAdapter = (params: Map<string, string>) => Promise<string>
@@ -5391,6 +5392,8 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
 export async function runSdkAdapter(target: string, params: Map<string, string>): Promise<string> {
   // The live-data block's own function (VeraLive.ets): not an SDK function, so not in ADAPTERS or the index.
   if (target === LIVE_TARGET) { return await liveFetch(params) }
+  // A live source found at generation (VeraSource.ets): one GET, read at the paths the program names.
+  if (target === SOURCE_TARGET) { return await sourceFetch(params) }
   if (calendarSdkTargets.indexOf(target) >= 0) {
     return await runCalendarSdkAdapter(target, params)
   }
@@ -5416,5 +5419,5 @@ export async function runSdkAdapter(target: string, params: Map<string, string>)
  * recall is still measured against everything the SDK has.
  */
 export function isSdkTargetImplemented(target: string): boolean {
-  return calendarSdkTargets.indexOf(target) >= 0 || ADAPTERS.has(target) || target === LIVE_TARGET
+  return calendarSdkTargets.indexOf(target) >= 0 || ADAPTERS.has(target) || target === LIVE_TARGET || target === SOURCE_TARGET
 }

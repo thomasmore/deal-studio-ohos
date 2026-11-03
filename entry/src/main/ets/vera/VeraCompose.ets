@@ -64,7 +64,7 @@ export function composePlanEnabled(): boolean { return planEnabled }
  * detail view, the readers of a log); and the intent panel, whose rows are a call of their own.
  */
 export const READY_KINDS: string[] = ['checklist', 'key_facts', 'trend_chart', 'spotlight', 'search_list', 'data_table', 'timeline',
-  'bar_chart', 'itinerary', 'live_facts']
+  'bar_chart', 'itinerary']
 
 /** Something the plan cannot settle without the person: the answers, and the one the plan was drawn for. */
 export class SketchQuestion {

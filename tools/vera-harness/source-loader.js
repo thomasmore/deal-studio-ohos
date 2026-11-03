@@ -19,7 +19,7 @@ function loadSource(file) {
     if (name.endsWith('/VeraSdkIndex')) return loadSource(path.join(__dirname, 'src/VeraSdkIndex.ts'))
     // Platform modules the template/selector files import for their network calls; the host checks never reach them.
     if (name === '@kit.PerformanceAnalysisKit') return {hilog: {info() {}, warn() {}, error() {}, debug() {}}}
-    if (name === '@kit.NetworkKit') return {http: {RequestMethod: {POST: 'POST', GET: 'GET'}, HttpProtocol: {HTTP1_1: 'http1.1'}, createHttp() { if (typeof globalThis.__veraHttp === 'function') return globalThis.__veraHttp(); return {on() {}, destroy() {}, request() { return Promise.reject(Object.assign(Error('network is not available in the host harness'), {code: 2300028})) }} }}}
+    if (name === '@kit.NetworkKit') return {http: {RequestMethod: {POST: 'POST', GET: 'GET'}, HttpProtocol: {HTTP1_1: 'http1.1'}, HttpDataType: {STRING: 0, OBJECT: 1}, createHttp() { if (typeof globalThis.__veraHttp === 'function') return globalThis.__veraHttp(); return {on() {}, destroy() {}, request() { return Promise.reject(Object.assign(Error('network is not available in the host harness'), {code: 2300028})) }} }}}
     // Any other platform module is only touched when a network or file call is made, which host checks never do.
     if (name.startsWith('@kit.') || name === 'libllama.so') return {}
     if (name.startsWith('.')) return loadSource(path.resolve(path.dirname(file), name + '.ets'))

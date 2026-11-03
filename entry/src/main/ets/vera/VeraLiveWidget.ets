@@ -1,9 +1,10 @@
 import { VirtualMachine, deserializeVbc2, encodeRuntimeValue, decodeRuntimeValue, RuntimeValue,
-  VeraNumberValue } from './VeraInterpreter'
+  VeraNumberValue, VeraStringValue } from './VeraInterpreter'
 import { UiHostEnvironment, VeraUiNode, decodeVeraUi, formatVeraNumber } from './VeraUi'
 import { CATALOG } from './VeraUiCatalog'
 import { resolveTheme } from './VeraTheme'
 import { veraStateStamp, stateDigest } from './VeraStateStamp'
+import { SOURCE_TARGET } from './VeraSource'
 
 export const LIVE_MAX_DEPTH: number = 4
 export const LIVE_MAX_NODES: number = 40
@@ -37,6 +38,13 @@ export class LiveFrame {
   live: boolean = false
   background: string = '#F8FAFC'
   nodes: CardNode[] = []
+}
+
+/** A live source call widgetRefresh made, for the card to make: its parameters and the handler its answer goes to. */
+export class SourceRequest {
+  params: Map<string, string>
+  handler: string
+  constructor(params: Map<string, string>, handler: string) { this.params = params; this.handler = handler }
 }
 
 export class WidgetSession {
@@ -114,14 +122,34 @@ export class WidgetSession {
   /** The program has widgetRefresh: the card's periodic update brings its state up to date with the clock. */
   refreshes(): boolean { return this.hasRefresh }
 
-  /** widgetRefresh, as a tap runs a handler: phone effects are refused and the state is kept only when it returns. */
-  refresh(): void {
-    if (!this.hasRefresh) { return }
+  /**
+   * widgetRefresh, as a tap runs a handler: the state is kept only when it returns. The one call it may make is its live source
+   * (Vera.Source.fetch, a GET the program was generated with): returned for the card to make, the answer going to `answer`.
+   * Any other phone effect is refused.
+   */
+  refresh(): SourceRequest[] {
+    let requests: SourceRequest[] = []
+    if (!this.hasRefresh) { return requests }
     this.host.effectsAllowed = true
     this.host.pendingEffects = []
     try {
       let next = this.vm.execute('widgetRefresh', [this.state])
-      if (this.host.pendingEffects.length > 0) { throw new Error('widgetRefresh asked for a phone action') }
+      requests = this.sourceRequests('widgetRefresh asked for a phone action')
+      this.state = next
+    } finally {
+      this.host.effectsAllowed = false
+      this.host.pendingEffects = []
+    }
+    return requests
+  }
+
+  /** A source's answer to its handler, as the app delivers one: handler(state, answer). No phone effects. */
+  answer(handler: string, text: string): void {
+    this.host.effectsAllowed = true
+    this.host.pendingEffects = []
+    try {
+      let next = this.vm.execute(handler, [this.state, new VeraStringValue(text)])
+      if (this.host.pendingEffects.length > 0) { throw new Error(handler + ' asked for a phone action') }
       this.state = next
     } finally {
       this.host.effectsAllowed = false
@@ -129,7 +157,8 @@ export class WidgetSession {
     }
   }
 
-  tap(frame: LiveFrame, token: string, action: string, value: number): void {
+  /** A button's handler; its live source call (Vera.Source.fetch), if it makes one, is returned for the card to make. */
+  tap(frame: LiveFrame, token: string, action: string, value: number): SourceRequest[] {
     if (!frame.live || token !== frame.token) { throw new Error('Widget changed; tap again') }
     let allowed = (nodes: CardNode[]): boolean => nodes.some((node: CardNode): boolean =>
       (node.kind === 'button' && node.enabled && node.action.length > 0 && node.action === action && node.value === value) || allowed(node.children))
@@ -138,11 +167,22 @@ export class WidgetSession {
     this.host.pendingEffects = []
     try {
       let next = this.vm.execute(action, [this.state, new VeraNumberValue(value)])
-      if (this.host.pendingEffects.length > 0) { throw new Error('Open app to continue: phone action required') }
+      let requests = this.sourceRequests('Open app to continue: phone action required')
       this.state = next
+      return requests
     } finally {
       this.host.effectsAllowed = false
       this.host.pendingEffects = []
     }
+  }
+
+  /** The effects collected, when every one is a call to the program's live source; else `refused` is thrown. */
+  private sourceRequests(refused: string): SourceRequest[] {
+    let requests: SourceRequest[] = []
+    for (let effect of this.host.pendingEffects) {
+      if (effect.rawTarget !== SOURCE_TARGET || effect.resultHandler.length === 0) { throw new Error(refused) }
+      requests.push(new SourceRequest(effect.values, effect.resultHandler))
+    }
+    return requests
   }
 }

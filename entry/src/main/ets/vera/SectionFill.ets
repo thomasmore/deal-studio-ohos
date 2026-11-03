@@ -8,11 +8,10 @@
 import { OperationCancellation, PredicateCancellation, throwIfCancelled } from './OperationCancellation'
 import { fillSectionsContent, blockDefaults, ContentAsk } from './VeraTemplateContent'
 import { fillHoles, holesOf, holeValues, HoleInstance, HoleAsk, HoleFill } from './VeraHoles'
-import { checkLiveProvenance } from './VeraLive'
 import { SEARCH_CHARS, SEARCH_CHARS_DATA } from './VeraWebSearch'
 
 /** Blocks that show facts of the real world: filled from a search whatever the pick said. A chart of invented round numbers is never what a chart request wants. */
-const GROUNDED_KINDS: string[] = ['trend_chart', 'live_facts']
+const GROUNDED_KINDS: string[] = ['trend_chart']
 
 /** Sections of the catalogue to have their content (and their holes) filled for this request. */
 export class BlockRequest {
@@ -50,9 +49,8 @@ export class BlockFill {
   note: string = ''
   /** Why the sections cannot be served (real data needed and no search), '' when they can. */
   failed: string = ''
-  /** The content call's note, the live-source checks' notes and the holes' note, each apart. */
+  /** The content call's note and the holes' note, each apart. */
   contentNote: string = ''
-  liveNotes: string[] = []
   holesNote: string = ''
   /** A search was made for these sections, and what it found ('' when it found nothing) and whether it found something. */
   grounded: boolean = false
@@ -146,8 +144,6 @@ export async function fillSections(request: BlockRequest, calls: BlockCalls): Pr
     if (i < request.slotValues.length) { request.slotValues[i].forEach((v: string, k: string) => { m.set(k, v) }) }
     let written = content.instanceValues[i]
     if (written !== undefined) { written.forEach((v: string, k: string) => { m.set(k, v) }) }
-    // The first figures and the source of a live block are shown as found only if the search said so.
-    if (request.kinds[i] === 'live_facts') { fill.liveNotes.push(checkLiveProvenance(m, searchText, request.prompt)) }
     values.push(m)
   }
   fill.baseValues = mergedValues(values, [])
@@ -184,7 +180,6 @@ export async function fillSections(request: BlockRequest, calls: BlockCalls): Pr
 
   let notes: string[] = [fill.contentNote]
   if (fill.grounded) { notes.push('search=' + (fill.searched ? 'ok' : 'empty')) }
-  for (let live of fill.liveNotes) { notes.push(live) }
   if (fill.holesNote.length > 0) { notes.push(fill.holesNote) }
   fill.note = notes.join(' ')
   return fill

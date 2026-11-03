@@ -3,7 +3,7 @@ const fs = require('node:fs'), path = require('node:path')
 const {loadVera} = require('./source-loader')
 const {compileVeraSource, widgetRefinementError, spliceWidget} = loadVera('VeraCompiler')
 const {smokeRun} = loadVera('VeraSmoke')
-const {widgetRefinementPrompt, validateWidgetRefinement, widgetRepairNote} = loadVera('VeraWidgetRefine')
+const {widgetRefinementPrompt, validateWidgetRefinement, widgetRepairNote, checkWidget} = loadVera('VeraWidgetRefine')
 const {WidgetSession} = loadVera('VeraLiveWidget')
 const source = fs.readFileSync(path.join(__dirname,'examples/widget-counter.vera'),'utf8')
 // Standalone fullscreen base, not a view delegating to widget.
@@ -122,6 +122,23 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
   assert.equal(refused.source, ''); assert.equal(refused.attempts, 3); assert.match(refused.failed, /no function widget/)
   console.log('PASS widget written alone: card kinds only, spliced into the program, failure fed back, three answers at most')
 })().catch(e => { console.error(e); process.exit(1) })
+
+// A program with a live source: widgetRefresh may ask for Vera.Source.fetch (and only that), its handler takes a failure and
+// still draws; the address cannot be built from the state (E2114).
+{
+  const live = fs.readFileSync(path.join(__dirname, 'examples/widget-source.vera'), 'utf8')
+  const c = compileVeraSource(live)
+  assert.equal(smokeRun(c), '')
+  assert.equal(checkWidget(c.vbc2), '')
+  const other = live.replace('function widgetRefresh(state: AppState): AppState { return fetchNow(state, time.nowSeconds()); }',
+    'function widgetRefresh(state: AppState): AppState { sdk.call("ohos.vibrator.startVibration", ["duration", "100"], "onSource"); return state; }')
+  assert.notEqual(other, live)
+  assert.match(checkWidget(compileVeraSource(other).vbc2), /phone action/)
+  const built = live.replace('["url", "https://iss.moex.com', '["url", state.note + "https://iss.moex.com')
+  assert.throws(() => compileVeraSource(built), /E2114/)
+  assert.match(widgetRefinementPrompt(false), /Vera\.Source\.fetch/)
+  console.log('PASS live source on a widget: widgetRefresh may fetch the source only, its address is literal')
+}
 
 // An import closed with a semicolon, as TypeScript writes one, is taken; any other answer that does not parse is sent back with
 // the parser's own message, not a guess.

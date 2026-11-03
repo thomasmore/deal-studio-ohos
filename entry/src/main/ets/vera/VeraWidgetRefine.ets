@@ -30,7 +30,13 @@ export function widgetRefinementPrompt(whole: boolean = true): string {
     'app when it opens and when it comes back, and both save what it returns: bring the state up to date with the clock ' +
     '(std/time) and return it, changing only ' +
     'what the time has made out of date. Running it twice in a row must give the same state as running it once, so never ' +
-    'add to a figure in it. No phone effects. Leave widgetRefresh out when nothing in the state goes out of date.\n' +
+    'add to a figure in it. No phone effects, but one: if the program gets live figures with sdk.call("Vera.Source.fetch", ...), ' +
+    'widgetRefresh makes that same call, copied exactly with the same handler, and returns the state; the card makes the call ' +
+    'and passes the answer to that handler before it redraws, so the card shows the figures as they are now. A button may ' +
+    'make the same call (a Refresh), the same way. A program that reads its figures off a search (sdk.call("Vera.Live.fetch", ' +
+    '...)) is not refreshed on the card -- a search is too slow for it -- so neither widgetRefresh nor a widget button makes ' +
+    'that call: the widget shows the figures the app fetched last, with their time, and no Refresh button. ' +
+    'Leave widgetRefresh out when nothing in the state goes out of date.\n' +
     (whole ? 'Preserve every existing class, init, view and handler unchanged, including their signatures and bodies. ' +
     'Add or replace only function widget(state: the init return type): ui.View, widgetRefresh, and new uniquely named ' +
     'helpers/number handlers. ' : WIDGET_ONLY) +
@@ -123,7 +129,10 @@ export function checkWidget(vbc2: string, saved: string = ''): string {
         let available = (nodes: CardNode[]): boolean => nodes.some((node: CardNode): boolean =>
           (node.kind === 'button' && node.enabled && node.action === button.action && node.value === button.value) || available(node.children))
         if (!available(current.nodes)) { break }
-        branch.tap(current, current.token, button.action, button.value)
+        // A Refresh button's live source is not fetched here: its handler is given a failure, which it must take and still draw.
+        for (let request of branch.tap(current, current.token, button.action, button.value)) {
+          branch.answer(request.handler, 'error: the source is not reached while checking')
+        }
         branch.frame('project', 'App', '')
         let host = new UiHostEnvironment()
         let vm = new VirtualMachine(deserializeVbc2(vbc2), host, LIVE_MAX_STEPS)
@@ -156,7 +165,8 @@ function checkRefresh(vbc2: string, saved: string): string {
   if (!session.refreshes()) { return '' }
   let states: string[] = []
   for (let run = 0; run < 2; run++) {
-    session.refresh()
+    // A live source is not fetched here: its handler is given a failure, which it must take and still draw.
+    for (let request of session.refresh()) { session.answer(request.handler, 'error: the source is not reached while checking') }
     session.frame('project', 'App', '')
     let host = new UiHostEnvironment()
     let vm = new VirtualMachine(deserializeVbc2(vbc2), host, LIVE_MAX_STEPS)
@@ -171,12 +181,13 @@ function checkRefresh(vbc2: string, saved: string): string {
   return ''
 }
 
-/** Two encoded states alike, but for timestamps (numbers over 1e12, as std/time.nowMillis) under a minute apart. */
+/** Two encoded states alike, but for timestamps (std/time.nowMillis over 1e12, nowSeconds over 1e9) under a minute apart. */
 function sameState(a: Object | null, b: Object | null): boolean {
   if (typeof a === 'number' && typeof b === 'number') {
     let x = a as number
     let y = b as number
-    return x === y || (x > 1e12 && y > 1e12 && Math.abs(x - y) < 60000)
+    return x === y || (x > 1e12 && y > 1e12 && Math.abs(x - y) < 60000) ||
+      (x > 1e9 && y > 1e9 && x < 1e11 && y < 1e11 && Math.abs(x - y) < 60)
   }
   if (Array.isArray(a) && Array.isArray(b)) {
     let left = a as Object[]

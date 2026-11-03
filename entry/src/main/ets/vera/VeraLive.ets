@@ -1,5 +1,7 @@
 /**
- * The host side of the live-data block (`live_facts` in VeraTemplates.ets): `sdk.call("Vera.Live.fetch", ["query", ..., "labels", "A|B|C"], handler)`.
+ * A live figure read off a web search, each time the program asks: `sdk.call("Vera.Live.fetch", ["query", ..., "labels", "A|B|C"], handler)`.
+ * The fallback of a program that shows a current figure when no public API for it was found at generation (VeraSourceFind.ets,
+ * Vera.Source.fetch in VeraSource.ets): a search and a model call on every refresh, so slower, paid for, and not made on a card.
  *
  * A generated program cannot reach the internet; this is the one place it can, and it answers in plain lines the program can split:
  *
@@ -255,59 +257,4 @@ export async function liveFetch(params: Map<string, string>): Promise<string> {
     liveAnswers.set(key, remembered)
   }
   return answer
-}
-
-// ----- generation time: the first figures and the source, checked against the search the pipeline made -----
-
-/** What the content fill wrote, with its VERA string escapes undone, for comparing with the search text. */
-function unescapeVera(text: string): string {
-  return text.split('\\"').join('"').split('\\\\').join('\\')
-}
-
-function escapeVera(text: string, max: number): string {
-  let s = text.replace(/[\r\n]+/g, ' ').trim()
-  if (s.length > max) { s = s.substring(0, max).trim() }
-  return s.split('\\').join('\\\\').split('"').join('\\"')
-}
-
-/** The number groups in a figure ("92.45 RUB" -> ["92.45"]). */
-function numbersIn(value: string): string[] {
-  let found = value.match(/\d+(?:[.,]\d+)*/g)
-  return found === null ? [] : found
-}
-
-/**
- * The values of one live_facts block (keyed by token, as VeraTemplateContent writes them) after the model filled them from
- * `searchText`. Nothing the search did not say is shown as found:
- *  - the source address must occur in the search text, else address and name are blanked; the name is then the address's own domain;
- *  - a figure with digits must have every number group in the search text, else it is "-";
- *  - with no search text at all every figure is "-" and there is no source (the block's first refresh fills them in);
- *  - an empty search query becomes the request itself.
- * Returns a short note for the route log.
- */
-export function checkLiveProvenance(values: Map<string, string>, searchText: string, request: string): string {
-  let sourceOk = false
-  let url = unescapeVera(values.get('__SRC_URL_IDX__') ?? '')
-  if (url.length > 0 && searchText.indexOf(url) >= 0) {
-    sourceOk = true
-    values.set('__SRC_URL_IDX__', escapeVera(url, 160))
-    values.set('__SRC_NAME_IDX__', escapeVera(domainOf(url), 40))
-  } else {
-    values.set('__SRC_URL_IDX__', '')
-    values.set('__SRC_NAME_IDX__', '')
-  }
-  let kept = 0
-  for (let n = 1; n <= LIVE_MAX_LABELS; n++) {
-    let key = '__V' + n.toString() + '_IDX__'
-    let label = unescapeVera(values.get('__L' + n.toString() + '_IDX__') ?? '')
-    let value = unescapeVera(values.get(key) ?? '')
-    if (label.length === 0) { values.set(key, ''); continue }
-    let ok = searchText.length > 0 && value.length > 0 && value !== '-'
-    if (ok) {
-      for (let group of numbersIn(value)) { if (!foundIn(group, searchText)) { ok = false } }
-    }
-    if (ok) { kept++ } else { values.set(key, '-') }
-  }
-  if ((values.get('__QUERY_IDX__') ?? '').length === 0) { values.set('__QUERY_IDX__', escapeVera(request, 80)) }
-  return 'live=checked(source=' + (sourceOk ? 'ok' : 'none') + ' figures=' + kept.toString() + ')'
 }

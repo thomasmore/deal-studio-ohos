@@ -99,7 +99,7 @@ function pick(kinds, fired = []) {
   const kinds = lib.standaloneKinds().map(k => k.kind)
   for (const reader of ['filter_box', 'detail_view', 'list_summary', 'number_strip', 'breakdown_table', 'series_chart', 'settle_up', 'progress_line'])
     assert.ok(!kinds.includes(reader), reader + ' needs a partner and is not offered on its own')
-  for (const hub of ['checklist', 'record_log', 'itinerary', 'reminders', 'timer', 'live_facts']) assert.ok(kinds.includes(hub), hub)
+  for (const hub of ['checklist', 'record_log', 'itinerary', 'reminders', 'timer']) assert.ok(kinds.includes(hub), hub)
 
   const body = JSON.parse(lib.buildNeedRequest('an egg timer', needs))
   assert.equal(body.state, 'an egg timer')

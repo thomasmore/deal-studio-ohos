@@ -191,9 +191,10 @@ Host check: `tools/vera-harness/surface-edit-check.js` (mocked model).
    are matched to a reader's ports by a question of their own (not built).
 
 4. **Fill.** The catalogue sections' content is written (from a web search when it must be real) and their holes
-   filled, by the one fill both the agent and the blocks use (`SectionFill.ets`): a trend chart or a live-facts block is
-   always grounded in a search whatever the plan said (the chart with the longer results), a live-facts block shows only
-   the figures and the source that search contains, and with no search the sections are refused.
+   filled, by the one fill both the agent and the blocks use (`SectionFill.ets`): a trend chart is always grounded in a
+   search whatever the plan said (with the longer results), and with no search the sections are refused. A current figure
+   of the real world is not the agent's: Generate writes it on a live source before the route (`docs/live-sources.md`), and
+   the `live_facts` block that once did it is removed.
 4b. **Slots and claims.** What each chosen section offers (a button for each item, a calendar, a style) is read from the
    request by one Jev call (`buildSlotRequest`); without it the catalogue's defaults leave out what the request asks for.
    What the composer left out because a section is said to do it (`comp.claimed`) is then read against the assembled

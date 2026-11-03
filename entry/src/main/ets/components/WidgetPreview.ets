@@ -1,5 +1,6 @@
 import { WidgetSession, LiveFrame, CardNode } from '../vera/VeraLiveWidget'
 import { app } from './AppStyle'
+import { sourceFetch } from '../vera/VeraSource'
 
 /** A 2x2 home-screen card on this phone, in vp: the size the widget is written for. */
 const CARD_SIDE: number = 172
@@ -41,11 +42,16 @@ export struct WidgetPreview {
     }
   }
 
-  private tap(node: CardNode): void {
+  private async tap(node: CardNode): Promise<void> {
     if (this.session === null) { return }
+    let session = this.session!
     try {
-      this.session.tap(this.frame, this.frame.token, node.action, node.value)
-      this.frame = this.session.frame('', this.title, '')
+      // A Refresh button fetches its live source here too, as the card does.
+      for (let request of session.tap(this.frame, this.frame.token, node.action, node.value)) {
+        session.answer(request.handler, await sourceFetch(request.params))
+      }
+      if (session !== this.session) { return }
+      this.frame = session.frame('', this.title, '')
       this.error = ''
     } catch (e) {
       this.error = (e as Error).message

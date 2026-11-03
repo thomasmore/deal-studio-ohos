@@ -1,0 +1,24 @@
+import * as ui from "std/ui"
+import * as sdk from "std/sdk"
+import * as strings from "std/strings"
+import * as time from "std/time"
+@jsonable class AppState { value: string; asOf: string; note: string; lastCall: number; }
+function init(): AppState { return {value: "2455.62", asOf: "", note: "", lastCall: 0}; }
+function fetchNow(state: AppState, now: number): AppState {
+  sdk.call("Vera.Source.fetch", ["url", "https://iss.moex.com/iss/engines/stock/markets/index/securities/IMOEX.json", "paths", "marketdata.data[0][1]", "asof", "marketdata.data[0][3]"], "onSource");
+  return {value: state.value, asOf: state.asOf, note: state.note, lastCall: now};
+}
+function refresh(state: AppState, ignored: number): AppState {
+  let now: number = time.nowSeconds();
+  if (now - state.lastCall < 10) { return state; }
+  return fetchNow(state, now);
+}
+function onSource(state: AppState, answer: string): AppState {
+  let lines: string[] = strings.split(answer, "\n");
+  if (lines[0] !== "ok") { return {value: state.value, asOf: state.asOf, note: answer, lastCall: state.lastCall}; }
+  let when: string[] = strings.split(lines[5], "\t");
+  return {value: lines[1], asOf: when[1], note: "", lastCall: state.lastCall};
+}
+function view(state: AppState): ui.View { return ui.Column("default", [ui.Text("metric", state.value), ui.Text("caption", state.asOf), ui.Button("primary", "Refresh", "refresh", 0, true)]); }
+function widget(state: AppState): ui.View { return ui.Column("default", [ui.Text("caption", "IMOEX"), ui.Text("metric", state.value), ui.Text("caption", state.asOf), ui.Button("primary", "Refresh", "refresh", 0, true)]); }
+function widgetRefresh(state: AppState): AppState { return fetchNow(state, time.nowSeconds()); }

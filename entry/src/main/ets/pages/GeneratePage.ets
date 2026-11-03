@@ -53,6 +53,9 @@ import { MetricCard, MetricTile, MetricChip, MetricLine } from '../components/Me
 import { buildScreen, RouteRequest, RouteOutcome, OUTCOME_AGENT, OUTCOME_CANCELLED } from '../vera/agent/VeraBuildRoute'
 import { webSearch, SEARCH_CHARS } from '../vera/VeraWebSearch'
 import { LIVE_QUERY_PROMPT, parseLiveQuery, foundResults, liveFiguresNote } from '../vera/LiveFigures'
+import { findSource, SourceFound, sourceNote, sourceUseError, sourceShownError, searchSpec } from '../vera/VeraSourceFind'
+import { SourceSpec } from '../vera/VeraSource'
+import { appSourceCalls } from '../vera/SourceAppCalls'
 import { templateSelectEnabled } from '../vera/VeraTemplateSelectFlag'
 import { ToolCall, ToolTotal, toolCalls, resetToolLog, toolTotals, toolMs } from '../vera/ToolLog'
 import { ServiceNote, serviceNotes, resetServiceHealth, describeService, silent, serviceTrouble } from '../vera/ServiceHealth'
@@ -421,6 +424,8 @@ export struct GeneratePage {
   private previousSource: string = ''
   private makeWidget: boolean = false
   private widgetBase: string = ''
+  /** The live source the program was generated on (VeraSourceFind.ets); it must keep fetching it. null for none. */
+  private liveSource: SourceSpec | null = null
   /** The app preview's state when the Widget tab was opened: what the widget preview draws. */
   @State widgetSeed: string = ''
   /** The project's name, for the card's frame (a live card does not show it). */
@@ -1091,12 +1096,15 @@ export struct GeneratePage {
   }
 
   /**
-   * A new screen that shows a current figure (the weather, a rate, a price) is written by the model on a search made now
-   * (LiveFigures.ets), not built by the agent; everything else, and a search that found nothing, goes to the route.
+   * A new screen that shows a current figure (the weather, a rate, a price) is written by the model, not built by the agent.
+   * First a live source is looked for (VeraSourceFind.ets): a public JSON API the program fetches itself, so its figures and its
+   * widget stay current. Without one, the program reads the figure off a web search on each refresh (Vera.Live.fetch), starting
+   * from the results of a search made now (LiveFigures.ets). Everything else, and a search that found nothing, goes to the route.
    */
   private async tryLiveFigures(userPrompt: string, route: RouteRequest, operation: OperationController): Promise<void> {
     if (this.disposed || operation.isCancelled()) { return }
     let run = this.runId
+    this.liveSource = null
     try {
       if (settings.hasExaKey()) {
         this.status = 'Checking whether it needs current figures...'
@@ -1107,6 +1115,24 @@ export struct GeneratePage {
         addStage(this.stages, 'Does it need current figures', WHO_MODEL, Date.now() - checkStart)
         let query = parseLiveQuery(answer === null ? '' : answer)
         if (query.length > 0) {
+          this.status = 'Looking for a live data source...'
+          let findStart = Date.now()
+          let found: SourceFound = await this.metricWork(run, (): Promise<SourceFound> =>
+            findSource(userPrompt + '\nThe figure to fetch: ' + query, appSourceCalls(operation)))
+          if (this.disposed || run !== this.runId || this.cancelRequested || operation.isCancelled()) { return }
+          addStage(this.stages, 'Finding a live source', WHO_SEARCH, Date.now() - findStart,
+            found.spec !== null ? found.spec!.url : found.tried.join('; ').substring(0, 300))
+          let sourceFields: Record<string, Object> = {}
+          sourceFields['query'] = query
+          sourceFields['url'] = found.spec !== null ? found.spec!.url : ''
+          sourceFields['tried'] = found.tried
+          sourceFields['ms'] = found.ms
+          trace('live-source', sourceFields)
+          if (found.spec !== null) {
+            this.liveSource = found.spec
+            this.startAttemptOne(userPrompt, operation, 'Generating', sourceNote(found.spec!))
+            return
+          }
           this.status = 'Looking up current figures...'
           let searchStart = Date.now()
           let results = await this.metricWork(run, (): Promise<string> => webSearch(query, SEARCH_CHARS, operation))
@@ -1116,8 +1142,11 @@ export struct GeneratePage {
           fields['query'] = query
           fields['found'] = foundResults(results)
           trace('live-figures', fields)
+          // No API: the program reads the figure off a search on each refresh (Vera.Live.fetch), starting from these results.
+          // Only a search that found nothing, with nothing to start from, goes on to the route.
           if (foundResults(results)) {
-            this.startAttemptOne(userPrompt, operation, 'Generating', liveFiguresNote(results))
+            this.liveSource = searchSpec(query)
+            this.startAttemptOne(userPrompt, operation, 'Generating', sourceNote(this.liveSource!) + '\n\n' + liveFiguresNote(results))
             return
           }
         }
@@ -1561,6 +1590,11 @@ export struct GeneratePage {
       errors = smokeRun(result)
       if (errors.length === 0 && this.makeWidget) {
         errors = validateWidgetRefinement(this.widgetBase, this.generatedSource.trim(), result.vbc2)
+      }
+      // A program written on a live source fetches it itself: figures written into it would never change.
+      if (errors.length === 0 && this.liveSource !== null) {
+        errors = sourceUseError(this.generatedSource.trim(), this.liveSource!)
+        if (errors.length === 0) { errors = sourceShownError(this.generatedSource.trim(), result.vbc2, this.liveSource!) }
       }
       logStep('smoke', smokeStart, 'src=generate attempt=' + this.attempt.toString() + ' ok=' + (errors.length === 0).toString())
       vbc2 = errors.length === 0 ? result.vbc2 : ''
@@ -3537,6 +3571,7 @@ export struct GeneratePage {
     this.projectId = ''
     // Nor a widget for it.
     this.makeWidget = false
+    this.liveSource = null
     this.widgetBase = ''
     this.startNew()
     this.runs = []

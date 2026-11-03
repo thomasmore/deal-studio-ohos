@@ -908,6 +908,12 @@ export class DeepSeekEngine {
    * with. null on any failure -- no key, no network, an answer that is not a
    * JSON array -- and the caller then describes the whole catalogue.
    */
+  /** One step of finding a live source (VeraSourceFind.ets): a JSON object, thinking off; null on any failure. */
+  async extractSourceJson(systemPrompt: string, userPrompt: string, cancellation?: OperationCancellation): Promise<string | null> {
+    return this.extractTemplateContent(systemPrompt, userPrompt, 1200, 'Live source', false, cancellation)
+  }
+
+
   /**
    * The sketch for VeraCompose.ets: the request as JSON data, no code. Thinking off and a small
    * budget, like extractUiNeeds; null on any failure, and the caller generates from scratch.

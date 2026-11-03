@@ -2179,10 +2179,23 @@ class Analyzer {
             '"bundle/module/ability/IntentName", or "bundle/module/ability" to just launch it; got "' +
             target + '"', arg.span)
         }
-      } else if (target !== 'Vera.Live.fetch' && !isValidSdkTarget(target)) {
-        // The one host function that is not an SDK entry (VeraLive.ets, LIVE_TARGET); any other made-up "Vera." address is still refused.
+      } else if (target !== 'Vera.Live.fetch' && target !== 'Vera.Source.fetch' && !isValidSdkTarget(target)) {
+        // The host functions that are not SDK entries (VeraLive.ets, VeraSource.ets); any other made-up "Vera." address is still refused.
         this.addError('E2110', 'sdk.call target "' + target + '" is not one find_sdk_function ' +
           'returned; call it first and use a target exactly as it came back', arg.span)
+      }
+    }
+    // A live source's address and paths (VeraSource.ets), and a live search's query (VeraLive.ets), are the ones given at
+    // generation: written out, never built from the state, so nothing the program keeps can go out in an address or a query.
+    let liveTarget = expr.argumentsList.length > 0 && expr.argumentsList[0] instanceof StringExpression ?
+      (expr.argumentsList[0] as StringExpression).value : ''
+    if (liveTarget === 'Vera.Source.fetch' || liveTarget === 'Vera.Live.fetch') {
+      let params = expr.argumentsList.length > 1 ? expr.argumentsList[1] : null
+      let literal = params instanceof ArrayExpression &&
+        (params as ArrayExpression).elements.every((item: Expression): boolean => item instanceof StringExpression)
+      if (!literal) {
+        this.addError('E2114', liveTarget + ' takes its parameters as written-out strings only: copy them exactly as given, ' +
+          'never build them from variables or the state', (params ?? expr).span)
       }
     }
     if (expr.argumentsList.length > 1 && expr.argumentsList[1] instanceof ArrayExpression) {
