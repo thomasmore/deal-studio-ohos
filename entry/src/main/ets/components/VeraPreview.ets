@@ -248,6 +248,7 @@ export struct VeraPreview {
    * without this a late answer would re-enter a VM that is no longer there.
    */
   private disposed: boolean = false
+  private effectGeneration: number = 0
   // Live tickers, keyed by the program's own id for each: handle, interval and
   // the moment of the last fire, so a handler can be told how long really passed.
   private timers: Map<string, number> = new Map<string, number>()
@@ -358,6 +359,7 @@ export struct VeraPreview {
     'table', 'tablerow', 'motion', 'transform', 'stage', 'surface']
 
   aboutToAppear(): void {
+    this.disposed = false
     let missing: string[] = []
     for (let kind of catalogKinds()) {
       if (VeraPreview.RENDERED.indexOf(kind) < 0) { missing.push(kind) }
@@ -434,13 +436,22 @@ export struct VeraPreview {
     }
   }
 
+  private invalidateEffects(): void {
+    this.effectGeneration += 1
+    this.heldEffects = []
+    this.pending = null
+    if (this.host !== null) { this.host!.pendingEffects = [] }
+  }
+
   private load(): void {
+    this.invalidateEffects()
     // A preview follows a screen being made: each program it is handed is the same screen a little further on, so its tree
     // is reconciled into the one already drawn. Replacing it rebuilt the whole screen for every piece of the plan, and
     // the screen flickered while it grew.
     let keep = this.previewOnly && this.liveRoot !== null && this.vbc2.length > 0
     this.stopAllTimers()
     this.vm = null
+    this.host = null
     this.currentState = null
     if (!keep) {
       this.liveRoot = null
@@ -791,6 +802,7 @@ export struct VeraPreview {
   aboutToDisappear(): void {
     // Without this the tickers -- and the VM they drive -- outlive the screen.
     this.disposed = true
+    this.invalidateEffects()
     this.stopAllTimers()
     // A running surface saves every few seconds; the frames since the last save would otherwise be lost.
     if (this.liveSurfaces.length > 0 && !this.previewOnly) { this.persistState() }
@@ -1201,6 +1213,7 @@ export struct VeraPreview {
    * the component produces -- a number, a string or a boolean.
    */
   private dispatch(action: string, payload: RuntimeValue, persist: boolean = true): void {
+    if (this.disposed) { return }
     console.info('VERA-CLICK action=' + action + ' rev=' + this.revision.toString())
     if (this.vm === null || this.currentState === null || this.previewOnly) { return }
     let t0 = Date.now()
@@ -1243,7 +1256,7 @@ export struct VeraPreview {
    * a VM that is no longer running.
    */
   private drainEffects(): void {
-    if (this.host === null) { return }
+    if (this.disposed || this.host === null) { return }
     let effects: HostEffect[] = this.host!.pendingEffects
     if (effects.length === 0) { return }
     this.host!.pendingEffects = []
@@ -1259,6 +1272,7 @@ export struct VeraPreview {
    * whole mechanism exists to prevent.
    */
   private runQueued(): void {
+    if (this.disposed) { return }
     while (this.heldEffects.length > 0) {
       if (this.pending !== null) { return }
       let effect = this.heldEffects.shift() as HostEffect
@@ -1339,6 +1353,7 @@ export struct VeraPreview {
 
   /** The person allowed it: run it, then carry on with whatever was behind it. */
   private allowPending(): void {
+    if (this.disposed) { return }
     let effect = this.pending
     this.pending = null
     if (effect !== null) {
@@ -1358,6 +1373,7 @@ export struct VeraPreview {
    * and hears nothing back will show the person a screen that is quietly wrong.
    */
   private refusePending(): void {
+    if (this.disposed) { return }
     let effect = this.pending
     this.pending = null
     if (effect !== null) {
@@ -1369,6 +1385,8 @@ export struct VeraPreview {
 
   /** One effect, whichever host it belongs to, answered through its handler. */
   private runEffect(effect: HostEffect): void {
+    if (this.disposed) { return }
+    let generation = this.effectGeneration
     let answer: Promise<string>
     if (effect.kind === 'sdk' && effect.rawTarget.indexOf('/') >= 0) {
       // An intent-style target: it gets real dispatch through runRawIntent.
@@ -1384,10 +1402,10 @@ export struct VeraPreview {
       answer = runSdkAdapter(effect.rawTarget, effect.values)
     }
     answer.then((text: string) => {
-      if (this.disposed) { return }
+      if (this.disposed || generation !== this.effectGeneration) { return }
       this.dispatch(effect.resultHandler, new VeraStringValue(text))
     }).catch((e: Error) => {
-      if (this.disposed) { return }
+      if (this.disposed || generation !== this.effectGeneration) { return }
       this.dispatch(effect.resultHandler, new VeraStringValue('error: ' + e.message))
     })
   }

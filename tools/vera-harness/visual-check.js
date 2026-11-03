@@ -38,6 +38,7 @@ function platformModule(name, mocks, suffix='') {
  return mod.exports
 }
 function test(name, action) { try { action(); results.push({name, result:'PASS'}) } catch(e) { results.push({name, result:'FAIL', error:String(e.stack || e)}) } }
+async function testAsync(name, action) { try { await action(); results.push({name, result:'PASS'}) } catch(e) { results.push({name, result:'FAIL', error:String(e.stack || e)}) } }
 function vm(bytecode) { return new V.VirtualMachine(V.deserializeVbc2(bytecode), new U.UiHostEnvironment()) }
 function walk(node) { return [node, ...(node.children || []).flatMap(walk)] }
 for (const [name, handler, value, field, expected] of cases) {
@@ -142,7 +143,7 @@ if (!baseline) {
    let change, renders=0, density=1
    const listener={matches:true,on(event,cb){events.push(event);change=cb},off(event){events.push('off:'+event)}}
    probe.getUIContext=()=>({getMediaQuery:()=>({matchMediaSync(query){queries.push(query);return listener}}),vp2px:value=>value*density})
-   probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.dark=false;probe.disposed=false;probe.liveSurfaces=[]
+    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.invalidateEffects=()=>{};probe.dark=false;probe.disposed=false;probe.liveSurfaces=[];probe.pageListener=null
    probe.watchDarkMode();assert.deepEqual(queries,['(dark-mode: true)']);assert.equal(probe.dark,true);assert.equal(probe.darkListener,listener)
    change({matches:true});assert.equal(renders,0);change({matches:false});assert.equal(renders,1);assert.equal(probe.dark,false)
    for(density of [1,2,3.5]) {
@@ -156,6 +157,194 @@ if (!baseline) {
    probe.aboutToDisappear();assert.equal(probe.disposed,true);assert.equal(probe.darkListener,null);assert.deepEqual(events,['change','stop','off:change'])
    change({matches:true});assert.equal(renders,1)
   })
+   function effectProbe() {
+    const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
+    const fields=['effectGeneration','disposed','heldEffects','vm','host','currentState'].map(name=>{
+     const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
+     return field[0].replace('  private ','')
+    }).join('\n')
+    const names=['invalidateEffects','load','dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']
+    const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
+    const compiled=ts.transpileModule('class Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
+    assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'effect probe syntax')
+    const platform=[], events=[], executions=[], delivered=[]
+    let probe, platformHook=()=>{}
+    class Machine {
+     constructor(module,host) { this.module=module;this.host=host }
+     execute(action,args=[]) { executions.push({action,args});return action==='init'?new V.VeraNumberValue(0):args[0] }
+     stepsExecuted() { return 1 }
+    }
+    function call(kind,...args) {
+     let resolve, reject
+     const promise=new Promise((ok,fail)=>{resolve=ok;reject=fail})
+     platform.push({kind,args,promise,resolve,reject})
+     platformHook()
+     return promise
+    }
+    const mocks={UiHostEnvironment:U.UiHostEnvironment,VirtualMachine:Machine,deserializeVbc2:V.deserializeVbc2,VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
+    const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
+    probe=new Probe()
+    Object.assign(probe,{pending:null,programId:7,revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',pageListener:null,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},watchPage(){events.push(['page',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2})
+    const bytecode=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
+    function load() { probe.vbc2=bytecode;probe.load() }
+    function observeDispatch() { probe.dispatch=(action,value)=>{assert(value instanceof V.VeraStringValue);delivered.push([action,value.value])} }
+    return {probe,platform,events,executions,delivered,bytecode,load,observeDispatch,onPlatform(action){platformHook=action}}
+   }
+   function hostEffect(id=1,kind='sdk',rawTarget='fixture.read') { return {id,kind,fn:'call',rawTarget,rawMode:'',values:new Map(),resultHandler:'answer'+id} }
+   async function settleEffect(call,rejected=false,text='answer') {
+    if(rejected)call.reject(new Error(text));else call.resolve(text)
+    await new Promise(resolve=>setImmediate(resolve))
+   }
+   for(const transition of ['load','disappear','reappear']) for(const rejected of [false,true]) await testAsync(`renderer effects: late ${rejected?'error':'answer'} ignored after ${transition}`, async () => {
+    const f=effectProbe(), {probe,platform,delivered}=f
+    f.load();f.observeDispatch()
+    const generation=probe.effectGeneration
+    probe.runEffect(hostEffect())
+    assert.equal(platform.length,1);assert(platform[0].promise instanceof Promise)
+    if(transition==='load')f.load();else {
+     probe.aboutToDisappear()
+     if(transition==='reappear')probe.aboutToAppear()
+    }
+    assert(probe.effectGeneration>generation)
+    if(transition==='reappear')assert.equal(probe.disposed,false)
+    await settleEffect(platform[0],rejected,'old')
+    assert.deepEqual(delivered,[])
+    if(transition!=='disappear') {
+     probe.runEffect(hostEffect(2))
+     await settleEffect(platform[1],rejected,'current')
+     assert.deepEqual(delivered,[['answer2',rejected?'error: current':'current']])
+    }
+   })
+   for(const rejected of [false,true]) await testAsync(`renderer effects: disposed callback drops current-generation ${rejected?'error':'answer'}`, async () => {
+    const f=effectProbe();f.load();f.observeDispatch()
+    const generation=f.probe.effectGeneration
+    f.probe.runEffect(hostEffect());f.probe.disposed=true
+    await settleEffect(f.platform[0],rejected,'disposed')
+    assert.equal(f.probe.effectGeneration,generation);assert.deepEqual(f.delivered,[])
+   })
+   for(const rejected of [false,true]) await testAsync(`renderer effects: current ${rejected?'error':'answer'} delivered through each platform route`, async () => {
+    for(const [kind,target,route] of [['sdk','fixture/read','intent'],['sdk','fixture.read','sdk'],['other','fixture.read','sdk']]) {
+     const f=effectProbe();f.load();f.observeDispatch()
+     const effect=hostEffect(1,kind,target), generation=f.probe.effectGeneration
+     f.probe.runEffect(effect)
+     assert.equal(f.platform.length,1);assert.equal(f.platform[0].kind,route)
+     assert.equal(f.platform[0].args[0],target);assert.equal(f.platform[0].args[1],effect.values)
+     await settleEffect(f.platform[0],rejected,'current')
+     assert.deepEqual(f.delivered,[['answer1',rejected?'error: current':'current']]);assert.equal(f.probe.effectGeneration,generation)
+    }
+   })
+   for(const rejected of [false,true]) await testAsync(`renderer effects: generation captured before platform ${rejected?'error':'answer'}`, async () => {
+    const f=effectProbe();f.load();f.observeDispatch()
+    const generation=f.probe.effectGeneration
+    f.onPlatform(()=>f.load())
+    f.probe.runEffect(hostEffect())
+    assert.equal(f.platform.length,1);assert.equal(f.probe.effectGeneration,generation+1)
+    await settleEffect(f.platform[0],rejected,'reentrant')
+    assert.deepEqual(f.delivered,[])
+   })
+   await testAsync('renderer effects: out-of-order replies in one generation are all delivered', async () => {
+    const f=effectProbe();f.load();f.observeDispatch()
+    const generation=f.probe.effectGeneration
+    for(let id=1;id<=3;id++)f.probe.runEffect(hostEffect(id))
+    assert.equal(f.platform.length,3)
+    await settleEffect(f.platform[2],false,'third')
+    await settleEffect(f.platform[0],true,'first')
+    await settleEffect(f.platform[1],false,'second')
+    assert.deepEqual(f.delivered,[['answer3','third'],['answer1','error: first'],['answer2','second']]);assert.equal(f.probe.effectGeneration,generation)
+   })
+   for(const mode of ['normal','empty','malformed','preview']) test('renderer effects: '+mode+' load invalidates queues and preserves UI identity rules', () => {
+    const f=effectProbe(), {probe}=f
+    f.load()
+    const oldHost=probe.host, oldVm=probe.vm, oldState=probe.currentState, root={fixture:true}, generation=probe.effectGeneration, programId=probe.programId
+    oldHost.pendingEffects=[hostEffect(1)];probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+    probe.liveRoot=root;probe.hasRoot=true;probe.previewOnly=mode==='preview'
+    probe.vbc2=mode==='empty'?'':mode==='malformed'?'not valid bytecode':f.bytecode
+    probe.stopAllTimers=()=>{
+     assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert.deepEqual(oldHost.pendingEffects,[])
+     assert.equal(probe.vm,oldVm);assert.equal(probe.currentState,oldState)
+    }
+    probe.load()
+    assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(oldHost.pendingEffects,[]);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null)
+    assert.equal(probe.programId,programId+(mode==='preview'?0:1));assert.equal(probe.liveRoot,mode==='preview'?root:null);assert.equal(probe.hasRoot,mode==='preview')
+    assert.notEqual(probe.host,oldHost)
+    if(mode==='empty') { assert.equal(probe.host,null);assert.equal(probe.vm,null);assert.equal(probe.currentState,null);assert.equal(probe.error,'') }
+    else if(mode==='malformed') { assert.equal(probe.vm,null);assert.equal(probe.currentState,null);assert.match(probe.error,/^Init error: /) }
+    else { assert(probe.host instanceof U.UiHostEnvironment);assert.notEqual(probe.vm,oldVm);assert.equal(probe.error,'') }
+   })
+   for(const mode of ['empty','malformed','preview']) for(const rejected of [false,true]) await testAsync(`renderer effects: ${mode} load rejects late ${rejected?'errors':'answers'}`, async () => {
+    const f=effectProbe();f.load();f.observeDispatch()
+    const programId=f.probe.programId
+    f.probe.runEffect(hostEffect())
+    f.probe.previewOnly=mode==='preview';f.probe.liveRoot={fixture:true}
+    f.probe.vbc2=mode==='empty'?'':mode==='malformed'?'not valid bytecode':f.bytecode
+    f.probe.load()
+    if(mode==='preview')assert.equal(f.probe.programId,programId)
+    await settleEffect(f.platform[0],rejected,'stale')
+    assert.deepEqual(f.delivered,[])
+   })
+   test('renderer effects: invalidation works with no host and does not change UI identity', () => {
+    const {probe}=effectProbe(), programId=probe.programId
+    assert.equal(probe.effectGeneration,0);assert.equal(probe.disposed,false)
+    for(let generation=1;generation<=2;generation++) {
+     probe.heldEffects=[hostEffect()];probe.pending=hostEffect()
+     probe.invalidateEffects()
+     assert.equal(probe.effectGeneration,generation);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert.equal(probe.host,null);assert.equal(probe.programId,programId)
+    }
+   })
+   test('renderer effects: disappear invalidates before timer and listener cleanup', () => {
+    const f=effectProbe(), {probe,events}=f
+    f.load();events.length=0
+    const host=probe.host, generation=probe.effectGeneration, programId=probe.programId, pageListener=()=>{}
+    host.pendingEffects=[hostEffect()];probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+    probe.pageListener=pageListener;probe.darkListener={off:event=>events.push(['darkOff',event])};probe.liveSurfaces=[{}]
+    probe.getUIContext=()=>({getUIObserver:()=>({off:(event,listener)=>{assert.equal(listener,pageListener);events.push(['pageOff',event])}})})
+    probe.stopAllTimers=()=>{
+     assert.equal(probe.disposed,true);assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(host.pendingEffects,[]);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);events.push(['stop'])
+    }
+    probe.aboutToDisappear()
+    assert.equal(probe.programId,programId);assert.equal(probe.pageListener,null);assert.equal(probe.darkListener,null)
+    assert.deepEqual(events,[['stop'],['persist'],['pageOff','routerPageUpdate'],['darkOff','change']])
+   })
+   for(const method of ['dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']) test('renderer effects: disposed '+method+' does no work', () => {
+    const f=effectProbe(), {probe,events,executions,platform}=f
+    f.load();probe.aboutToDisappear();events.length=0;executions.length=0
+    const effect=hostEffect(), held=[hostEffect(2)], queued=[hostEffect(3)], state=probe.currentState, generation=probe.effectGeneration
+    probe.pending=effect;probe.heldEffects=held;probe.host.pendingEffects=queued
+    if(method==='dispatch')probe.dispatch('tap',new V.VeraNumberValue(1));else if(method==='runEffect')probe.runEffect(effect);else probe[method]()
+    assert.deepEqual(executions,[]);assert.deepEqual(platform,[]);assert.deepEqual(events,[])
+    assert.equal(probe.currentState,state);assert.equal(probe.pending,effect);assert.equal(probe.heldEffects,held);assert.deepEqual(held,[hostEffect(2)]);assert.equal(probe.host.pendingEffects,queued);assert.deepEqual(queued,[hostEffect(3)]);assert.equal(probe.effectGeneration,generation)
+   })
+   test('renderer effects: active dispatch executes stub VM and commits state', () => {
+    const f=effectProbe(), {probe,executions,events}=f
+    f.load();executions.length=0;events.length=0
+    const state=probe.currentState, payload=new V.VeraNumberValue(1)
+    probe.dispatch('tap',payload)
+    assert.deepEqual(executions,[{action:'tap',args:[state,payload]}]);assert.equal(probe.host.effectsAllowed,false)
+    assert.deepEqual(events,[['snapshot'],['reveal',true],['render'],['reveal',false],['persist']]);assert.equal(probe.error,'')
+   })
+   await testAsync('renderer effects: active queues drain, allow and refuse without losing replies', async () => {
+    const f=effectProbe(), {probe,platform,delivered,events}=f
+    f.load();f.observeDispatch()
+    const first=hostEffect(1), allowed={...hostEffect(2),ask:true}, refused={...hostEffect(3),ask:true}, last=hostEffect(4)
+    probe.host.pendingEffects=[first,allowed,refused,last]
+    probe.drainEffects()
+    assert.deepEqual(probe.host.pendingEffects,[]);assert.equal(platform.length,1);assert.equal(probe.pending,allowed);assert.deepEqual(probe.heldEffects,[refused,last])
+    probe.allowPending()
+    assert.equal(platform.length,2);assert.equal(probe.pending,refused);assert.deepEqual(probe.heldEffects,[last]);assert.equal(events.filter(event=>event[0]==='remember').length,1)
+    probe.refusePending()
+    assert.equal(platform.length,3);assert.equal(probe.pending,null);assert.deepEqual(probe.heldEffects,[]);assert.deepEqual(delivered,[['answer3','declined by the person']])
+    for(const [index,call] of platform.entries())await settleEffect(call,false,'reply'+index)
+    assert.deepEqual(delivered,[['answer3','declined by the person'],['answer1','reply0'],['answer2','reply1'],['answer4','reply2']])
+   })
+   test('renderer effects: reappearance resets disposed before catalogue, watchers and real load', () => {
+    const f=effectProbe(), {probe,events}=f
+    f.load();probe.aboutToDisappear();events.length=0
+    const generation=probe.effectGeneration, load=probe.load
+    probe.load=function() { events.push(['load',this.disposed]);assert.equal(this.disposed,false);return load.call(this) }
+    probe.aboutToAppear()
+    assert.deepEqual(events.slice(0,4),[['catalogue',false],['dark',false],['page',false],['load',false]])
+    assert.equal(probe.disposed,false);assert.equal(probe.effectGeneration,generation+1);assert(probe.vm);assert(probe.host)
+   })
    function tickerProbe() {
     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
     const timerConfig=declaration(renderer,'class TimerConfig')

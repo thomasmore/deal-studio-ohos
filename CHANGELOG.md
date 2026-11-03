@@ -52,6 +52,13 @@ Main files: `LaunchTrust.ets`, `EntryAbility.ets`.
 4. Do not replace the check with a bundle-name allowlist. After changing the check, and after each OS update, repeat the positive and negative tests above.
 5. Do not describe an exported entry point as shell-only. Review other entry points (extensions, new exported abilities) the same way.
 
+## Preview lifecycle and stale effect replies
+
+- `VeraPreview.aboutToAppear()` resets `disposed` before registering listeners and loading the program, allowing the same component instance to work when it appears again.
+- Each program load and component disappearance advances a separate effect generation and clears queued effects, pending consent, and the old host's pending effects. Loading also releases the old host, including when the bytecode is empty or invalid; UI identity remains independent of effect generation.
+- Both successful and failed asynchronous effect replies are delivered only while the component is active and their captured generation is still current. Disposed components no longer dispatch actions, process consent, drain queues, or launch effects.
+- Added 34 host regression checks for reappearance, program replacement, empty and invalid bytecode, preview reconciliation, queue cleanup, stale replies, and current-generation replies. Already-sent system actions are not cancelled; their stale replies are ignored. Device lifecycle behavior has not been verified.
+
 ## Chat and generation cancellation
 
 - Added request-scoped cancellation: Stop cancels the active chat or generation without interrupting independent requests or a newer run.
