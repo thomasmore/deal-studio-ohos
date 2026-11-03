@@ -1,5 +1,57 @@
 # Changelog
 
+## Development launch parameters are accepted only from a native caller
+
+This entry records a security hardening of `EntryAbility`, found while reviewing the code against HarmonyOS 7.0 (API 26.0.0). It is a handoff reference for people and AI agents, not a release certification. It does not change the shortcut, widget, or project-launch behavior.
+
+Behavior was checked on the host, not on a device; see "Verification". File paths are repository-relative.
+
+### Summary
+
+- `EntryAbility` is exported and used to apply development launch parameters from `want.parameters` without checking who started it. They are now applied only when no app started the ability; `hdc shell aa start … --ps …` works as before.
+- Added `entry/src/main/ets/vera/LaunchTrust.ets`, which decides who the caller is from the identity keys the ability manager writes into `want.parameters`.
+- Navigation parameters (`projectId`, `launchMode`, `veraRun`) are unchanged and still accepted from any caller.
+
+### 1. What was exposed
+
+`EntryAbility` is `exported: true` (the launcher, shortcuts, and the widget start it), and it read the following parameters from any caller. Comments claimed they were "reachable only from a shell on the device", which does not hold for an exported ability.
+
+- Keys: `deepseekKey`, `typesafeKey`, `exaKey`, `reasoningEffort`.
+- The generation server: `veraServer`. It is persisted, and Server mode executes the bytecode the server returns.
+- Probes that call adapters with the app's system permissions: `probeTarget`, `probeParams`, `probeMode`, `probeSdkTarget`, `probeSdkParams`, `probeSdkSearch`.
+- Benchmark and evaluation triggers: `veraBenchmark`, `veraSdkEval`, `veraUiEval`, `veraUiAb`.
+- Behaviour flags: `veraCompose`, `veraComposePlan`, `veraCustom`, `veraAlign`, `veraWhole`, `veraTemplateSelect`.
+
+### 2. The change
+
+- `LaunchTrust.ets` exports `startedByApp`, `presentDevParameters`, `describeCaller`, and `DEV_PARAMETER_NAMES` (21 names). `startedByApp` is true when `ohos.aafwk.param.callerBundleName` or `ohos.aafwk.param.callerAppId` is non-empty, or `ohos.aafwk.param.callerUid` is 10000 or higher. The ability manager writes these keys and replaces what a caller puts there. A native caller such as the shell's `aa` tool carries none of them.
+- `EntryAbility` calls `extractProjectId` directly and all development extractors through the new `extractDevParameters`, from both `onCreate` and `onNewWant`. For an app caller no development extractor runs and a warning lists the parameter names (never the values) and the caller. For a native caller the extractors run as before, with an info log when development parameters are present.
+- The rule is "an app identity means ignore" rather than an allowlist of bundle names: it cannot lock out the shell workflow if `aa` carries no identity, and bundle-name-only checks are discouraged.
+- The comments in `EntryAbility.ets`, `IntentProbe.ets`, `VeraSearchBenchmark.ets`, and `VeraSdkProbe.ets` no longer claim these paths are shell-only by construction.
+
+Main files: `LaunchTrust.ets`, `EntryAbility.ets`.
+
+### 3. Verification performed
+
+- The decision logic was tested on the host with node on 18 cases: shell with and without a native name, root uid, another app with bundle and uid, app id only, app uid only (also as a string), a launcher caller, missing and null parameters, an empty bundle name, the dev names found in a hostile want, and the list contents (21 unique names, none of them navigation names).
+- The patched `EntryAbility.ets` parses, and each extractor is still called once.
+- Not performed: an ArkTS build; the positive device test (`aa start` with `--ps deepseekKey …` and the expected `native caller` log line); the negative test from a second app (a start with `veraServer` must log "Ignored development launch parameters" and leave the settings unchanged).
+
+### 4. Known limitations
+
+- Whether `aa` on the target HarmonyOS 7 build arrives without an app identity is not verified. If it carries one, development parameters are ignored and the warning log shows the caller.
+- Any other native or root process is still trusted.
+- Values persisted before this change are not reset. If an earlier build was exposed, check `veraServer` and the keys in `{filesDir}/vera/settings.json`.
+- Unchanged: `veraServer` is still persisted and may be `http://`, and the keys are still stored in plain text in `settings.json`.
+
+### 5. Handoff rules for future changes
+
+1. Add a new development launch parameter only inside `extractDevParameters`, and add its name to `DEV_PARAMETER_NAMES`. Do not read development parameters in `onCreate`, `onNewWant`, or anywhere else.
+2. Keep side effects out of the navigation parameters; they are accepted from any caller and may only open a project.
+3. Log parameter names, never values.
+4. Do not replace the check with a bundle-name allowlist. After changing the check, and after each OS update, repeat the positive and negative tests above.
+5. Do not describe an exported entry point as shell-only. Review other entry points (extensions, new exported abilities) the same way.
+
 ## Chat and generation cancellation
 
 - Added request-scoped cancellation: Stop cancels the active chat or generation without interrupting independent requests or a newer run.

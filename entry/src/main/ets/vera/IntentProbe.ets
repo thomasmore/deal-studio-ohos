@@ -17,8 +17,9 @@
  *
  * This is development tooling that happens to live in the app, because the app
  * is the thing already signed to call intents at all. It is reachable only from
- * a launch parameter, which means only from a shell on the device: a generated
- * program cannot name an intent this way, and nothing in std/intent routes
+ * a launch parameter sent by a native caller such as `hdc shell aa start`
+ * (EntryAbility.extractDevParameters ignores it from apps): a generated
+  * program cannot name an intent this way, and nothing in std/intent routes
  * here. The catalogue remains the only way a program reaches the platform.
  */
 
