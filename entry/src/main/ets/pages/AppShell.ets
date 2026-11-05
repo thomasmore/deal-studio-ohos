@@ -7,6 +7,7 @@ import { GeneratePage } from './GeneratePage'
 import { ChatListPage } from './ChatListPage'
 import { ChatPage } from './ChatPage'
 import { AppsPage } from './AppsPage'
+import { WidgetBindPage } from './WidgetBindPage'
 
 @Entry({ useSharedStorage: true })
 @Component
@@ -39,6 +40,8 @@ struct AppShell {
       ChatPage({ params: params })
     } else if (name === 'apps') {
       AppsPage({ params: params })
+    } else if (name === 'widgetBind') {
+      WidgetBindPage({ params: params })
     }
   }
 

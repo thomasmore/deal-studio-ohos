@@ -102,6 +102,17 @@ function writeJson(path: string, content: string): void {
   }
 }
 
+/** State has readers in both processes: replace atomically, never expose a truncated file. */
+function writeStateJson(path: string, content: string): void {
+  let temp = path + '.' + Date.now().toString() + '.' + Math.random().toString().substring(2) + '.tmp'
+  try {
+    writeJson(temp, content)
+    fs.renameSync(temp, path)
+  } finally {
+    try { fs.unlinkSync(temp) } catch (_e) {}
+  }
+}
+
 function removeRecursive(path: string): void {
   try {
     fs.rmdirSync(path)
@@ -144,7 +155,7 @@ export class ProjectStore {
     let payload: Record<string, Object> = {}
     payload['stamp'] = stamp
     payload['value'] = JSON.parse(encoded) as Object
-    writeJson(this.statePath(projectId, versionId), JSON.stringify(payload))
+    writeStateJson(this.statePath(projectId, versionId), JSON.stringify(payload))
   }
 
   /** Returns the encoded value, or '' when there is nothing usable to restore. */
@@ -307,7 +318,8 @@ export class ProjectStore {
 
   createVersion(projectId: string, source: string, vbc2: string, note: string,
       prompt: string = '', origin: string = '', composition: string = '',
-      lastPrompt: string = '', parentVersionId: string = '', metrics: VersionMetrics | null = null): Version {
+      lastPrompt: string = '', parentVersionId: string = '', metrics: VersionMetrics | null = null,
+      initialState: string = '', initialStamp: string = ''): Version {
     ensureDir(this.projectDir(projectId))
     let v = new Version()
     v.id = generateId()
@@ -335,6 +347,8 @@ export class ProjectStore {
     obj['composition'] = v.composition
     if (v.metrics !== null) { obj['metrics'] = v.metrics }
     obj['createdAt'] = v.createdAt
+    // Make widget stages preserved state before publishing the version as latest.
+    if (initialState.length > 0) { this.saveState(projectId, v.id, initialStamp, initialState) }
     writeJson(this.versionPath(projectId, v.id), JSON.stringify(obj))
     this.summaries.delete(projectId)
     return v

@@ -554,6 +554,14 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
     advance(749);assert.equal(calls.length,1)
     advance(1);assert.deepEqual(calls[1],{action:'new',elapsed:1000,at:12000});assert.equal(probe.ticking,false)
    })
+   test('native tickers: in the background a tick is skipped, not stopped, and the next one carries the gap', () => {
+    const {probe,calls,advance}=tickerProbe()
+    probe.reconcileTimers(ticker())
+    advance(1000);assert.equal(calls.length,1)
+    probe.appForeground=false;advance(5000);assert.equal(calls.length,1,'nothing runs while the app is away')
+    probe.appForeground=true;advance(1000)
+    assert.equal(calls.length,2);assert.equal(calls[1].elapsed,6000,'the first tick back counts the time away')
+   })
    test('native tickers: stable handler never restarts under repeated reconciliation', () => {
     const {probe,scheduled,starts,stops,calls,advance}=tickerProbe()
     probe.reconcileTimers(ticker())

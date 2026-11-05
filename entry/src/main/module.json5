@@ -50,6 +50,7 @@
     // a bulk-generated adapter nobody asked to add a consent flow for.
     "requestPermissions": [
       { "name": "ohos.permission.INTERNET" },
+      { "name": "ohos.permission.REQUIRE_FORM" },
       { "name": "ohos.permission.VIBRATE" },
       {
         "name": "ohos.permission.READ_CALENDAR",

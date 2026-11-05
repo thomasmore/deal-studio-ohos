@@ -9,6 +9,10 @@ export class AppRouteParams {
   prompt: string = ''
   run: string = ''
   fromList: string = ''
+  /** generate: '1' opens Make widget on the version baseVersionId names. */
+  makeWidget: string = ''
+  /** widgetBind: the home-screen card to choose an app for. */
+  formId: string = ''
 }
 
 export class AppNavigationSession {

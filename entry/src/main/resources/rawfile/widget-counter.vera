@@ -1,0 +1,17 @@
+import * as ui from "std/ui"
+@jsonable class AppState { count: number; }
+function init(): AppState { return { count: 0 }; }
+function change(state: AppState, value: number): AppState { return { count: state.count + value }; }
+function widget(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Text("caption", "COUNTER"),
+      ui.NumberText("metric", state.count, "", "", 1),
+      ui.Row("default", [
+        ui.Button("secondary", "−", "change", -1, true),
+        ui.Button("primary", "+", "change", 1, true)
+      ])
+    ])
+  ]);
+}
+function view(state: AppState): ui.View { return widget(state); }

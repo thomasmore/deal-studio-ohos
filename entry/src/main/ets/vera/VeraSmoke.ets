@@ -14,6 +14,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { decodeGfx, pointerValue } from './VeraGfx'
+import { checkWidget } from './VeraWidgetRefine'
 
 /** Twice through the handlers: a list's second entry, a toggle switched back. */
 const PASSES: number = 2
@@ -89,6 +90,9 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
         return diagnostic(e as Error, 'drawing the screen' + after(tapped))
       }
     }
+  }
+  if (deserializeVbc2(compiled.vbc2).functions.some((fn): boolean => fn.name === 'widget')) {
+    return checkWidget(compiled.vbc2)
   }
   return ''
 }

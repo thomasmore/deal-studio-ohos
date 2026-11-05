@@ -117,6 +117,22 @@ The chat workflow mocks model transport and storage, then compiles and runs widg
 Each report records the revision, exact command, inputs, and expected and observed checks.
 These checks do not replace a native ArkTS build or a live-model evaluation.
 
+For the bounded home-screen live-counter proof (see `docs/live-widget-proof.md`):
+
+```bash
+node tools/vera-harness/live-widget-check.js
+node tools/vera-harness/live-form-check.js
+node tools/vera-harness/run.js entry/src/main/resources/rawfile/widget-counter.vera widget
+```
+
+Both `view` and `widget` entry functions receive `init()` state when no state argument is provided.
+
+`node tools/vera-harness/widget-refine-check.js` checks Make widget's additive preservation contract,
+optional entry signature, catalogue-derived instructions, widget smoke diagnostics and saved-state validation.
+`live-widget-check.js` also covers dynamic repeated rows and disappearing-item/stale taps without ListGroup/ListItem.
+`capability-check.js /tmp/vera-capability.json` executes the renderer's existing-runner resume/background methods
+with the real compiler/VM and mocked platform boundaries. These host checks do not replace a native build or device QA.
+
 For the full labeled proof matrix, use an available `sharp` module and a baseline source snapshot:
 
 ```bash

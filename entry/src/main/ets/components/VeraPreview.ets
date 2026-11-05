@@ -13,6 +13,8 @@
 import { VirtualMachine, deserializeVbc2, RuntimeValue, VeraNumberValue, VeraStringValue,
   VeraBooleanValue, encodeRuntimeValue, decodeRuntimeValue } from '../vera/VeraInterpreter'
 import { UiHostEnvironment, HostEffect, VeraUiNode, decodeVeraUi, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
+import { veraStateStamp } from '../vera/VeraStateStamp'
+import { scheduleFormRefresh } from '../vera/FormUpdater'
 import { runRawIntent } from '../vera/VeraIntents'
 import { runSdkAdapter } from '../vera/VeraSdkBackend'
 import { LengthMetrics, mediaquery, matrix4 } from '@kit.ArkUI'
@@ -182,6 +184,15 @@ export struct VeraPreview {
    * is carried into the new program's fresh state (carryState), so a refine does not wipe what the person typed.
    */
   @Prop seedState: string = ''
+  @StorageProp('veraResume') @Watch('onResume') resumeSignal: number = 0
+  @StorageProp('veraForeground') appForeground: boolean = true
+
+  onResume(): void {
+    if (this.previewOnly || this.vm === null) { return }
+    let restored = this.restoreState()
+    if (restored !== null) { this.currentState = restored }
+    this.renderView()
+  }
   /** Read-only snapshot for a hosting chat. It does not migrate state between programs. */
   onStateSnapshot: (encoded: string) => void = (_encoded: string): void => {}
   /**
@@ -768,7 +779,9 @@ export struct VeraPreview {
     let handle = setInterval(() => {
       // A tick that arrives while the previous one is still running would
       // re-enter the VM with a half-applied state.
-      if (this.ticking) { return }
+      // In the background the tick is skipped, not stopped: the time it last fired is kept, so the first tick after
+      // resume carries the whole gap, and the app does not write state while a card may be changing it.
+      if (this.ticking || this.appForeground === false) { return }
       let current = this.timerConfigs.get(id)
       if (current === undefined) { return }
       let last = this.timerLastFire.get(id)
@@ -828,7 +841,7 @@ export struct VeraPreview {
 
   /** The bytecode itself is the stamp: a refined program gets a different one. */
   private stamp(): string {
-    return this.vbc2.length.toString() + ':' + this.vbc2.substring(0, 64)
+    return veraStateStamp(this.vbc2)
   }
 
   /** `fresh` with what seedState held carried into it, or `fresh` itself when there is none or the program cannot draw it. */
@@ -875,6 +888,7 @@ export struct VeraPreview {
     try {
       store.saveState(keys[0], keys[1], this.stamp(),
         JSON.stringify(encodeRuntimeValue(this.currentState!)))
+      scheduleFormRefresh()
     } catch (e) {
       // A program holding something unsaveable should still run; it just will
       // not remember. Saying so beats a silent half-working save.

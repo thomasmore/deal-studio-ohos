@@ -111,6 +111,64 @@ There is no default. It used to be one machine's address written into the
 source, which meant nothing to anyone else; with none given, Server mode says
 so and the other two modes are unaffected.
 
+### Launch parameters
+
+Everything the app takes from outside is a `--ps name value` pair on
+`aa start`, and several go in one start:
+
+```bash
+hdc shell aa start -a EntryAbility -b com.vera.probe.dyn \
+  --ps deepseekKey sk-... --ps typesafeKey ... --ps exaKey ...
+```
+
+`EntryAbility.ets` reads them on a cold start and again when the app is
+already running. The keys, the effort and the server address are stored in
+`{filesDir}/vera/settings.json` and survive restarts; an empty value is
+ignored, so there is no way to clear one from the command line. The switches
+last only until the app is stopped. A switch is off for `0`, `false` or `off`
+and on for anything else.
+
+Keys and settings, kept across restarts:
+
+| parameter | value | what it does |
+|---|---|---|
+| `deepseekKey` | `sk-...` | the DeepSeek key, for generation, the agent's plan and the sections the model writes. Without it DeepSeek mode cannot generate |
+| `typesafeKey` | key | the TypeSafe key for Jev: which intents a request needs, which ready-made sections and parts build a screen, and the checks of what was built. Optional: without it those steps are skipped and the model writes the program |
+| `exaKey` | key | the Exa key for web search: the chat's search tool and the sections that look up real data. Optional |
+| `reasoningEffort` | `low` \| `high` \| `max` \| `default` | how hard DeepSeek reasons when thinking is on; DeepSeek also takes `minimal`, `medium`, `xhigh`, `ultra` as aliases. `default` goes back to the app's own, `low` |
+| `veraServer` | `http://host:port` | where `vera-server` runs, for Server mode |
+
+Switches for comparing paths, until the app is stopped:
+
+| parameter | default | off means |
+|---|---|---|
+| `veraCompose` | on | the agent is not tried: a new screen goes to the blocks or to the model (the agent also needs `typesafeKey`) |
+| `veraComposePlan` | on | when the agent cannot build a screen, the model writing it from scratch is not given the agent's plan |
+| `veraCustom` | on | what nothing ready does is not written as a section by the model |
+| `veraWhole` | on | when nothing ready fits, the whole screen is not written as one section before generating from scratch |
+| `veraTemplateSelect` | on | no blocks path (Jev's pick of ready-made sections) |
+| `veraOrder` | `agent-first` | `blocks-first` tries the blocks before the agent |
+
+Opening a saved project, as a home-screen widget does:
+
+| parameter | value | what it does |
+|---|---|---|
+| `projectId` | project id | opens that project |
+| `veraRun` | `1` | with `projectId`: also runs its latest version, on top of the project's page |
+| `veraFormId` | form id | opens the page that binds a home-screen widget to a project |
+
+Development probes, one run each, logged to hilog:
+
+| parameter | value | what it does |
+|---|---|---|
+| `probeTarget`, `probeParams`, `probeMode` | intent, JSON, `background` \| `foreground` | calls one intent, to try a catalogue row before writing it (`IntentProbe.ets`) |
+| `probeSdkTarget`, `probeSdkParams` | `sdk.call` target, JSON | calls one SDK adapter directly (`VeraSdkProbe.ets`) |
+| `probeSdkSearch` | a need, in words | ranks `find_sdk_function`'s answers for it |
+| `veraBenchmark` | `1` | times the search (`VeraSearchBenchmark.ets`) once the caches are warm |
+| `veraSdkEval` | `1` | dumps the SDK search's rankings for the gold needs (`VeraSdkEval.ets`) |
+| `veraUiEval` | `1` | scores the UI component selector on the gold prompts (`VeraUiEval.ets`) |
+| `veraUiAb` | `1` | compares the UI selection modes (`VeraUiAb.ets`) |
+
 ## Running it
 
 Three things are needed and none of them is in this repo: the **ArkTS Agent
