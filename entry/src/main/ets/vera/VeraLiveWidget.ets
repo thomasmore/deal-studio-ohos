@@ -3,7 +3,7 @@ import { VirtualMachine, deserializeVbc2, encodeRuntimeValue, decodeRuntimeValue
 import { UiHostEnvironment, VeraUiNode, decodeVeraUi, formatVeraNumber } from './VeraUi'
 import { CATALOG } from './VeraUiCatalog'
 import { resolveTheme } from './VeraTheme'
-import { veraStateStamp } from './VeraStateStamp'
+import { veraStateStamp, stateDigest } from './VeraStateStamp'
 
 export const LIVE_MAX_DEPTH: number = 4
 export const LIVE_MAX_NODES: number = 40
@@ -103,8 +103,9 @@ export class WidgetSession {
     // The theme wrapper consumes no layout level but is still validated and counted.
     let tree = project(root, root.kind === 'apptheme' ? 0 : 1, '0')
     frame.nodes = root.kind === 'apptheme' ? tree.children : [tree]
-    // Exact state token rather than a lossy hash; rejects taps from an older frame/state.
-    frame.token = this.versionId + ':' + veraStateStamp(this.bytecode) + ':' + this.encodedState()
+    // Rejects taps from an older frame or state. A digest, not the state itself: the token is in the card's data, which has
+    // a size budget, and in every key of its layout, so it must not grow with the app's data.
+    frame.token = this.versionId + ':' + veraStateStamp(this.bytecode) + ':' + stateDigest(this.encodedState())
     frame.live = true
     if (JSON.stringify(frame).length > LIVE_MAX_JSON) { throw new Error('widget binding exceeds size budget') }
     return frame

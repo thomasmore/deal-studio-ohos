@@ -105,6 +105,8 @@ export struct WidgetPreview {
     }
   }
 
+  // This layout (leaf and the level builders) is a copy of widget/pages/LiveCard.ets's, kept in step by hand: a card cannot import the
+  // app's code. A change to how a node is drawn goes into both, or the preview stops showing what the card shows.
   @Builder
   level1(node: CardNode, inRow: boolean) {
     if (node.kind === 'row') {

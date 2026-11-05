@@ -26,8 +26,9 @@ export function widgetRefinementPrompt(whole: boolean = true): string {
     'The card is redrawn about every 30 minutes without the app being opened, so a figure widget works out from the clock ' +
     '(time left until something) stays current by itself. If the state itself goes out of date with the time -- the day\'s ' +
     'figures start again after midnight, a countdown that is over should end, a streak breaks after a missed day -- also add ' +
-    'function widgetRefresh(state: the init return type): the init return type. The card runs it before redrawing and saves ' +
-    'what it returns, for the app too: bring the state up to date with the clock (std/time) and return it, changing only ' +
+    'function widgetRefresh(state: the init return type): the init return type. The card runs it before redrawing, and the ' +
+    'app when it opens and when it comes back, and both save what it returns: bring the state up to date with the clock ' +
+    '(std/time) and return it, changing only ' +
     'what the time has made out of date. Running it twice in a row must give the same state as running it once, so never ' +
     'add to a figure in it. No phone effects. Leave widgetRefresh out when nothing in the state goes out of date.\n' +
     (whole ? 'Preserve every existing class, init, view and handler unchanged, including their signatures and bodies. ' +

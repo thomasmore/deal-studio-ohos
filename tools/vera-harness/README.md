@@ -122,7 +122,7 @@ For the bounded home-screen live-counter proof (see `docs/live-widget-proof.md`)
 ```bash
 node tools/vera-harness/live-widget-check.js
 node tools/vera-harness/live-form-check.js
-node tools/vera-harness/run.js entry/src/main/resources/rawfile/widget-counter.vera widget
+node tools/vera-harness/run.js tools/vera-harness/examples/widget-counter.vera widget
 ```
 
 Both `view` and `widget` entry functions receive `init()` state when no state argument is provided.

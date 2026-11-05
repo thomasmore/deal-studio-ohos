@@ -1,7 +1,7 @@
 import { FormExtensionAbility, formBindingData, formProvider } from '@kit.FormKit'
 import { Want } from '@kit.AbilityKit'
 import { store } from '../vera/ProjectStore'
-import { buildFormBinding, refreshForms } from '../vera/FormUpdater'
+import { buildFormBinding, refreshProjectCards } from '../vera/FormUpdater'
 import { formBindings, refreshLedger } from '../vera/FormBindings'
 import { liveBinding, liveFormTap, liveFormRefresh, LiveRefresh } from '../vera/LiveFormService'
 
@@ -30,16 +30,20 @@ export default class VeraFormAbility extends FormExtensionAbility {
 
   async onUpdateForm(formId: string): Promise<void> {
     this.init()
+    // Which card this is; when the system cannot say, a card bound to a project is a live one and any other the list.
+    let live = formBindings.projectFor(formId).length > 0
     try {
-      let info = await formProvider.getPublishedRunningFormInfoById(formId)
-      if (info.formName !== 'live') {
+      live = (await formProvider.getPublishedRunningFormInfoById(formId)).formName === 'live'
+    } catch (e) { console.warn('VERA-FORM info: ' + (e as Error).message) }
+    try {
+      if (!live) {
         await formProvider.updateForm(formId, buildFormBinding())
         return
       }
       // The periodic update: the program's widgetRefresh, if it has one, brings the state up to date with the clock.
       let refreshed: LiveRefresh = liveFormRefresh(formId)
       await formProvider.updateForm(formId, refreshed.binding)
-      if (refreshed.ran) { await refreshForms(formId) }
+      if (refreshed.ran) { await refreshProjectCards(formBindings.projectFor(formId), formId) }
     } catch (e) { console.warn('VERA-FORM update: ' + (e as Error).message) }
   }
 
@@ -52,10 +56,11 @@ export default class VeraFormAbility extends FormExtensionAbility {
 
   async onFormEvent(formId: string, message: string): Promise<void> {
     this.init()
-    if (formBindings.projectFor(formId).length === 0) { return }
+    let projectId = formBindings.projectFor(formId)
+    if (projectId.length === 0) { return }
     try {
       await formProvider.updateForm(formId, liveFormTap(formId, message))
-      await refreshForms(formId)
+      await refreshProjectCards(projectId, formId)
     } catch (e) { console.error('VERA-FORM event: ' + (e as Error).message) }
   }
 }

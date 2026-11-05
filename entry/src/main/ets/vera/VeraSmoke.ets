@@ -91,8 +91,14 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
       }
     }
   }
+  // A program with a widget may be on the home screen: a change that breaks the card is refused like one that breaks the app,
+  // and said to be about the widget, so the repair -- and the person -- knows where to look.
   if (deserializeVbc2(compiled.vbc2).functions.some((fn): boolean => fn.name === 'widget')) {
-    return checkWidget(compiled.vbc2)
+    let card = checkWidget(compiled.vbc2)
+    if (card.length > 0) {
+      return 'The app\'s home-screen widget (function widget and what it calls) no longer works: ' + card +
+        '\nKeep the widget working with the card-safe components and limits; change it only as far as the request needs.'
+    }
   }
   return ''
 }

@@ -213,6 +213,9 @@ minute-long generations does not converge — that mistake has been made here.
 | `docs/examples/shanghai-layover.vera` | a program the model actually wrote, kept verbatim |
 | `usb-net.sh`, `entry/src/main/ets/usbnetability/UsbNetAbility.ets`, `entry/src/main/ets/vera/UsbNet.ets`, `entry/src/main/cpp/{napi_usbnet.cpp,usbnet_tunnel.h,usbnet_packets.h}`, `tools/usbnet-*-test.cpp` | USB network: the phone's whole traffic through the computer (see "Internet through the computer" above) |
 | `docs/intent-call-contract.md` | `intent.call`'s signature and its four-shape answer contract (JSON / `"ok"` / `"declined code=N"` / `"error N: ..."`), with two confirmed device cases of generated code checking for `"ok"` or not checking at all — read before touching a handler that reports success or failure |
+| `entry/src/main/ets/vera/VeraLiveWidget.ets` | the home-screen card's side of a program: `WidgetSession` runs `widget(state)`, checks it is card-safe and within the card's budgets, turns it into the plain nodes the card draws, and runs a tap or `widgetRefresh` |
+| `entry/src/main/ets/vera/LiveFormService.ets`, `FormBindings.ets`, `formability/VeraFormAbility.ets` | the card in the form extension: which card shows which project (`forms.json`), a tap or a periodic update run and committed only after a redraw, and when `widgetRefresh` last ran. `widget/pages/LiveCard.ets` draws it; `components/WidgetPreview.ets` is the same layout in the app, kept in step by hand |
+| `entry/src/main/ets/vera/agent/AgentWidget.ets`, `VeraWidgetRefine.ets` | Make widget: the model writes only the widget for a saved program, `spliceWidget` (VeraCompiler) puts it in without changing the app, and the checks hold it to a glance. `docs/live-widget-proof.md` is how it works and what was measured |
 
 Adding a component means editing the catalogue, adding a case in
 `VeraUi.ets`, and adding a branch in `VeraPreview.ets` — the compiler, the

@@ -11,7 +11,7 @@ import { widgetRefinementPrompt, validateWidgetRefinement, widgetRepairNote } fr
 import { veraStateStamp } from '../vera/VeraStateStamp'
 import { WidgetPreview } from '../components/WidgetPreview'
 import { engine, LlamaEngine, GenerateRequest, GenerateResult, loadRawfileText } from '../vera/LlamaEngine'
-import { compileVeraSource, CompileError, spliceWidget } from '../vera/VeraCompiler'
+import { compileVeraSource, CompileError, spliceWidget, appUsesWidgetError } from '../vera/VeraCompiler'
 import { applyRepair, repairPrompt } from '../vera/VeraRepair'
 import { smokeRun } from '../vera/VeraSmoke'
 import { logMark, logStep, initTrace, trace, traceCompile } from '../vera/VeraTiming'
@@ -686,6 +686,9 @@ export struct GeneratePage {
         }
         if (this.makeWidget) {
           this.widgetBase = v.source
+          // An app that draws its own screen with widget(state) would change with a new widget: refused before any is made.
+          let usesWidget = appUsesWidgetError(v.source)
+          if (usesWidget.length > 0) { this.baseError = usesWidget }
           // The person says what the widget shows; the app and the widget start from the data the app has saved.
           let project = store.getProject(this.projectId)
           if (project !== null) { this.widgetTitle = project.name }
@@ -1328,17 +1331,20 @@ export struct GeneratePage {
           this.totalMs = Date.now() - this.genStartTime
           return
         }
-        if (this.makeWidget) { decoded.source = spliceWidget(this.widgetBase, decoded.source) }
         this.generatedSource = decoded.source
-        // Never trust a server success to bypass on-device widget/preservation checks.
-        let local = compileVeraSource(decoded.source)
-        let validation = smokeRun(local)
-        if (validation.length === 0 && this.makeWidget) {
-          validation = validateWidgetRefinement(this.widgetBase, decoded.source, local.vbc2)
+        if (this.makeWidget) {
+          // A widget is spliced into the saved program here, so the server's bytecode is not the program's: it is compiled
+          // and held to the widget's checks on the phone. Any other server result is taken as the server built it.
+          decoded.source = spliceWidget(this.widgetBase, decoded.source)
+          this.generatedSource = decoded.source
+          let local = compileVeraSource(decoded.source)
+          let validation = smokeRun(local)
+          if (validation.length === 0) { validation = validateWidgetRefinement(this.widgetBase, decoded.source, local.vbc2) }
+          if (validation.length > 0) { throw new Error(validation) }
+          decoded.bytecode = local.vbc2
         }
-        if (validation.length > 0) { throw new Error(validation) }
-        this.serverBytecode = local.vbc2
-        this.compiledVbc2 = local.vbc2
+        this.serverBytecode = decoded.bytecode
+        this.compiledVbc2 = decoded.bytecode
         this.compiledSource = decoded.source
         this.compositionJson = ''
         this.modelWrote = true

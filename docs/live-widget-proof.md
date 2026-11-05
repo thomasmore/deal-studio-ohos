@@ -1,18 +1,23 @@
 # Live-widget foundation / counter proof
 
-This is the first slice of `ISSUE-home-screen-widgets.md`, Part 2, **not the complete feature**.
+This is the first slice of `docs/ISSUE-home-screen-widgets.md`, Part 2, **not the complete feature**.
 
 ## Try it
 
-1. In **My apps**, use the title-bar menu item **Widget example**. It creates a separate `Widget counter` project; it never replaces an existing program.
-2. On its project page, open the "..." menu and tap **Add widget**.
+1. Open an app, then "..." > **Make widget**, and say what the widget shows; Save.
+2. On its project page, "..." > **Add widget**.
 3. On this phone `isRequestPublishFormSupported()` returns false. The fallback opens the system widget manager. Add **VERA live app**.
    The manager does not pass the project on, so Add widget leaves it in `form-offer.json` and the next live card added
    within five minutes takes it, once (`FormBindings.offer` / `takeOffer`). A card added later, or from the launcher's own
-   picker, is unbound: tap it and choose a project in **Choose widget app**.
-5. On the counter card, +/− run the VERA handler in the form extension. A tap anywhere else on the card opens the full program. A live card has no title strip: the widget has the whole card.
+   picker, is unbound: tap it and choose one of the apps that have a widget in **Choose widget app** (the `widgetBind`
+   destination).
+4. The card's buttons run the program's handlers in the form extension. A tap anywhere else on the card opens the full
+   program. A live card has no title strip: the widget has the whole card. It is offered in 2x2 only, the size the widget,
+   its preview and the prompt are made for.
 
-The same Widget action is available for any project. A program without `widget(state)` displays a tile-like fallback and opens the app. An uncompiled project opens its project page.
+A program without `widget(state)` displays a tile-like fallback and opens the app. An uncompiled project opens its project
+page. Make widget is refused for a program whose own code calls `widget` or `widgetRefresh` (`appUsesWidgetError`): a new
+widget would change the app too. The `widget-counter.vera` fixture, whose screen is its widget, is a host-check example only.
 
 ## Architecture
 
@@ -21,15 +26,19 @@ The same Widget action is available for any project. A program without `widget(s
 - `LiveFormService.ets`: load latest version/state, render, validate tap, run handler, render the candidate state, commit only on success.
 - `VeraStateStamp.ets`: unchanged state-stamp formula shared with VeraPreview.
 - `LiveCard.ets`: launcher-only binding renderer. Fixed depth; no compiler/VM/filesystem imports.
-- `FormUpdater.ets`: list/live form routing and coalesced refresh after app state saves.
-- `VeraPreview.ets`: reload saved state when the app foreground signal changes.
+- `FormUpdater.ets`: list/live form routing. A running app's saves redraw only that project's cards, and only when it has
+  any, at most every `CARD_REFRESH_MS` (5 s): a ticker saves every second.
+- `VeraPreview.ets`: reload saved state when the app comes back, and run the program's `widgetRefresh` when it starts and
+  comes back. In the background a ticker's tick is skipped, not stopped: the time it last fired is kept, so the first tick
+  back carries the time away, as before.
 - State-file writes use a temporary sibling plus rename. Other project/version write semantics are unchanged.
 
 Initial supported kinds are explicitly opted into `ComponentSpec.card`: AppTheme (root only), Column, Row, Text, NumberText, Button, Spacer and Divider. Do not infer that all app components are card-safe.
 
 Limits: 100,000 VM steps per entry call; four layout levels (the theme wrapper does not consume a level); 40 nodes; 256 characters per text; 8,000 UTF-16 code units for the complete frame. This is a conservative application budget, **not a measured platform maximum**. Theme currently resolves light mode only.
 
-Events contain `handler`, numeric `value`, and an exact state/version token. The OS overwrites a message field named `action` with the transport action (`message`), so that name must not be used for the program handler. Only an enabled button in the freshly rendered tree can dispatch. SDK effects are collected but never executed; an effectful handler does not commit state. The card asks the person to open the app; it does not try extension `startAbility`.
+Events contain `handler`, numeric `value`, and a token: the version, the program's stamp and a 64-bit digest of the state
+(`stateDigest`). It is not the state itself, which would grow with the app's data past the card's budget. The OS overwrites a message field named `action` with the transport action (`message`), so that name must not be used for the program handler. Only an enabled button in the freshly rendered tree can dispatch. SDK effects are collected but never executed; an effectful handler does not commit state. The card asks the person to open the app; it does not try extension `startAbility`.
 
 The root ForEach key includes the frame token. Without this, nested card builders retain the old displayed number even though updateForm succeeds.
 
@@ -84,7 +93,7 @@ the box empty -- "What should the widget show?" -- and the **Widget** tab open. 
 - **Widget tab:** `WidgetPreview` draws the widget with the card's own session (`WidgetSession`) and layout, 2x2, over the
   state the app preview holds -- Make widget starts both from the project's saved data. Taps there run the handlers but are
   not saved.
-- The compiler checks an optional synchronous `widget(init-result): ui.View` signature (`E2112`). `smokeRun` validates widget
+- The compiler checks an optional synchronous `widget(init-result): ui.View` signature (`E2115`). `smokeRun` validates widget
   trees and enabled buttons without executing phone effects.
 - Save rechecks preservation and the widget against the base version's **latest saved state**, refuses a changed
   latest-version ID, and stages that state with the new bytecode stamp before publishing the new version. A refused Save
@@ -104,7 +113,8 @@ Host replay (`deepseek-flash`, thinking off, the refine request DeepSeekEngine s
 back): six requests on four apps (a generated water tracker and packing list, the expense and habit examples), including two
 that ask for everything ("every drink logged today ... and buttons for 100, 250, 330 and 500 ml", "the whole list with a
 checkbox for each item"), three runs each: 18/18 valid. With `widgetRefresh` in the prompt and a seventh request ("start again from zero every morning"): 21/21 valid; the water tracker's widgets added a `widgetRefresh` that empties the day's drinks on a new day and keeps the goal, while the packing list, budget and habit widgets (no state that dates) added none. Before the splice and the repair note, 6/18 passed in one attempt;
-most failures were the model also rewriting an existing declaration. Not yet run on the phone.
+most failures were the model also rewriting an existing declaration. Run on the phone since: Make widget on a roulette app
+and on two live-data apps, Save, Add widget, the card's buttons and a tap that opens the app.
 
 Host evidence for this follow-up:
 
@@ -115,16 +125,16 @@ Host evidence for this follow-up:
 - Widget launch, smoke and visual-tree checks pass (**97/97** visual-tree checks; not screenshot QA).
 - Chat regression: **39 pass / 18 fail**. An archived clean HEAD has the exact same failing check names and counts; these are baseline failures, not a clean suite. Reports `/tmp/vera-widget-chat{,-baseline}.json`. The earlier summary's chat-success statement should not be used as evidence for this follow-up.
 
-Native build: `./build-hap.sh --unsigned` passes with zero diagnostics on main 6b2f59b plus this branch. The Make widget flow above has not been installed or run on the phone.
+Native build: `./build-hap.sh --unsigned` passes with zero diagnostics on this branch.
 
 Independent QC and device/visual verification remain blocked: tool discovery exposes no independent task/subagent review tool. No merge-ready or full Part 2 claim is made.
 
 ## Deferred / known limits
 
 - Habit-list fixture, ListGroup/ListItem and remaining card-safe components.
-- End-to-end device test of Make widget, including the Widget tab and saved-state carry-over.
 - Actual platform payload maximum, large form sizes, dark mode and full visual/accessibility QA.
 - Removal/rebind lifecycle device coverage and foreground resume to an existing runner without a new router push.
-- Last-writer-wins state is intentional; binding-map updates currently use read/modify/replace, so truly concurrent bind/remove operations can overwrite each other.
-- Background timer pause/resume change has host lifecycle coverage only; device proof remains outstanding. Timer/game programs are not supported widget fits.
+- Last-writer-wins state is intentional; binding-map updates currently use read/modify/replace from two processes (the app binds,
+  the extension unbinds) with no lock, so truly concurrent bind/remove operations can overwrite each other.
+- Timer/game programs are not supported widget fits.
 - Independent QC gate remains required before treating the slice as ready to merge.

@@ -32,7 +32,7 @@ function load(name) {
 const {store} = load('ProjectStore'), {formBindings} = load('FormBindings')
 store.init('/fixture'); formBindings.init('/fixture')
 const project = store.createProject('Counter','🔢')
-const source = fs.readFileSync(path.join(__dirname,'../../entry/src/main/resources/rawfile/widget-counter.vera'),'utf8')
+const source = fs.readFileSync(path.join(__dirname,'examples/widget-counter.vera'),'utf8')
 const version = store.createVersion(project.id,source,loadVera('VeraCompiler').compileVeraSource(source).vbc2,'Counter')
 formBindings.bind('form-1',project.id); formBindings.bind('form-2',project.id)
 assert.deepEqual(formBindings.formsFor(project.id), ['form-1','form-2'])

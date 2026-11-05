@@ -5,7 +5,7 @@ const {compileVeraSource, widgetRefinementError, spliceWidget} = loadVera('VeraC
 const {smokeRun} = loadVera('VeraSmoke')
 const {widgetRefinementPrompt, validateWidgetRefinement, widgetRepairNote} = loadVera('VeraWidgetRefine')
 const {WidgetSession} = loadVera('VeraLiveWidget')
-const source = fs.readFileSync(path.join(__dirname,'../../entry/src/main/resources/rawfile/widget-counter.vera'),'utf8')
+const source = fs.readFileSync(path.join(__dirname,'examples/widget-counter.vera'),'utf8')
 // Standalone fullscreen base, not a view delegating to widget.
 const base = source.replace('function widget(', 'function compact(').replace('return widget(state);','return compact(state);')
 const addition = '\nfunction widget(state: AppState): ui.View { return compact(state); }'
@@ -20,11 +20,19 @@ assert.match(widgetRefinementError(base,base),/add function widget/)
 assert.equal(validateWidgetRefinement(base,candidate,compiled.vbc2), '')
 assert.equal(smokeRun(compiled),'')
 for (const altered of [candidate.replace('function widget(state: AppState)', 'async function widget(state: AppState)'),candidate.replace('function widget(state: AppState)', 'function widget(state: number)'),candidate.replace('function widget(state: AppState): ui.View', 'function widget(state: AppState): AppState')]) {
-  assert.throws(()=>compileVeraSource(altered),/E2112/)
+  assert.throws(()=>compileVeraSource(altered),/E2115/)
+}
+// The signature error is at the widget's own line, not the whole program's.
+{
+  const altered = candidate.replace('function widget(state: AppState)', 'async function widget(state: AppState)')
+  let diagnostics = []
+  try { compileVeraSource(altered) } catch (e) { diagnostics = e.diagnostics }
+  const d = diagnostics.find(x => x.code === 'E2115')
+  assert(d, 'E2115'); assert.equal(d.span.start.line, altered.split('\n').findIndex(l => l.includes('async function widget')) + 1)
 }
 const unsafe = candidate.replace('return compact(state); }\nfunction widget','return compact(state); }\nfunction widget')
   .replace('function widget(state: AppState): ui.View { return compact(state); }','function widget(state: AppState): ui.View { return ui.Image("default", "url", "alt"); }')
-assert.match(smokeRun(compileVeraSource(unsafe)),/Not card-safe/)
+assert.match(smokeRun(compileVeraSource(unsafe)),/home-screen widget [\s\S]*Not card-safe/)
 const saved = new WidgetSession(compiled.vbc2,'v','')
 let frame = saved.frame('p','App','')
 saved.tap(frame,frame.token,'change',1)
@@ -69,6 +77,17 @@ assert.match(prompt, /widgetRefresh/)
 const crowded = base + '\nfunction widget(state: AppState): ui.View { return ui.Column("default", [ui.Button("default", "+1", "change", 1, true), ' +
   'ui.Button("default", "+2", "change", 2, true), ui.Button("default", "+3", "change", 3, true)]); }'
 assert.match(validateWidgetRefinement(base, crowded, compileVeraSource(crowded).vbc2), /3 buttons; a widget has at most 2/)
+// An app whose own screen is drawn by widget(state) would change with a new widget: Make widget is refused for it, before and
+// after the model answers.
+{
+  const {appUsesWidgetError} = loadVera('VeraCompiler')
+  assert.match(appUsesWidgetError(source), /own view calls widget\(\)/)
+  assert.equal(appUsesWidgetError(base), '')
+  assert.equal(appUsesWidgetError(candidate), '', 'the widget calling its own helpers is the widget\'s business')
+  const viaRefresh = base + '\nfunction widgetRefresh(state: AppState): AppState { return state; }\nfunction reset(state: AppState, v: number): AppState { return widgetRefresh(state); }'
+  assert.match(appUsesWidgetError(viaRefresh), /own reset calls widgetRefresh\(\)/)
+  assert.match(widgetRefinementError(source, source.replace('ui.Text("caption", "COUNTER"),', '')), /own view calls widget/)
+}
 console.log('PASS widget refinement: additive preservation, signature, catalogue prompt, smoke/repair diagnostics, saved-state validation, glance limits, splice, widgetRefresh')
 
 // Make widget writes only the widget (agent/AgentWidget.ets): the program is shown, never written again; a failing answer goes

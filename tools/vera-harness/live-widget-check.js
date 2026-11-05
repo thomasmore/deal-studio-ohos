@@ -5,7 +5,7 @@ const { loadVera } = require('./source-loader')
 const { compileVeraSource } = loadVera('VeraCompiler')
 const { WidgetSession } = loadVera('VeraLiveWidget')
 const { veraStateStamp } = loadVera('VeraStateStamp')
-const source = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/widget-counter.vera'), 'utf8')
+const source = fs.readFileSync(path.join(__dirname, 'examples/widget-counter.vera'), 'utf8')
 const code = compileVeraSource(source).vbc2
 const session = new WidgetSession(code, 'v1', '')
 const frame = s => s.frame('p1', 'Widget counter', '🔢')
@@ -71,4 +71,21 @@ assert.deepEqual(frame(list).nodes[0].children.map(row=>row.children[1].value),[
 const card = fs.readFileSync(path.join(__dirname, '../../entry/src/main/ets/widget/pages/LiveCard.ets'), 'utf8')
 assert.match(card, /handler: node.action/)
 assert.match(card, /node.key \+ this.token/)
+// The token does not grow with the app's data: a log of 400 entries still fits the card, and a different log is a different token.
+{
+  const log = 'import * as ui from "std/ui"\n@jsonable class Entry { note: string; amount: number; }\n' +
+    '@jsonable class AppState { entries: Entry[]; }\n' +
+    'function init(): AppState { let e: Entry[] = []; let i: number = 0; while (i < 400) { e.push({note: "coffee at the corner shop", amount: i}); i = i + 1; } return {entries: e}; }\n' +
+    'function add(state: AppState, value: number): AppState { let e: Entry[] = []; for (let x: Entry of state.entries) { e.push(x); } e.push({note: "tea", amount: value}); return {entries: e}; }\n' +
+    'function view(state: AppState): ui.View { return ui.Column("default", [ui.NumberText("metric", state.entries.length(), "", " entries", 1)]); }\n' +
+    'function widget(state: AppState): ui.View { return ui.Column("default", [ui.NumberText("metric", state.entries.length(), "", " entries", 1), ui.Button("primary", "+", "add", 1, true)]); }\n'
+  const big = new WidgetSession(compileVeraSource(log).vbc2, 'v1', '')
+  assert(big.encodedState().length > 10000, 'the state alone is over the card budget')
+  const before = frame(big)
+  assert(before.live && before.token.length < 120, 'token ' + before.token.length)
+  big.tap(before, before.token, 'add', 1)
+  const after = frame(big)
+  assert.notEqual(after.token, before.token)
+  assert.throws(() => big.tap(after, before.token, 'add', 1), /changed/)
+}
 console.log('PASS live counter: +/−, restore, stale/forged taps, fallback, unsafe kinds, depth/node/text caps, effects, transport, redraw, stamp')

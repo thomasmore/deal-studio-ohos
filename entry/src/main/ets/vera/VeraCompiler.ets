@@ -1509,14 +1509,20 @@ class Analyzer {
       if (decl instanceof ClassDeclaration) this.checkClass(decl)
     }
     this.checkJsonableCycles()
+    // A declaration's own place, for an error about its signature: the whole program when it cannot be found.
+    let placeOf = (name: string): Span => {
+      let found = this.model.application.declarations.find((d: Declaration): boolean =>
+        d instanceof FunctionDeclaration && (d as FunctionDeclaration).name === name)
+      return found !== undefined ? found.span : this.model.application.span
+    }
     let widget = this.model.functions.get('widget')
     if (widget !== undefined) {
       let init = this.model.functions.get('init')
       let view = this.model.functions.get('view')
-      let ui = this.stdModules.get('std/ui')!
-      if (init === undefined || view === undefined || widget.isAsync || widget.parameters.length !== 1 ||
-          !identical(widget.parameters[0], init.result) || !identical(widget.result, ui.classes[0].type)) {
-        this.addError('E2112', 'widget must be synchronous: function widget(state: init return type): ui.View', this.model.application.span)
+      let uiView = this.stdModules.get('std/ui')!.classes.find((c: ExternalClass): boolean => c.name === 'View')
+      if (init === undefined || view === undefined || uiView === undefined || widget.isAsync || widget.parameters.length !== 1 ||
+          !identical(widget.parameters[0], init.result) || !identical(widget.result, uiView.type)) {
+        this.addError('E2115', 'widget must be synchronous: function widget(state: init return type): ui.View', placeOf('widget'))
       }
     }
     // The card's periodic update (LiveFormService.liveFormRefresh): the state brought up to date with the clock.
@@ -1526,7 +1532,7 @@ class Analyzer {
       if (init === undefined || refresh.isAsync || refresh.parameters.length !== 1 ||
           !identical(refresh.parameters[0], init.result) || !identical(refresh.result, init.result)) {
         this.addError('E2113', 'widgetRefresh must be synchronous: function widgetRefresh(state: init return type): init return type',
-          this.model.application.span)
+          placeOf('widgetRefresh'))
       }
     }
     for (let decl of this.model.application.declarations) {
@@ -2942,6 +2948,29 @@ export function widgetRefinementError(base: string, candidate: string): string {
   if (!after.declarations.some((entry: Declaration): boolean => entry instanceof FunctionDeclaration && entry.name === 'widget')) {
     return 'Make widget must add function widget(state): ui.View.'
   }
+  return appUsesWidgetError(base)
+}
+
+/**
+ * '' when none of the app's own declarations calls widget or widgetRefresh; else why Make widget cannot be used on it. A screen
+ * that draws itself with widget(state) -- view returning widget(state) -- would change with every new widget, and the model
+ * cannot change the app's code to stop that. A source that does not parse is left to the checks that say so.
+ */
+export function appUsesWidgetError(source: string): string {
+  let app: Application
+  try { app = new Parser(source, '<app>').parse() } catch (_e) { return '' }
+  for (let declaration of app.declarations) {
+    if (declaration instanceof FunctionDeclaration && WIDGET_OWNED.indexOf(declaration.name) >= 0) { continue }
+    let tokens = new Lexer(source.substring(declaration.span.start.offset, declaration.span.end.offset), '<declaration>').scan()
+    for (let i = 0; i + 1 < tokens.length; i++) {
+      if (WIDGET_OWNED.indexOf(tokens[i].text) >= 0 && tokens[i + 1].text === '(') {
+        let name = declaration instanceof FunctionDeclaration ? (declaration as FunctionDeclaration).name :
+          (declaration instanceof ClassDeclaration ? (declaration as ClassDeclaration).name : 'a declaration')
+        return 'This app\'s own ' + name + ' calls ' + tokens[i].text + '(), so a new widget would change the app too. ' +
+          'Make widget keeps the app as it is, so it cannot make a widget for this app.'
+      }
+    }
+  }
   return ''
 }
 
@@ -2970,6 +2999,7 @@ export function spliceWidget(base: string, candidate: string): string {
   } catch (_e) {
     return candidate
   }
+  // Functions and classes are the only declarations a program has (imports are apart, below): nothing else can be dropped.
   let named = (entry: Declaration): string => entry instanceof FunctionDeclaration ? 'function ' + entry.name :
     (entry instanceof ClassDeclaration ? 'class ' + entry.name : '')
   let isWidget = (entry: Declaration): boolean => entry instanceof FunctionDeclaration && entry.name === 'widget'
