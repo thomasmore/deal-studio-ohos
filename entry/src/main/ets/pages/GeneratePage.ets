@@ -16,6 +16,7 @@ import { deepseek, DEEPSEEK_GENERATION_MAX_TOKENS, SideCall } from '../vera/Deep
 import { OperationController, throwIfCancelled } from '../vera/OperationCancellation'
 import { VeraPreview } from '../components/VeraPreview'
 import { settings } from '../vera/SettingsStore'
+import { startUsbNet, stopUsbNet, readUsbNetStatus, usbNetIsOn } from '../vera/UsbNet'
 import { resetLogprobsProbe } from '../vera/JevProxy'
 import { consent } from '../vera/VeraConsentStore'
 import { describeCatalogForPrompt } from '../vera/VeraUiCatalog'
@@ -296,6 +297,9 @@ export struct GeneratePage {
   // so a method that only reads useJevProxy() does not re-evaluate when it
   // flips. Kept in sync in aboutToAppear, checkDeepSeek and the toggle onClick.
   @State jevProxyOn: boolean = false
+  // What the USB-network VPN last reported (UsbNet.ets), read once a second while Advanced is open (syncUsbNetPoll).
+  @State usbNetStatus: string = 'off'
+  private usbNetTimer: number = -1
   @State attempt: number = 0
   @State compiled: boolean = false
   @State compileErrors: string = ''
@@ -384,9 +388,9 @@ export struct GeneratePage {
   @State draft: string = ''
   /** The box holds an edit of the last request: sending it runs it again on what was there before it (rewriteRequest). */
   @State rewriting: boolean = false
-  @State settingsOpen: boolean = false
+  @State @Watch('syncUsbNetPoll') settingsOpen: boolean = false
   /** The selector route switch is for working on the app, not for making one: folded away until asked for. */
-  @State advancedOpen: boolean = false
+  @State @Watch('syncUsbNetPoll') advancedOpen: boolean = false
   /** The program alone over the whole screen, with the box under it; see fullscreenPane. */
   @State fullscreen: boolean = false
   /** Full screen with the request box folded away; see composer. */
@@ -698,6 +702,10 @@ export struct GeneratePage {
 
   aboutToDisappear(): void {
     this.disposed = true
+    if (this.usbNetTimer >= 0) {
+      clearInterval(this.usbNetTimer)
+      this.usbNetTimer = -1
+    }
     if (this.generating) {
       this.stopGeneration()
     } else {
@@ -2249,6 +2257,38 @@ export struct GeneratePage {
     this.checkDeepSeek()
   }
 
+  private usbNetOn(): boolean {
+    return usbNetIsOn(this.usbNetStatus)
+  }
+
+  /** Reads the USB network status once a second, only while Settings > Advanced is open. */
+  private syncUsbNetPoll(): void {
+    let shown = this.settingsOpen && this.advancedOpen
+    if (shown && this.usbNetTimer < 0) {
+      let filesDir = this.hostContext().filesDir
+      this.usbNetStatus = readUsbNetStatus(filesDir)
+      this.usbNetTimer = setInterval(() => { this.usbNetStatus = readUsbNetStatus(filesDir) }, 1000)
+    } else if (!shown && this.usbNetTimer >= 0) {
+      clearInterval(this.usbNetTimer)
+      this.usbNetTimer = -1
+    }
+  }
+
+  /** Starts or stops the VPN that sends the whole phone's traffic through the computer (UsbNetAbility). */
+  private async toggleUsbNet(): Promise<void> {
+    let filesDir = this.hostContext().filesDir
+    try {
+      if (this.usbNetOn()) {
+        await stopUsbNet(filesDir)
+      } else {
+        await startUsbNet(filesDir)
+      }
+      this.usbNetStatus = readUsbNetStatus(filesDir)
+    } catch (e) {
+      this.usbNetStatus = 'failed: ' + (e as Error).message
+    }
+  }
+
   /** One line of the mode menu: a mark on the one in use, the name, and what it runs on. */
   private modeMenuLabel(mode: string): string {
     let name = mode === MODE_DEEPSEEK ? settings.providerLabel() + ' \u00B7 ' +
@@ -3184,12 +3224,10 @@ export struct GeneratePage {
         .width('100%')
       }
 
+      Text(this.advancedOpen ? 'Advanced \u25B4' : 'Advanced \u25BE').fontSize(12).fontColor(app.inkMuted)
+        .padding({ top: 4, bottom: 4 })
+        .onClick(() => { this.advancedOpen = !this.advancedOpen })
       // Toggle for the on-device Jev proxy (see jevProxyLabel). Offered for any cloud provider with a key.
-      if (this.mode === MODE_DEEPSEEK && settings.hasApiKey()) {
-        Text(this.advancedOpen ? 'Advanced \u25B4' : 'Advanced \u25BE').fontSize(12).fontColor(app.inkMuted)
-          .padding({ top: 4, bottom: 4 })
-          .onClick(() => { this.advancedOpen = !this.advancedOpen })
-      }
       if (this.advancedOpen && this.mode === MODE_DEEPSEEK && settings.hasApiKey()) {
         Row({ space: 8 }) {
           Button(this.jevProxyLabel())
@@ -3200,6 +3238,20 @@ export struct GeneratePage {
             .onClick(() => { this.toggleJevProxy() })
           Text(this.jevProxyOn ? 'selector via cloud model' :
             (settings.hasSelectorKey() ? 'selector via TypeSafe' : 'no selector — agent route off'))
+            .fontSize(11).fontColor(app.inkMuted).layoutWeight(1)
+        }
+        .width('100%')
+      }
+      // The whole phone's traffic through the computer (UsbNet.ets); needs no key, so offered in every mode.
+      if (this.advancedOpen) {
+        Row({ space: 8 }) {
+          Button(this.usbNetOn() ? 'USB network: on' : 'USB network: off')
+            .attributeModifier(this.usbNetOn() ? new TonalButton() : new QuietButton())
+            .fontSize(11)
+            .height(26)
+            .onClick(() => { this.toggleUsbNet() })
+          Text(this.usbNetStatus === 'off' ? 'whole phone via the computer; run ./usb-net.sh there' :
+            (this.usbNetStatus === 'starting' ? 'starting; allow the VPN if the phone asks' : this.usbNetStatus))
             .fontSize(11).fontColor(app.inkMuted).layoutWeight(1)
         }
         .width('100%')
