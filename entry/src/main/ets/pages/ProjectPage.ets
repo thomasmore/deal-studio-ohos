@@ -9,6 +9,7 @@ import { projectOperations, ProjectOperationStatus, ProjectShortcutState } from 
 import { common } from '@kit.AbilityKit'
 import { app, PrimaryButton, TonalButton, QuietButton, DangerButton } from '../components/AppStyle'
 import { AppRouteParams, returnToLibrary } from '../vera/AppNavigation'
+import { publishLiveWidget } from '../vera/LiveWidgetPublish'
 
 @CustomDialog
 struct ProjectPanelDialog {
@@ -240,6 +241,9 @@ export struct ProjectPage {
                 { value: this.shortcutButtonLabel(), action: () => { this.onShortcutMenu() },
                   enabled: this.shortcutMenuEnabled() },
                 { value: 'Rename', action: () => { this.openRename() } },
+                { value: 'Add widget', action: () => { this.addWidget() }, enabled: !this.projectOperationPending },
+                { value: 'Make widget', action: () => { this.openGenerate(this.versions[0].id, true) },
+                  enabled: this.versions.length > 0 && this.versions[0].vbc2.length > 0 },
                 { value: 'Delete project', action: () => { this.askDeleteProject() } }
               ])
           }
@@ -432,10 +436,11 @@ export struct ProjectPage {
     this.pathStack.pushPath({ name: 'runner', param: p })
   }
 
-  private openGenerate(baseVersionId: string): void {
+  private openGenerate(baseVersionId: string, makeWidget: boolean = false): void {
     let p = new AppRouteParams()
     p.projectId = this.projectId
     p.baseVersionId = baseVersionId
+    p.makeWidget = makeWidget ? '1' : ''
     this.pathStack.pushPath({ name: 'generate', param: p })
   }
 
@@ -657,6 +662,16 @@ export struct ProjectPage {
     } catch (e) {
       console.error('Show project message failed: ' + (e as Error).message)
     }
+  }
+
+  private async addWidget(): Promise<void> {
+    if (this.projectOperationPending) { return }
+    this.projectOperationPending = true
+    let message = ''
+    try { message = await publishLiveWidget(this.projectId) }
+    catch (e) { message = 'Could not add widget: ' + (e as Error).message }
+    finally { this.projectOperationPending = false }
+    this.showProjectMessage(message)
   }
 
   @LocalBuilder

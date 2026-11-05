@@ -13,6 +13,8 @@
 import { VirtualMachine, deserializeVbc2, RuntimeValue, VeraNumberValue, VeraStringValue,
   VeraBooleanValue, encodeRuntimeValue, decodeRuntimeValue } from '../vera/VeraInterpreter'
 import { UiHostEnvironment, HostEffect, VeraUiNode, decodeVeraUi, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
+import { veraStateStamp } from '../vera/VeraStateStamp'
+import { scheduleCardRefresh } from '../vera/FormUpdater'
 import { runRawIntent } from '../vera/VeraIntents'
 import { runSdkAdapter } from '../vera/VeraSdkBackend'
 import { LengthMetrics, mediaquery, matrix4 } from '@kit.ArkUI'
@@ -182,6 +184,44 @@ export struct VeraPreview {
    * is carried into the new program's fresh state (carryState), so a refine does not wipe what the person typed.
    */
   @Prop seedState: string = ''
+  @StorageProp('veraResume') @Watch('onResume') resumeSignal: number = 0
+  @StorageProp('veraForeground') appForeground: boolean = true
+
+  onResume(): void {
+    if (this.previewOnly || this.vm === null) { return }
+    let restored = this.restoreState()
+    if (restored !== null) { this.currentState = restored }
+    this.renderView()
+    this.runWidgetRefresh()
+  }
+
+  /** The program declares widgetRefresh(state): what its card runs on each update, run by the app too. */
+  private refreshes: boolean = false
+
+  /**
+   * The program's widgetRefresh, when it has one, as the card runs it: the state brought up to date with the clock when
+   * the program starts and when the app comes back, so the app opened in the morning shows today's figures whether or not
+   * a card has been updated since -- or is on the home screen at all. Run as a handler is, its phone effects (a live
+   * source's fetch) afterwards; one that traps leaves the state as it was.
+   */
+  private runWidgetRefresh(): void {
+    if (!this.refreshes || this.disposed || this.previewOnly || this.vm === null || this.currentState === null) { return }
+    try {
+      if (this.host !== null) { this.host!.effectsAllowed = true }
+      this.currentState = this.vm!.execute('widgetRefresh', [this.currentState!])
+      if (this.host !== null) { this.host!.effectsAllowed = false }
+      this.notifyStateSnapshot()
+      this.renderView()
+      this.persistState()
+      this.drainEffects()
+    } catch (e) {
+      if (this.host !== null) {
+        this.host!.effectsAllowed = false
+        this.host!.pendingEffects = []
+      }
+      console.warn('VERA-REFRESH widgetRefresh failed: ' + (e as Error).message)
+    }
+  }
   /** Read-only snapshot for a hosting chat. It does not migrate state between programs. */
   onStateSnapshot: (encoded: string) => void = (_encoded: string): void => {}
   /**
@@ -446,10 +486,12 @@ export struct VeraPreview {
       this.host = new UiHostEnvironment()
       let module = deserializeVbc2(this.vbc2)
       this.vm = new VirtualMachine(module, this.host)
+      this.refreshes = module.functions.some((fn): boolean => fn.name === 'widgetRefresh')
       this.currentState = this.restoreState()
       if (this.currentState === null) { this.currentState = this.seeded(this.vm!.execute('init')) }
       this.notifyStateSnapshot()
       this.renderView()
+      this.runWidgetRefresh()
     } catch (e) {
       this.error = 'Init error: ' + (e as Error).message
     }
@@ -768,7 +810,9 @@ export struct VeraPreview {
     let handle = setInterval(() => {
       // A tick that arrives while the previous one is still running would
       // re-enter the VM with a half-applied state.
-      if (this.ticking) { return }
+      // In the background the tick is skipped, not stopped: the time it last fired is kept, so the first tick after
+      // resume carries the whole gap, and the app does not write state while a card may be changing it.
+      if (this.ticking || this.appForeground === false) { return }
       let current = this.timerConfigs.get(id)
       if (current === undefined) { return }
       let last = this.timerLastFire.get(id)
@@ -828,7 +872,7 @@ export struct VeraPreview {
 
   /** The bytecode itself is the stamp: a refined program gets a different one. */
   private stamp(): string {
-    return this.vbc2.length.toString() + ':' + this.vbc2.substring(0, 64)
+    return veraStateStamp(this.vbc2)
   }
 
   /** `fresh` with what seedState held carried into it, or `fresh` itself when there is none or the program cannot draw it. */
@@ -875,6 +919,7 @@ export struct VeraPreview {
     try {
       store.saveState(keys[0], keys[1], this.stamp(),
         JSON.stringify(encodeRuntimeValue(this.currentState!)))
+      scheduleCardRefresh(keys[0])
     } catch (e) {
       // A program holding something unsaveable should still run; it just will
       // not remember. Saying so beats a silent half-working save.

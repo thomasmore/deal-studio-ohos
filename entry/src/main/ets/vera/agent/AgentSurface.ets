@@ -119,7 +119,15 @@ const SURFACE_COMPONENTS: string[] = ['AppTheme', 'Surface', 'Column', 'Row', 'T
  * `language` is the generation prompt as a host holds it, with the catalogue spliced in or not.
  */
 export function surfaceLanguage(language: string, guide: string): string {
-  let catalogue = describeCatalogForPrompt(new Set<string>(SURFACE_COMPONENTS))
+  return languageWith(language, SURFACE_COMPONENTS, guide)
+}
+
+/**
+ * The generation prompt with its catalogue cut to `kinds` and its advice on composing screens of sections replaced by
+ * `guide`: for a program, or a part of one, that may use only those components.
+ */
+export function languageWith(language: string, kinds: string[], guide: string): string {
+  let catalogue = describeCatalogForPrompt(new Set<string>(kinds))
   let start = language.indexOf('{{UI_CATALOG}}')
   if (start < 0) { start = language.indexOf('UI constructors (all return ui.View):') }
   let end = language.indexOf('Clock -- time.')

@@ -1509,6 +1509,32 @@ class Analyzer {
       if (decl instanceof ClassDeclaration) this.checkClass(decl)
     }
     this.checkJsonableCycles()
+    // A declaration's own place, for an error about its signature: the whole program when it cannot be found.
+    let placeOf = (name: string): Span => {
+      let found = this.model.application.declarations.find((d: Declaration): boolean =>
+        d instanceof FunctionDeclaration && (d as FunctionDeclaration).name === name)
+      return found !== undefined ? found.span : this.model.application.span
+    }
+    let widget = this.model.functions.get('widget')
+    if (widget !== undefined) {
+      let init = this.model.functions.get('init')
+      let view = this.model.functions.get('view')
+      let uiView = this.stdModules.get('std/ui')!.classes.find((c: ExternalClass): boolean => c.name === 'View')
+      if (init === undefined || view === undefined || uiView === undefined || widget.isAsync || widget.parameters.length !== 1 ||
+          !identical(widget.parameters[0], init.result) || !identical(widget.result, uiView.type)) {
+        this.addError('E2115', 'widget must be synchronous: function widget(state: init return type): ui.View', placeOf('widget'))
+      }
+    }
+    // The card's periodic update (LiveFormService.liveFormRefresh): the state brought up to date with the clock.
+    let refresh = this.model.functions.get('widgetRefresh')
+    if (refresh !== undefined) {
+      let init = this.model.functions.get('init')
+      if (init === undefined || refresh.isAsync || refresh.parameters.length !== 1 ||
+          !identical(refresh.parameters[0], init.result) || !identical(refresh.result, init.result)) {
+        this.addError('E2113', 'widgetRefresh must be synchronous: function widgetRefresh(state: init return type): init return type',
+          placeOf('widgetRefresh'))
+      }
+    }
     for (let decl of this.model.application.declarations) {
       if (decl instanceof FunctionDeclaration) this.checkFunction(decl)
     }
@@ -2890,6 +2916,113 @@ function handlersOf(model: SemanticModel): Map<string, string> {
     else if (value instanceof VeraClassType && (value as VeraClassType).identity === 'std/gfx:Pointer') { handlers.set(name, 'pointer') }
   })
   return handlers
+}
+
+/** The declarations Make widget writes and may replace: the widget and the card's periodic update. */
+const WIDGET_OWNED: string[] = ['widget', 'widgetRefresh']
+
+/** Additive widget refinement: token comparison ignores formatting/comments, not program semantics. */
+export function widgetRefinementError(base: string, candidate: string): string {
+  let before = new Parser(base, '<base>').parse()
+  let after = new Parser(candidate, '<widget>').parse()
+  let fingerprint = (source: string, node: Node): string => JSON.stringify(
+    new Lexer(source.substring(node.span.start.offset, node.span.end.offset), '<declaration>').scan()
+      .map((token: Token): string => token.kind + ':' + token.text))
+  for (let declaration of before.declarations) {
+    if (!(declaration instanceof FunctionDeclaration) && !(declaration instanceof ClassDeclaration)) { continue }
+    if (declaration instanceof FunctionDeclaration && WIDGET_OWNED.indexOf(declaration.name) >= 0) { continue }
+    let name = declaration.name
+    let found = after.declarations.find((entry: Declaration): boolean =>
+      ((entry instanceof FunctionDeclaration && declaration instanceof FunctionDeclaration) ||
+       (entry instanceof ClassDeclaration && declaration instanceof ClassDeclaration)) &&
+      (entry as FunctionDeclaration).name === name)
+    if (found === undefined || fingerprint(base, declaration) !== fingerprint(candidate, found)) {
+      return 'Make widget must preserve existing declaration ' + name + ' unchanged; add widget and new helpers only.'
+    }
+  }
+  for (let entry of before.imports) {
+    if (!after.imports.some((other: ImportDeclaration): boolean => entry.name === other.name && entry.specifier === other.specifier)) {
+      return 'Make widget must preserve existing imports.'
+    }
+  }
+  if (!after.declarations.some((entry: Declaration): boolean => entry instanceof FunctionDeclaration && entry.name === 'widget')) {
+    return 'Make widget must add function widget(state): ui.View.'
+  }
+  return appUsesWidgetError(base)
+}
+
+/**
+ * '' when none of the app's own declarations calls widget or widgetRefresh; else why Make widget cannot be used on it. A screen
+ * that draws itself with widget(state) -- view returning widget(state) -- would change with every new widget, and the model
+ * cannot change the app's code to stop that. A source that does not parse is left to the checks that say so.
+ */
+export function appUsesWidgetError(source: string): string {
+  let app: Application
+  try { app = new Parser(source, '<app>').parse() } catch (_e) { return '' }
+  for (let declaration of app.declarations) {
+    if (declaration instanceof FunctionDeclaration && WIDGET_OWNED.indexOf(declaration.name) >= 0) { continue }
+    let tokens = new Lexer(source.substring(declaration.span.start.offset, declaration.span.end.offset), '<declaration>').scan()
+    for (let i = 0; i + 1 < tokens.length; i++) {
+      if (WIDGET_OWNED.indexOf(tokens[i].text) >= 0 && tokens[i + 1].text === '(') {
+        let name = declaration instanceof FunctionDeclaration ? (declaration as FunctionDeclaration).name :
+          (declaration instanceof ClassDeclaration ? (declaration as ClassDeclaration).name : 'a declaration')
+        return 'This app\'s own ' + name + ' calls ' + tokens[i].text + '(), so a new widget would change the app too. ' +
+          'Make widget keeps the app as it is, so it cannot make a widget for this app.'
+      }
+    }
+  }
+  return ''
+}
+
+/** '' when `source` parses (types are not checked); else the parser's message, with its place. */
+export function parseErrorOf(source: string): string {
+  try {
+    new Parser(source, '<answer>').parse()
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+}
+
+/**
+ * Make widget: the base program exactly as it is, with the candidate's widget and the functions, classes and imports the
+ * candidate adds. A declaration the base already has is the base's: the model's rewrite of it, asked for or not, is not
+ * taken, so a widget cannot change the app (widgetRefinementError holds by construction). The base's own widget and
+ * widgetRefresh, if any, are replaced by the reply's: a new widget without a widgetRefresh has none. A candidate that does not parse or has no widget is returned as it is, for the compiler and the checks to say why.
+ */
+export function spliceWidget(base: string, candidate: string): string {
+  let before: Application
+  let after: Application
+  try {
+    before = new Parser(base, '<base>').parse()
+    after = new Parser(candidate, '<widget>').parse()
+  } catch (_e) {
+    return candidate
+  }
+  // Functions and classes are the only declarations a program has (imports are apart, below): nothing else can be dropped.
+  let named = (entry: Declaration): string => entry instanceof FunctionDeclaration ? 'function ' + entry.name :
+    (entry instanceof ClassDeclaration ? 'class ' + entry.name : '')
+  let isWidget = (entry: Declaration): boolean => entry instanceof FunctionDeclaration && entry.name === 'widget'
+  let owned = (entry: Declaration): boolean => entry instanceof FunctionDeclaration && WIDGET_OWNED.indexOf(entry.name) >= 0
+  if (!after.declarations.some(isWidget)) { return candidate }
+  let text = (source: string, node: Node): string => source.substring(node.span.start.offset, node.span.end.offset)
+  // The base without its widget-owned declarations, cut from the end so the earlier offsets still hold.
+  let kept = base
+  let old = before.declarations.filter(owned).sort((a: Declaration, b: Declaration): number => b.span.start.offset - a.span.start.offset)
+  for (let entry of old) { kept = kept.substring(0, entry.span.start.offset) + kept.substring(entry.span.end.offset) }
+  let known = before.declarations.filter((entry: Declaration): boolean => !owned(entry)).map(named)
+  let added: string[] = []
+  for (let entry of after.declarations) {
+    let name = named(entry)
+    if (name.length > 0 && known.indexOf(name) < 0) { added.push(text(candidate, entry)) }
+  }
+  let imports: string[] = []
+  for (let entry of after.imports) {
+    if (!before.imports.some((other: ImportDeclaration): boolean => entry.name === other.name && entry.specifier === other.specifier)) {
+      imports.push(text(candidate, entry))
+    }
+  }
+  return (imports.length > 0 ? imports.join('\n') + '\n' : '') + kept.trimEnd() + '\n\n' + added.join('\n\n') + '\n'
 }
 
 export class CompileOptions {

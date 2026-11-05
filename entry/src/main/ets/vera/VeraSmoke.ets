@@ -14,6 +14,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { decodeGfx, pointerValue } from './VeraGfx'
+import { checkWidget } from './VeraWidgetRefine'
 
 /** Twice through the handlers: a list's second entry, a toggle switched back. */
 const PASSES: number = 2
@@ -88,6 +89,15 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
       } catch (e) {
         return diagnostic(e as Error, 'drawing the screen' + after(tapped))
       }
+    }
+  }
+  // A program with a widget may be on the home screen: a change that breaks the card is refused like one that breaks the app,
+  // and said to be about the widget, so the repair -- and the person -- knows where to look.
+  if (deserializeVbc2(compiled.vbc2).functions.some((fn): boolean => fn.name === 'widget')) {
+    let card = checkWidget(compiled.vbc2)
+    if (card.length > 0) {
+      return 'The app\'s home-screen widget (function widget and what it calls) no longer works: ' + card +
+        '\nKeep the widget working with the card-safe components and limits; change it only as far as the request needs.'
     }
   }
   return ''

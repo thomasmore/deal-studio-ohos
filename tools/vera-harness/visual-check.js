@@ -159,11 +159,11 @@ if (!baseline) {
   })
    function effectProbe() {
     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-    const fields=['effectGeneration','disposed','heldEffects','vm','host','currentState'].map(name=>{
+    const fields=['effectGeneration','disposed','heldEffects','vm','host','currentState','refreshes'].map(name=>{
      const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
      return field[0].replace('  private ','')
     }).join('\n')
-    const names=['invalidateEffects','load','dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']
+    const names=['invalidateEffects','load','runWidgetRefresh','dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']
     const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
     const compiled=ts.transpileModule('class Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'effect probe syntax')
@@ -354,7 +354,7 @@ if (!baseline) {
      const constants=['SURFACE_VIEW_MS','SURFACE_SAVE_MS','SURFACE_MAX_ELAPSED_MS'].map(name=>{
       const value=renderer.match(new RegExp('^const '+name+':[^\\n]+','m'));assert(value,name);return value[0]
      }).join('\n')
-     const methods=['invalidateEffects','load','renderView','onDestinationHidden','reconcileSurfaces','collectSurfaces','startSurfaceLoop','stopSurfaceLoop','surfaceFrame'].map(name=>declaration(renderer,'  private '+name+'(').replace('  private ',''))
+     const methods=['invalidateEffects','load','runWidgetRefresh','renderView','onDestinationHidden','reconcileSurfaces','collectSurfaces','startSurfaceLoop','stopSurfaceLoop','surfaceFrame'].map(name=>declaration(renderer,'  private '+name+'(').replace('  private ',''))
      const body=methods.concat(['aboutToAppear','aboutToDisappear','onProgramChanged','onPreviewOnlyChanged'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
      const compiled=ts.transpileModule(constants+'\nclass Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
      assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'surface probe syntax')
@@ -553,6 +553,14 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
     assert.equal(probe.timerConfigs.get('clock').interval,1000);assert.equal(probe.timerConfigs.get('clock').action,'new')
     advance(749);assert.equal(calls.length,1)
     advance(1);assert.deepEqual(calls[1],{action:'new',elapsed:1000,at:12000});assert.equal(probe.ticking,false)
+   })
+   test('native tickers: in the background a tick is skipped, not stopped, and the next one carries the gap', () => {
+    const {probe,calls,advance}=tickerProbe()
+    probe.reconcileTimers(ticker())
+    advance(1000);assert.equal(calls.length,1)
+    probe.appForeground=false;advance(5000);assert.equal(calls.length,1,'nothing runs while the app is away')
+    probe.appForeground=true;advance(1000)
+    assert.equal(calls.length,2);assert.equal(calls[1].elapsed,6000,'the first tick back counts the time away')
    })
    test('native tickers: stable handler never restarts under repeated reconciliation', () => {
     const {probe,scheduled,starts,stops,calls,advance}=tickerProbe()

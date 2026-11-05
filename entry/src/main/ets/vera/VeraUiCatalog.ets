@@ -58,10 +58,12 @@ export class ComponentSpec {
    * describeCatalogForPrompt.
    */
   guidance: string
+  /** Implemented by the bounded home-screen renderer; opt in, never inferred. */
+  card: boolean
   constructor(name: string, nodeKind: string, props: PropSpec[], summary: string,
-      payloadKind: string = '', guidance: string = '') {
+      payloadKind: string = '', guidance: string = '', card: boolean = false) {
     this.name = name; this.nodeKind = nodeKind; this.props = props; this.summary = summary
-    this.payloadKind = payloadKind; this.guidance = guidance
+    this.payloadKind = payloadKind; this.guidance = guidance; this.card = card
   }
 }
 
@@ -152,17 +154,17 @@ export const STYLE_SETS: Map<string, string[]> = new Map<string, string[]>([
 
 export const CATALOG: ComponentSpec[] = [
   new ComponentSpec('Column', 'column',
-    [style('column'), new PropSpec('children', 'view[]')], 'vertical stack'),
+    [style('column'), new PropSpec('children', 'view[]')], 'vertical stack', '', '', true),
   new ComponentSpec('Row', 'row',
-    [style('row'), new PropSpec('children', 'view[]')], 'horizontal stack'),
+    [style('row'), new PropSpec('children', 'view[]')], 'horizontal stack', '', '', true),
   new ComponentSpec('Card', 'card',
     [style('card'), new PropSpec('children', 'view[]')], 'framed group'),
   new ComponentSpec('Scroll', 'scroll',
     [style('column'), new PropSpec('children', 'view[]')], 'scrolling group'),
   new ComponentSpec('Text', 'text',
-    [style('text'), new PropSpec('text', 'string')], 'a line of text'),
+    [style('text'), new PropSpec('text', 'string')], 'a line of text', '', '', true),
   new ComponentSpec('Spacer', 'spacer',
-    [style('spacer')], 'vertical gap'),
+    [style('spacer')], 'vertical gap', '', '', true),
   new ComponentSpec('Image', 'image',
     [style('image'), new PropSpec('src', 'string'), new PropSpec('alt', 'string')], 'https image'),
   new ComponentSpec('Path', 'path',
@@ -171,7 +173,7 @@ export const CATALOG: ComponentSpec[] = [
     'Draws real vector graphics -- circles, gears, arrows, icons, chart shapes -- so use it whenever the user asks to draw something, instead of substituting a number and buttons. commands is an SVG path string using M L C Q A Z with absolute coordinates only. The drawing box is 0..100 in both axes; centre artwork on 50,50. There is no math at runtime: compute every coordinate yourself and write plain number literals. spinPeriodMs rotates the shape (0 is static, 2000 is one turn every 2 seconds) and needs no handler, state field or timer. A circle is "M50 10 A40 40 0 1 0 50 90 A40 40 0 1 0 50 10 Z".'),
   new ComponentSpec('Button', 'button',
     [style('button'), new PropSpec('text', 'string'), new PropSpec('action', 'string'),
-      new PropSpec('value', 'number'), new PropSpec('enabled', 'boolean')], 'tappable button; the handler takes (state, value: number)', 'number'),
+      new PropSpec('value', 'number'), new PropSpec('enabled', 'boolean')], 'tappable button; the handler takes (state, value: number)', 'number', '', true),
   new ComponentSpec('Cell', 'cell',
     [style('cell'), new PropSpec('text', 'string'), new PropSpec('action', 'string'),
       new PropSpec('value', 'number'), new PropSpec('enabled', 'boolean')], 'tappable grid cell; the handler takes (state, value: number)', 'number'),
@@ -253,7 +255,7 @@ export const CATALOG: ComponentSpec[] = [
       new PropSpec('running', 'boolean'), new PropSpec('action', 'string')],
     'draws nothing; calls the handler every intervalMs with the elapsed ms', 'number',
     'Keeps a displayed time or a countdown moving -- never add a refresh button instead. The handler is onTick(state, elapsedMs: number), called every interval; use it to advance a stopwatch, a game or a clock. Accumulate the elapsed value it gives you: do not subtract two clock readings, because time.nowSeconds() only changes once a second. Match intervalMs to the precision shown: 1000 for whole seconds, 50 for hundredths. Show the time left or elapsed with ui.durationToString(seconds). Example: ui.Ticker("default", "clock", 1000, true, "onTick").'),
-  new ComponentSpec('Divider', 'divider', [style('divider')], 'a horizontal rule'),
+  new ComponentSpec('Divider', 'divider', [style('divider')], 'a horizontal rule', '', '', true),
   new ComponentSpec('BackHandler', 'backhandler',
     [new PropSpec('action', 'string')],
     'draws nothing; calls the handler, with 0, on the system back gesture', 'number',
@@ -294,7 +296,7 @@ export const CATALOG: ComponentSpec[] = [
     [style('apptheme'), new PropSpec('primary', 'string'), new PropSpec('children', 'view[]')],
     'the whole app in one look; primary is a "#rrggbb" seed or "" for the preset\'s own',
     '',
-    'Wrap everything view returns in exactly one of these. The preset is the app\'s character, so choose it for the app you were asked for: clean for restrained and neutral, soft for calm and friendly, expressive for bold and atmospheric, editorial for content that leads, technical for dense precise numbers, playful for energetic. Do not pick clean just because an example uses it.'),
+    'Wrap everything view returns in exactly one of these. The preset is the app\'s character, so choose it for the app you were asked for: clean for restrained and neutral, soft for calm and friendly, expressive for bold and atmospheric, editorial for content that leads, technical for dense precise numbers, playful for energetic. Do not pick clean just because an example uses it.', true),
   new ComponentSpec('Hero', 'hero',
     [style('hero'), new PropSpec('eyebrow', 'string'), new PropSpec('title', 'string'),
       new PropSpec('supporting', 'string'), new PropSpec('children', 'view[]')],
@@ -376,7 +378,7 @@ export const CATALOG: ComponentSpec[] = [
       new PropSpec('decimals', 'number', '', true)],
     'a number as text: prefix, the number with `decimals` places and its whole part padded to minimumDigits, suffix',
     '',
-    'Use instead of ui.Text with ui.numberToString. decimals 2 writes 9.5 as "9.50", so money is ui.NumberText("metric", total, "$", "", 1, 2). Leave decimals off to show the number as it is. minimumDigits 2 writes 7 as "07". Use prefix and suffix for units and currency rather than gluing strings together.'),
+    'Use instead of ui.Text with ui.numberToString. decimals 2 writes 9.5 as "9.50", so money is ui.NumberText("metric", total, "$", "", 1, 2). Leave decimals off to show the number as it is. minimumDigits 2 writes 7 as "07". Use prefix and suffix for units and currency rather than gluing strings together.', true),
   new ComponentSpec('ClockText', 'clocktext',
     [style('numbertext'), new PropSpec('minutes', 'number'), new PropSpec('prefix', 'string'),
       new PropSpec('suffix', 'string')],

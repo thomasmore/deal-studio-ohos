@@ -59,7 +59,7 @@ function main() {
   let stateValue
   if (stateArg) {
     stateValue = decodeRuntimeValue(JSON.parse(stateArg))
-  } else if (entry === 'view') {
+  } else if (entry === 'view' || entry === 'widget') {
     stateValue = vm.execute('init')
   }
 

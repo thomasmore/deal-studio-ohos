@@ -29,7 +29,7 @@ function deferred() {
 }
 function params(values = {}) {
   return { projectId: '', versionId: '', vbc2: '', shortcutMode: '', launchError: '',
-    baseVersionId: '', chatId: '', prompt: '', run: '', fromList: '', ...values };
+    baseVersionId: '', chatId: '', prompt: '', run: '', fromList: '', makeWidget: '', formId: '', ...values };
 }
 const library = () => ({ name: 'library', param: params() });
 const projectPath = (id = project.id) => ({ name: 'project', param: params({ projectId: id }) });
@@ -553,6 +553,12 @@ async function test(name, run) {
     assertCommit(f, f.stage, [library(), existing, projectPath(), runnerPath()], false);
     assert.equal(f.stage.stack.paths[0], root);
     assert.equal(f.stage.stack.paths[1], existing, 'existing destinations and their params must survive');
+  });
+  await test('An unbound live card opens the page that binds it, over the library', async () => {
+    const f = await ready();
+    const request = await f.launch({ parameters: { veraFormId: 'form-7' } });
+    assert.equal(request.kind, 'form');
+    assertCommit(f, f.stage, [library(), { name: 'widgetBind', param: params({ formId: 'form-7' }) }], false);
   });
   const cases = [
     ['A widget row with a runnable version opens the runner over its project', {},
