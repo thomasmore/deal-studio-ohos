@@ -118,6 +118,29 @@ const tapped = await service.liveFormTap('form-s1', JSON.stringify({handler: 're
   async () => 'ok\n2470.1\n\n\nsource\tiss.moex.com\thttps://iss.moex.com/x\nasof\t15:00:00')
 assert(JSON.stringify(tapped.nodes).includes('2470.1'), 'a tap on Refresh draws the figure fetched')
 assert(store.loadState(live.id,liveVersion.id,veraStateStamp(liveVersion.vbc2)).includes('2470.1'))
+// The app saves while the card's fetch is out: the app's state is kept and the answer handed to it, not overwritten by the
+// card's copy loaded before the fetch.
+{
+  const fresh = new WidgetSession(liveVersion.vbc2,'x','').encodedState()
+  store.saveState(live.id,liveVersion.id,veraStateStamp(liveVersion.vbc2),fresh)
+  const shown = service.liveFrame(live.id)
+  const appState = JSON.parse(fresh); for (const f of appState[2]) if (f[0] === 'lastCall') f[1][1] = 42
+  await service.liveFormTap('form-s1', JSON.stringify({handler: 'refresh', token: shown.token, value: 0}), async () => {
+    store.saveState(live.id,liveVersion.id,veraStateStamp(liveVersion.vbc2),JSON.stringify(appState))
+    return 'ok\n2480.5\n\n\nsource\tiss.moex.com\thttps://iss.moex.com/x\nasof\t15:10:00' })
+  const after = JSON.parse(store.loadState(live.id,liveVersion.id,veraStateStamp(liveVersion.vbc2)))[2]
+  assert.equal(after.find(f => f[0] === 'lastCall')[1][1], 42, 'the app\'s save during the fetch is kept')
+  assert.equal(after.find(f => f[0] === 'value')[1][1], '2480.5', 'and the answer is on it')
+}
+// Two cards of one project updated together: the period is marked before the fetch, so only one of them fetches.
+{
+  formBindings.bind('form-s2', live.id)
+  let fetches = 0
+  const slow = async () => { fetches++; await new Promise(r => setTimeout(r, 20)); return 'ok\n2490\n\n\nsource\tiss.moex.com\thttps://iss.moex.com/x\nasof\t15:20:00' }
+  const at = T + 5 * service.REFRESH_EVERY_MS
+  const [a, b] = await Promise.all([service.liveFormRefresh('form-s1', at, slow), service.liveFormRefresh('form-s2', at, slow)])
+  assert.equal(fetches, 1, 'one fetch for the burst'); assert.equal([a.ran, b.ran].filter(Boolean).length, 1)
+}
 // Add widget through the system widget manager: the project offered is taken by the next card, once, while fresh.
 formBindings.offer(project.id, T)
 assert.equal(other.takeOffer(T + 30_000), project.id, 'the card added in the manager takes the offered project')

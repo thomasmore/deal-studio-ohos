@@ -17,7 +17,7 @@
  * the home-screen card's update, which has about ten seconds.
  */
 
-import { http } from '@kit.NetworkKit'
+import { http, connection } from '@kit.NetworkKit'
 import { hilog } from '@kit.PerformanceAnalysisKit'
 
 const DOMAIN = 0x0000
@@ -58,17 +58,59 @@ export function domainOf(url: string): string {
   return m === null ? '' : m[1].toLowerCase()
 }
 
-/** '' for an address the program may fetch; else why not. */
+/** Host names that never mean the public internet, whatever they resolve to. */
+const LOCAL_SUFFIXES: string[] = ['.localhost', '.local', '.internal', '.lan', '.home.arpa', '.intranet', '.corp']
+
+/**
+ * '' for an address the program may fetch; else why not. The address comes from a model reading web search results, which a
+ * page can steer, so only a named public host is taken: no host written as a number in any form (decimal, octal or hex
+ * IPv4, IPv6), no local name. What a name resolves to is checked on the phone before the request (publicHostError).
+ */
 export function sourceUrlError(url: string): string {
   if (!/^https:\/\/[^\s]+$/i.test(url)) { return 'the address must start with https:// and have no spaces' }
   if (/^https:\/\/[^\/?#]*@/i.test(url)) { return 'the address must not carry a user name or password' }
-  let host = domainOf(url)
-  if (host.length === 0 || host.indexOf('.') < 0 || host === 'localhost' || host.endsWith('.local') ||
-      /^(10|127|0)\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host) ||
-      host.indexOf(':') >= 0) {
+  if (/^https:\/\/\[/i.test(url)) { return 'the address must name a host, not a number' }
+  let host = domainOf(url).replace(/\.+$/, '')
+  if (host.length === 0 || host.indexOf('.') < 0) { return 'the address must be a public internet host' }
+  // Every label numeric (decimal, octal 0177, hex 0x7f): an address written as a number, which no public API needs.
+  if (host.split('.').every((label: string): boolean => /^(0x[0-9a-f]*|[0-9]+)$/i.test(label))) {
+    return 'the address must name a host, not a number'
+  }
+  if (host === 'localhost' || LOCAL_SUFFIXES.some((suffix: string): boolean => host.endsWith(suffix))) {
     return 'the address must be a public internet host'
   }
   return ''
+}
+
+/** A resolved address on this device, this network or a private range: loopback, private, link-local, CGNAT, unique-local. */
+export function privateAddress(ip: string): boolean {
+  let a = ip.toLowerCase().trim()
+  let mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a)
+  if (mapped !== null) { a = mapped[1] }
+  let v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(a)
+  if (v4 !== null) {
+    let x = Number(v4[1])
+    let y = Number(v4[2])
+    return x === 0 || x === 10 || x === 127 || (x === 169 && y === 254) || (x === 172 && y >= 16 && y <= 31) ||
+      (x === 192 && y === 168) || (x === 100 && y >= 64 && y <= 127) || x >= 224
+  }
+  if (a.indexOf(':') < 0) { return true }
+  return a === '::' || a === '::1' || a.startsWith('fc') || a.startsWith('fd') || a.startsWith('fe8') || a.startsWith('fe9') ||
+    a.startsWith('fea') || a.startsWith('feb')
+}
+
+/** '' when every address `host` resolves to is a public one; else why the request is not made. Fails closed. */
+export async function publicHostError(host: string): Promise<string> {
+  try {
+    let addresses = await connection.getAddressesByName(host)
+    if (addresses.length === 0) { return 'the host does not resolve' }
+    for (let address of addresses) {
+      if (privateAddress(address.address)) { return 'the host resolves to a local address' }
+    }
+    return ''
+  } catch (e) {
+    return 'the host does not resolve: ' + (e as Error).message
+  }
 }
 
 /** The value at `path` in a parsed JSON answer: a.b[0].c, where [-1] is the last item. undefined when it is not there. */
@@ -117,6 +159,7 @@ export function sourceAnswer(body: string, url: string, paths: string[], asof: s
 export async function httpGetText(url: string): Promise<SourceResponse> {
   let out = new SourceResponse()
   let bad = sourceUrlError(url)
+  if (bad.length === 0) { bad = await publicHostError(domainOf(url).replace(/\.+$/, '')) }
   if (bad.length > 0) { out.error = bad; return out }
   let client = http.createHttp()
   try {
@@ -127,8 +170,11 @@ export async function httpGetText(url: string): Promise<SourceResponse> {
       method: http.RequestMethod.GET,
       header: header,
       expectDataType: http.HttpDataType.STRING,
-      connectTimeout: 4000,
-      readTimeout: 5000
+      // Within the card's update, which has about ten seconds for its one fetch and the redraw.
+      connectTimeout: 3000,
+      readTimeout: 4000,
+      // A redirect would go where the address was not checked: not followed.
+      maxRedirects: 0
     })
     if (resp.responseCode < 200 || resp.responseCode >= 300) { out.error = 'HTTP ' + resp.responseCode.toString(); return out }
     let text = typeof resp.result === 'string' ? resp.result as string : JSON.stringify(resp.result)

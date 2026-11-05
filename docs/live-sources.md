@@ -56,12 +56,23 @@ sdk.call("Vera.Source.fetch", ["url", "https://...", "paths", "a.b|c[0][1]", "as
 
 One GET, read at the paths. The answer has the lines of `Vera.Live.fetch`: `ok`, up to three figures (an empty line for one not
 asked), `source<TAB>domain<TAB>address`, `asof<TAB>time`; or one line `error: ...`. The compiler takes the parameters only as
-written-out strings (E2114), so nothing the program keeps can go out in an address.
+written-out strings (E2114), so nothing the program keeps can go out in an address. E2114 applies to `Vera.Live.fetch`'s query
+and labels too: a saved program that built its query from its state stops compiling on its next change.
+
+The address comes from a model reading web pages, which a page can steer, so it is held to a public host twice:
+`sourceUrlError` (at generation and before each request) refuses a host written as a number in any form (decimal, octal or hex
+IPv4, IPv6), `localhost` and local names (`.local`, `.lan`, `.internal`, `.home.arpa`, ...), a trailing dot ignored; on the
+phone `publicHostError` resolves the name and refuses it when any address is loopback, private, link-local, CGNAT or
+unique-local. Redirects are not followed (`maxRedirects: 0`): a 3xx is an error. A name that resolves differently between the
+check and the request (DNS rebinding) is not covered.
 
 ## On the card
 
 `widgetRefresh` may make this one call (and no other phone effect), and so may a widget's button (a Refresh): the card
-(`LiveFormService`) makes it, hands the answer to the handler, then draws and saves. Make widget tells the model so; its check
+(`LiveFormService`) makes it, hands the answer to the handler, then draws and saves. One call per refresh or tap, with 3 s to
+connect and 4 s to read: the card's update has about ten seconds. The answer is handed to the state saved by the time it
+arrives: when the app saved during the fetch, its state is kept and the answer applied to it. The once-per-period mark is set
+before the fetch, so cards of one project updated together fetch once. Make widget tells the model so; its check
 answers the call with a failure, which the handler must take and still draw. The card's update runs `widgetRefresh` when the card
 is added and then about every 30 minutes (once per project per 20 minutes, `RefreshLedger`).
 

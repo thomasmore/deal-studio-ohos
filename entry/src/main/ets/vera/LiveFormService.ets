@@ -1,7 +1,7 @@
 import { formBindingData } from '@kit.FormKit'
 import { store } from './ProjectStore'
 import { formBindings, refreshLedger } from './FormBindings'
-import { LiveFrame, WidgetSession } from './VeraLiveWidget'
+import { LiveFrame, WidgetSession, SourceRequest } from './VeraLiveWidget'
 import { veraStateStamp } from './VeraStateStamp'
 import { sourceFetch } from './VeraSource'
 
@@ -35,6 +35,22 @@ export function liveFrame(projectId: string): LiveFrame {
   }
 }
 
+/**
+ * The program's live source call, if it asked for one, answered -- on the state saved by the time the answer arrives. The fetch
+ * takes up to several seconds, and the app may save its state meanwhile (a tap in the app): then the app's state is kept and
+ * the answer is handed to it, instead of the card's copy, loaded before the fetch, overwriting it. One call at most: the card's
+ * update has about ten seconds, and a single GET (VeraSource.ets) fits in it.
+ */
+async function answerSource(session: WidgetSession, requests: SourceRequest[], loaded: string, projectId: string,
+    versionId: string, vbc2: string, fetchSource: (params: Map<string, string>) => Promise<string>): Promise<WidgetSession> {
+  if (requests.length === 0) { return session }
+  let text = await fetchSource(requests[0].params)
+  let now = store.loadState(projectId, versionId, veraStateStamp(vbc2))
+  let target = now === loaded ? session : new WidgetSession(vbc2, versionId, now)
+  target.answer(requests[0].handler, text)
+  return target
+}
+
 export function liveBinding(projectId: string, formId: string = ''): formBindingData.FormBindingData {
   let frame = liveFrame(projectId)
   frame.formId = formId
@@ -63,9 +79,7 @@ export async function liveFormTap(formId: string, message: string,
     let requests = session.tap(session.frame(projectId, project.name, project.icon), params['token'] as string,
       params['handler'] as string, params['value'] as number)
     // A Refresh button: its live source is fetched and the answer handled before the card is drawn and saved.
-    for (let request of requests) {
-      session.answer(request.handler, await fetchSource(request.params))
-    }
+    session = await answerSource(session, requests, saved, projectId, version.id, version.vbc2, fetchSource)
     let frame = session.frame(projectId, project.name, project.icon)
     frame.formId = formId
     store.saveState(projectId, version.id, veraStateStamp(version.vbc2), session.encodedState())
@@ -109,16 +123,16 @@ export async function liveFormRefresh(formId: string, now: number = Date.now(),
   }
   let stamp = veraStateStamp(version.vbc2)
   try {
-    let session = new WidgetSession(version.vbc2, version.id, store.loadState(projectId, version.id, stamp))
+    let loaded = store.loadState(projectId, version.id, stamp)
+    let session = new WidgetSession(version.vbc2, version.id, loaded)
     if (!session.refreshes()) { return new LiveRefresh(liveBinding(projectId, formId)) }
+    // Marked before the fetch: the other cards of a burst updated together see it and do not fetch too.
+    refreshLedger.markRun(projectId, now)
     // A live source widgetRefresh asked for is fetched here, and its answer handled, before anything is drawn or saved.
-    for (let request of session.refresh()) {
-      session.answer(request.handler, await fetchSource(request.params))
-    }
+    session = await answerSource(session, session.refresh(), loaded, projectId, version.id, version.vbc2, fetchSource)
     let frame = session.frame(projectId, project.name, project.icon)
     frame.formId = formId
     store.saveState(projectId, version.id, stamp, session.encodedState())
-    refreshLedger.markRun(projectId, now)
     console.info('VERA-FORM refresh project=' + projectId)
     let result = new LiveRefresh(formBindingData.createFormBindingData(frame))
     result.ran = true

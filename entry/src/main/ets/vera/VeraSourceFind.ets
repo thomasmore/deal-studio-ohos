@@ -8,9 +8,9 @@
  * The calls are passed in, so the host checks run it with a mocked model and network.
  */
 
-import { SourceSpec, SourceResponse, SOURCE_MAX_FIGURES, readPath, valueText, sourceUrlError, sourceAnswer } from './VeraSource'
+import { SourceSpec, SourceResponse, SOURCE_MAX_FIGURES, readPath, valueText, sourceUrlError, sourceAnswer, domainOf } from './VeraSource'
 import { VirtualMachine, deserializeVbc2, VeraStringValue } from './VeraInterpreter'
-import { UiHostEnvironment, decodeVeraUi } from './VeraUi'
+import { UiHostEnvironment, VeraUiNode, decodeVeraUi, formatVeraNumber } from './VeraUi'
 
 export class SourceCalls {
   /** Web results as text, with each result's address. */
@@ -195,7 +195,7 @@ function sourceHead(spec: SourceSpec): string {
   for (let i = 0; i < spec.paths.length; i++) {
     figures.push((i + 1).toString() + '. ' + spec.labels[i] + ' = ' + spec.values[i] + (spec.units[i].length > 0 ? ' (' + spec.units[i] + ')' : ''))
   }
-  return 'The live figures for this request come from a public data source checked just now, ' + spec.url.split('/')[2] +
+  return 'The live figures for this request come from a public data source checked just now, ' + domainOf(spec.url) +
     '. It answered:\n' + figures.join('\n') + (spec.asofValue.length > 0 ? '\nas of ' + spec.asofValue : '') + '\n\n' +
     'The program fetches them itself, soon after it opens and then every few minutes, with exactly this call (copy it as it is: ' +
     'never change the address or the paths, and never build them from the state):\n  ' + sourceCall(spec, 'onSource') + '\n' +
@@ -244,8 +244,10 @@ export function sourceNote(spec: SourceSpec): string {
 /** '' when the program fetches the source as it was found; else what the next attempt must change. */
 export function sourceUseError(program: string, spec: SourceSpec): string {
   let target = spec.query.length > 0 ? 'Vera.Live.fetch' : 'Vera.Source.fetch'
-  let fetches = program.indexOf('"' + target + '"') >= 0 &&
-    program.indexOf(JSON.stringify(spec.query.length > 0 ? spec.query : spec.url)) >= 0
+  // The address and the paths as found, or the query: what the note says is copied as it is.
+  let fetches = program.indexOf('"' + target + '"') >= 0 && (spec.query.length > 0 ?
+    program.indexOf(JSON.stringify(spec.query)) >= 0 :
+    program.indexOf(JSON.stringify(spec.url)) >= 0 && program.indexOf(JSON.stringify(spec.paths.join('|'))) >= 0)
   // A search answers three figures at most: a fourth label would read the source line as a figure.
   let labels = /"Vera\.Live\.fetch"\s*,\s*\[[^\n]*?"labels"\s*,\s*"((?:[^"\\]|\\.)*)"/.exec(program)
   if (fetches && labels !== null && labels[1].split('|').length > SOURCE_MAX_FIGURES) {
@@ -270,12 +272,36 @@ export function sourceHandlerOf(program: string): string {
   return m === null ? '' : m[1]
 }
 
+/**
+ * What a screen shows, one line per piece: every text a node carries, and a number field as it is drawn. Not the nodes' other
+ * numbers -- sizes, counts, flags -- in which a small figure would always be "found".
+ */
+function screenText(nodes: VeraUiNode[]): string {
+  let out: string[] = []
+  let walk = (node: VeraUiNode): void => {
+    let fields = JSON.parse(JSON.stringify(node)) as Record<string, Object>
+    for (let key of Object.keys(fields)) {
+      let value = fields[key]
+      if (typeof value === 'string' && (value as string).length > 0 && key !== 'kind' && key !== 'style' && key !== 'action') {
+        out.push(value as string)
+      }
+    }
+    if (node.kind === 'numbertext' || node.kind === 'numberstat') {
+      out.push(node.prefix + formatVeraNumber(node.numberValue, node.decimals, node.minimumDigits) + node.suffix)
+    }
+    for (let child of node.children) { walk(child) }
+  }
+  for (let node of nodes) { walk(node) }
+  return out.join('\n')
+}
+
 /** A figure on the screen: as text, or as a number within the rounding a screen shows. */
 function shows(screen: string, value: string): boolean {
-  if (screen.indexOf(value) >= 0) { return true }
-  let wanted = Number(value)
-  if (value.trim().length === 0 || !Number.isFinite(wanted)) { return screen.toLowerCase().indexOf(value.toLowerCase()) >= 0 }
-  let numbers = screen.replace(/(\d),(\d{3})/g, '$1$2').match(/-?\d+(\.\d+)?/g)
+  let wanted = Number(value.replace(/[^0-9.\-]/g, ''))
+  let numeric = /\d/.test(value) && Number.isFinite(wanted)
+  if (!numeric) { return screen.toLowerCase().indexOf(value.toLowerCase()) >= 0 }
+  // Numbers standing on their own: not a part of a time (15:10), a date (2026-11-03) or a longer number.
+  let numbers = screen.replace(/(\d),(\d{3})/g, '$1$2').match(/(?<![\d:.\-])-?\d+(\.\d+)?(?![\d:])/g)
   if (numbers === null) { return false }
   return numbers.some((n: string): boolean => Math.abs(Number(n) - wanted) <= Math.max(0.051, Math.abs(wanted) * 0.0005))
 }
@@ -295,7 +321,11 @@ export function sourceShownError(program: string, vbc2: string, spec: SourceSpec
   let number = Number(figure)
   if (figure.trim().length > 0 && Number.isFinite(number)) {
     let decimals = figure.indexOf('.') >= 0 ? figure.length - figure.indexOf('.') - 1 : 0
-    figure = (number * 1.0137 + 0.37).toFixed(Math.min(decimals, 4))
+    let shown = Math.min(decimals, 4)
+    let changed = (number * 1.0137 + 0.37).toFixed(shown)
+    // A small whole number can round back to itself ("2" -> "2"): then one more, so a figure written into the program is seen.
+    if (Number(changed) === number) { changed = (number + 1).toFixed(shown) }
+    figure = changed
     given[1] = figure
   }
   let time = spec.asofValue
@@ -312,12 +342,12 @@ export function sourceShownError(program: string, vbc2: string, spec: SourceSpec
     host.effectsAllowed = true
     state = vm.execute(handler, [state, new VeraStringValue(sample)])
     host.effectsAllowed = false
-    screen = JSON.stringify(decodeVeraUi(vm.execute('view', [state])))
+    screen = screenText(decodeVeraUi(vm.execute('view', [state])))
   } catch (e) {
     return 'Given the source\'s answer, ' + handler + ' stopped: ' + (e as Error).message
   }
-  // A tab is written \t in the screen's JSON: a source or time line shown as it came is a line read in the wrong place.
-  if (screen.indexOf('source\\t') >= 0 || screen.indexOf('asof\\t') >= 0) {
+  // A source or time line shown as it came, tab and all, is a line read in the wrong place.
+  if (screen.indexOf('source\t') >= 0 || screen.indexOf('asof\t') >= 0) {
     return 'Given an answer from the source, ' + handler + ' shows its "source" or "asof" line as it is, as if it were a ' +
       'figure: the answer has the figures on lines[1] to lines[' + SOURCE_MAX_FIGURES.toString() + '] only. The answer is ' +
       'these lines:\n' + sample.split('\n').map((line: string, i: number): string => 'lines[' + i.toString() + '] = ' +
@@ -326,7 +356,7 @@ export function sourceShownError(program: string, vbc2: string, spec: SourceSpec
   }
   let missing: string[] = []
   if (!shows(screen, figure)) { missing.push('the figure ' + figure) }
-  let domain = spec.url.split('/')[2]
+  let domain = domainOf(spec.url)
   if (screen.indexOf(domain) < 0) { missing.push('the source ' + domain) }
   if (time !== spec.asofValue && screen.indexOf('03:21') < 0) { missing.push('the time ' + time) }
   if (missing.length === 0) { return '' }

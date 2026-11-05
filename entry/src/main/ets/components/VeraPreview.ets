@@ -189,11 +189,19 @@ export struct VeraPreview {
 
   onResume(): void {
     if (this.previewOnly || this.vm === null) { return }
-    let restored = this.restoreState()
-    if (restored !== null) { this.currentState = restored }
+    // The saved state is taken only when another process -- a home-screen card -- changed it while the app was away. Else
+    // the state in memory stays: it may hold what could not be saved, or an answer that arrived around the resume.
+    let keys = this.stateKeys()
+    if (keys.length > 0 && store.loadState(keys[0], keys[1], this.stamp()) !== this.diskState) {
+      let restored = this.restoreState()
+      if (restored !== null) { this.currentState = restored }
+    }
     this.renderView()
     this.runWidgetRefresh()
   }
+
+  /** The saved state as this app last read or wrote it: a different one on disk was written by someone else. */
+  private diskState: string = ''
 
   /** The program declares widgetRefresh(state): what its card runs on each update, run by the app too. */
   private refreshes: boolean = false
@@ -895,6 +903,7 @@ export struct VeraPreview {
     let keys = this.stateKeys()
     if (keys.length === 0 || this.previewOnly) { return null }
     let encoded = store.loadState(keys[0], keys[1], this.stamp())
+    this.diskState = encoded
     if (encoded.length === 0) { return null }
     try {
       return decodeRuntimeValue(JSON.parse(encoded) as Object)
@@ -917,8 +926,9 @@ export struct VeraPreview {
     let keys = this.stateKeys()
     if (keys.length === 0 || this.currentState === null) { return }
     try {
-      store.saveState(keys[0], keys[1], this.stamp(),
-        JSON.stringify(encodeRuntimeValue(this.currentState!)))
+      let encoded = JSON.stringify(encodeRuntimeValue(this.currentState!))
+      store.saveState(keys[0], keys[1], this.stamp(), encoded)
+      this.diskState = encoded
       scheduleCardRefresh(keys[0])
     } catch (e) {
       // A program holding something unsaveable should still run; it just will

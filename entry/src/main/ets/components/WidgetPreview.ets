@@ -42,19 +42,27 @@ export struct WidgetPreview {
     }
   }
 
+  /** A tap is being handled (a Refresh's fetch may take seconds): another tap meanwhile is ignored, not handled twice. */
+  private busy: boolean = false
+
   private async tap(node: CardNode): Promise<void> {
-    if (this.session === null) { return }
+    if (this.session === null || this.busy) { return }
     let session = this.session!
+    // What the session held before the tap: put back if the tap or its answer fails, so it matches the frame on show.
+    let before = session.encodedState()
+    this.busy = true
     try {
-      // A Refresh button fetches its live source here too, as the card does.
-      for (let request of session.tap(this.frame, this.frame.token, node.action, node.value)) {
-        session.answer(request.handler, await sourceFetch(request.params))
-      }
+      // A Refresh button fetches its live source here too, as the card does: one call, as on the card.
+      let requests = session.tap(this.frame, this.frame.token, node.action, node.value)
+      if (requests.length > 0) { session.answer(requests[0].handler, await sourceFetch(requests[0].params)) }
       if (session !== this.session) { return }
       this.frame = session.frame('', this.title, '')
       this.error = ''
     } catch (e) {
+      if (session === this.session) { this.session = new WidgetSession(this.vbc2, 'preview', before) }
       this.error = (e as Error).message
+    } finally {
+      this.busy = false
     }
   }
 

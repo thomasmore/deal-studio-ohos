@@ -16,6 +16,16 @@ assert.match(S.sourceAnswer('<html>', 'https://a.b/x', ['a'], '', 'c'), /^error:
 for (const bad of ['http://a.com/x', 'https://localhost/x', 'https://192.168.1.2/x', 'https://user:pw@a.com/x', 'https://10.0.0.1/', 'https://a.com/ x'])
   assert.notEqual(S.sourceUrlError(bad), '', bad)
 assert.equal(S.sourceUrlError('https://api.open-meteo.com/v1/forecast?latitude=55.75&current=temperature_2m'), '')
+// Hosts that can lead to this device or its network, however they are written (the address comes from a model reading pages).
+for (const bad of ['https://0177.0.0.1/x', 'https://0x7f.0.0.1/x', 'https://2130706433/x', 'https://100.64.1.2/x', 'https://localhost./x',
+  'https://printer.local/x', 'https://router.lan/x', 'https://db.internal/x', 'https://nas.home.arpa./x', 'https://[::1]/x', 'https://[fd00::1]/x'])
+  assert.notEqual(S.sourceUrlError(bad), '', bad)
+for (const ok of ['https://iss.moex.com/x.json', 'https://api.open-meteo.com:443/v1/x', 'https://1password.example.com/x'])
+  assert.equal(S.sourceUrlError(ok), '', ok)
+for (const ip of ['127.0.0.1', '10.1.2.3', '172.20.0.1', '192.168.1.1', '169.254.1.1', '100.64.0.1', '0.0.0.0', '::1', 'fd12::1', 'fe80::1', '::ffff:192.168.0.1', '224.0.0.1'])
+  assert.equal(S.privateAddress(ip), true, ip)
+for (const ip of ['93.184.216.34', '8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8', '172.32.0.1', '100.128.0.1'])
+  assert.equal(S.privateAddress(ip), false, ip)
 
 // The sample shows a table's column names and a row whole (the live figure is often far along them), but only three rows.
 const wide = {marketdata: {columns: Array.from({length: 28}, (_, i) => 'C' + i), data: Array.from({length: 9}, () => Array.from({length: 28}, (_, i) => i))}}
@@ -24,6 +34,16 @@ assert.equal(shown.marketdata.columns.length, 28); assert.equal(shown.marketdata
 assert.match(shown.marketdata.data[3], /9 items/)
 
 ;(async () => {
+  // A name that resolves to a local address is refused before any request: nip.io-style names, a rebinding DNS.
+  globalThis.__veraResolve = async host => host === 'local.example.com' ? [{address: '93.184.216.34'}, {address: '192.168.0.10'}] :
+    host === 'gone.example.com' ? [] : [{address: '93.184.216.34'}]
+  assert.match(await S.publicHostError('local.example.com'), /local address/)
+  assert.match(await S.publicHostError('gone.example.com'), /does not resolve/)
+  assert.equal(await S.publicHostError('api.example.com'), '')
+  globalThis.__veraHttp = () => { throw Error('no request may be made') }
+  assert.match((await S.httpGetText('https://local.example.com/x')).error, /local address/)
+  delete globalThis.__veraHttp
+
   const calls = new F.SourceCalls(), got = []
   calls.search = async q => { assert.match(q, /free public JSON API/); return 'Web results ... 1. MOEX ISS (https://iss.moex.com/iss/reference/)' }
   calls.askJson = async (system, user) => system === F.SOURCE_FIND_PROMPT
@@ -63,6 +83,22 @@ assert.match(shown.marketdata.data[3], /9 items/)
     : '{"ok":true,"figures":[{"label":"IMOEX","path":"marketdata.data[0][9]","unit":""}],"asof":""}'
   const none = await F.findSource('IMOEX index now', calls)
   assert.equal(none.spec, null); assert.match(none.tried[0], /nothing at marketdata\.data\[0\]\[9\]/)
+  // A small whole figure written into the program is still caught: the figure handed over always differs from it.
+  {
+    const small = program.replace('let when: string[] = strings.split(lines[5], "\\t");', 'let when: string[] = strings.split(lines[5], "\\t"); let fixed: string = "2";')
+      .replace('return {value: lines[1], asOf: when[1]', 'return {value: fixed, asOf: when[1]')
+    assert.notEqual(small, program)
+    const two = Object.assign(new S.SourceSpec(), spec, {values: ['2'], sample: spec.sample.replace(/^ok\n[^\n]*/, 'ok\n2')})
+    const smallShown = small.replace('ui.Text("caption", state.asOf)', 'ui.Text("caption", state.asOf), ui.Text("caption", "iss.moex.com")')
+    assert.match(F.sourceShownError(smallShown, compileVeraSource(smallShown).vbc2, two), /without the figure 3/)
+  }
+  // The paths are copied as found too, and a port in the address does not hide the domain.
+  {
+    const call = F.sourceCall(spec, 'onSource')
+    assert.match(F.sourceUseError('x ' + call.replace('marketdata.data[0][1]', 'marketdata.data[0][2]') + ' ui.Ticker(', spec), /must get its live figures itself/)
+    const ported = Object.assign(new S.SourceSpec(), spec, {url: 'https://iss.moex.com:443/x.json'})
+    assert.match(F.sourceNote(ported), /checked just now, iss\.moex\.com\./)
+  }
   console.log('PASS live source: answer read at paths, address rules, finder passes over failures and checks paths on a second fetch, the call and its check')
 })().catch(e => { console.error(e); process.exit(1) })
 
