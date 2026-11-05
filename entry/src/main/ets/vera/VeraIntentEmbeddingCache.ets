@@ -17,13 +17,13 @@
  * invalidation.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { IntentEntry, allEntries, celiaEntryIfInstalled } from './VeraIntentIndex'
 import { embedBatch, embedOne, embeddingModelReady, MODEL_FILE } from './VeraEmbeddings'
 import { loadRawfileText } from './LlamaEngine'
 import { scoreCeliaCorpus, CeliaScored, celiaIntentEmbeddingsReady } from './VeraCeliaIntentEmbeddingCache'
-import resourceManager from '@ohos.resourceManager'
+import { resourceManager } from '@kit.LocalizationKit'
 
 const DOMAIN = 0x0000
 // See VeraSdkEmbeddingCache.ets's own comment on this constant -- same

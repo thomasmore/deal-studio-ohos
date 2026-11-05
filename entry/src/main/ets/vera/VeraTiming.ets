@@ -18,7 +18,7 @@
  * (tools/vera-bench) clears the file before a run and pulls it after.
  */
 
-import fs from '@ohos.file.fs'
+import { fileIo as fs } from '@kit.CoreFileKit'
 
 let tracePath: string = ''
 

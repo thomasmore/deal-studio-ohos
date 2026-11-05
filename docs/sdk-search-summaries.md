@@ -170,13 +170,16 @@ R@k по векторам из приложения: R@1 0,29, R@3 0,48, R@8 0,6
 
 ## Воспроизведение
 
+Экспортируйте `SDK_API_DIR` с путём к каталогу `interface/sdk-js/api` вашего
+исходного дерева OpenHarmony SDK.
+
 ```bash
 # summary (нужен ключ DeepSeek в ~/.deepseek-key; в репозиторий не попадает)
-python3 tools/build-sdk-summaries.py --sdk-dir ~/work/ohos/interface/sdk-js/api \
+python3 tools/build-sdk-summaries.py --sdk-dir "${SDK_API_DIR:?Export SDK_API_DIR with the SDK API source directory}" \
     --out tools/sdk-summaries.json --include-system
 
 # индекс (одна запись на функцию, с summary) и эмбеддинги
-python3 tools/build-sdk-index.py --sdk-dir ~/work/ohos/interface/sdk-js/api \
+python3 tools/build-sdk-index.py --sdk-dir "${SDK_API_DIR:?Export SDK_API_DIR with the SDK API source directory}" \
     --summaries tools/sdk-summaries.json \
     --out entry/src/main/resources/rawfile/sdk-index.json
 python3 tools/build-sdk-embeddings.py --model <embeddinggemma-300m-q4_k_m.gguf> \

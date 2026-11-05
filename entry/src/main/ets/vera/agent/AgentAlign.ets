@@ -11,6 +11,7 @@
  * cover with a slot turned on would be lost. On by default; `--ps veraAlign 0` (setAlignEnabled) turns it off, and nothing here runs.
  */
 
+import { OperationCancellation, throwIfCancelled } from '../OperationCancellation'
 import { Composition, SketchInput, SketchValue, READY_KINDS, JevAsk, LIST_SECTIONS, hasClock, canReplaceList, replaceList,
   isScene } from '../VeraCompose'
 import { fragments, vetoes, FragmentSpec, VetoSpec } from '../VeraTemplates'
@@ -290,11 +291,16 @@ function screenShows(comp: Composition): string {
 }
 
 /** One Jev question round over `needs` among `kinds`; false when Jev gave no answer. */
-async function alignRound(comp: Composition, prompt: string, askJev: JevAsk, needs: string[], kinds: string[], result: AlignResult): Promise<boolean> {
+async function alignRound(comp: Composition, prompt: string, askJev: JevAsk, needs: string[], kinds: string[], result: AlignResult,
+    cancellation?: OperationCancellation): Promise<boolean> {
+  throwIfCancelled(cancellation)
   let body = ''
   try {
     body = await askJev(buildAlignRequest(prompt, needs, kinds, screenShows(comp)))
+    throwIfCancelled(cancellation)
   } catch (_e) {
+    throwIfCancelled(cancellation)
+    if ((_e as Error).name === 'OperationCancelledError') { throw (_e as Error) }
     body = ''
   }
   if (body.length === 0) { return false }
@@ -313,22 +319,27 @@ async function alignRound(comp: Composition, prompt: string, askJev: JevAsk, nee
  * on the screen publishes is asked about first: a total, a count or a balance over the section's own records is the reader's to
  * show, and a section standing alone (a key-facts block, a chart) would only make the figures up.
  */
-export async function alignLeftovers(comp: Composition, prompt: string, askJev: JevAsk): Promise<AlignResult> {
+export async function alignLeftovers(comp: Composition, prompt: string, askJev: JevAsk,
+    cancellation?: OperationCancellation): Promise<AlignResult> {
+  throwIfCancelled(cancellation)
   let result = new AlignResult()
   if (alignCandidates(comp).length === 0 && (readerKinds(comp).length === 0 || alignReaderCandidates(comp).length === 0)) { return result }
   let started = Date.now()
   let answered = true
   let readers = readerKinds(comp)
-  if (readers.length > 0) { answered = await alignRound(comp, prompt, askJev, alignReaderCandidates(comp), readers, result) }
+  if (readers.length > 0) { answered = await alignRound(comp, prompt, askJev, alignReaderCandidates(comp), readers, result, cancellation) }
+  throwIfCancelled(cancellation)
   let rest = alignCandidates(comp)
   if (answered && rest.length > 0) {
     let before = comp.blocks.length
-    answered = await alignRound(comp, prompt, askJev, rest, alignKindsFor(comp), result)
+    answered = await alignRound(comp, prompt, askJev, rest, alignKindsFor(comp), result, cancellation)
     // A section just chosen may publish what a reader shows: what is still left is asked of those readers.
+    throwIfCancelled(cancellation)
     let more = answered && comp.blocks.length > before ? readerKinds(comp) : []
     let left = alignReaderCandidates(comp)
-    if (more.length > 0 && left.length > 0) { await alignRound(comp, prompt, askJev, left, more, result) }
+    if (more.length > 0 && left.length > 0) { await alignRound(comp, prompt, askJev, left, more, result, cancellation) }
   }
+  throwIfCancelled(cancellation)
   result.readers = result.added.filter((kind: string): boolean => isReader(kind)).length
   result.ms = Date.now() - started
   if (!answered) {

@@ -15,8 +15,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, VeraNumberValue, VeraStr
 import { UiHostEnvironment, HostEffect, VeraUiNode, decodeVeraUi, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
 import { runRawIntent } from '../vera/VeraIntents'
 import { runSdkAdapter } from '../vera/VeraSdkBackend'
-import { LengthMetrics } from '@ohos.arkui.node'
-import mediaquery from '@ohos.mediaquery'
+import { LengthMetrics, mediaquery, matrix4 } from '@kit.ArkUI'
 
 import { catalogKinds } from '../vera/VeraUiCatalog'
 import { iconPath, ICON_STROKE, ICON_VIEWPORT, ICON_ORIGIN } from '../vera/VeraIcons'
@@ -29,9 +28,7 @@ import { LiveNode, toLive, reconcile, armReveal } from './VeraLiveTree'
 import { carryState } from '../vera/VeraStateCarry'
 import { MotionPose, motionPose, motionDuration, poseMatrix, poseFromArray, multiplyMatrices, identityMatrix, perspectiveMatrix,
   columnMajor, poseToPixels, facesViewer, samePose, animatedPose, stageDistance, faceShade, depthRanks } from '../vera/VeraMotion'
-import matrix4 from '@ohos.matrix4'
-import displaySync from '@ohos.graphics.displaySync'
-import uiObserver from '@ohos.arkui.observer'
+import { displaySync } from '@kit.ArkGraphics2D'
 import { decodeGfx, paintGfx, pointerValue, gfxFit, gfxToSurface, gfxNaturalHeight } from '../vera/VeraGfx'
 
 /**
@@ -85,6 +82,15 @@ class SceneLayer {
 class SceneFrame {
   at: number = -1
   layers: SceneLayer[] = []
+}
+
+class TimerConfig {
+  interval: number
+  action: string
+  constructor(interval: number, action: string) {
+    this.interval = interval
+    this.action = action
+  }
 }
 
 /** How often a running surface re-runs view() for what is drawn around it, in ms: a score in a header, not the scene. */
@@ -150,6 +156,9 @@ class BarItem {
 /** The tallest a pane of ui.Tabs grows in a chat reply, in vp; past it the pane scrolls inside the window. */
 const EMBEDDED_WINDOW: number = 360
 
+/** The height of the band a lone ui.Path is centred in. */
+const PATH_BAND_HEIGHT: number = 240
+
 @Component
 export struct VeraPreview {
   /**
@@ -192,6 +201,12 @@ export struct VeraPreview {
    * back-presses in a row -- the normal case -- are both seen.
    */
   @Prop @Watch('onBackPressSignal') backPressSignal: number = 0
+  /**
+   * Set by the hosting page's NavDestination.onHidden() and cleared its onShown(): while another destination
+   * covers this one, the surface frame loop stops instead of drawing underneath it and halving the top screen's
+   * frame rate. A plain boolean is enough -- unlike backPressSignal it is a state, not an event.
+   */
+  @Prop @Watch('onDestinationHidden') destinationHidden: boolean = false
   /**
    * Told whether a ui.BackHandler is currently part of the tree, so the
    * hosting page's onBackPress() can return the right thing synchronously --
@@ -242,10 +257,11 @@ export struct VeraPreview {
    * without this a late answer would re-enter a VM that is no longer there.
    */
   private disposed: boolean = false
+  private effectGeneration: number = 0
   // Live tickers, keyed by the program's own id for each: handle, interval and
   // the moment of the last fire, so a handler can be told how long really passed.
   private timers: Map<string, number> = new Map<string, number>()
-  private timerIntervals: Map<string, number> = new Map<string, number>()
+  private timerConfigs: Map<string, TimerConfig> = new Map<string, TimerConfig>()
   private timerLastFire: Map<string, number> = new Map<string, number>()
   private ticking: boolean = false
   private spin: SpinAngle = new SpinAngle()
@@ -333,9 +349,9 @@ export struct VeraPreview {
   // Where the frames' time went since the last report: the frame handlers, draw() and its decoding, the painting,
   // and the view refreshes in between.
   private frameSplit: number[] = [0, 0, 0, 0]
-  // The router page this preview is on is covered by another; its frame loop stops until the page shows again.
+  // The destination this preview is on is covered by another; its frame loop stops until the destination shows again.
+  // Driven by the destinationHidden @Prop, set by the hosting page's onHidden()/onShown().
   private pageHidden: boolean = false
-  private pageListener: ((info: uiObserver.RouterPageInfo) => void) | null = null
   private frameReportAt: number = 0
 
   // Kinds renderNode has a branch for. Checked against the catalogue on mount so
@@ -352,6 +368,8 @@ export struct VeraPreview {
     'table', 'tablerow', 'motion', 'transform', 'stage', 'surface']
 
   aboutToAppear(): void {
+    this.disposed = false
+    this.pageHidden = this.destinationHidden
     let missing: string[] = []
     for (let kind of catalogKinds()) {
       if (VeraPreview.RENDERED.indexOf(kind) < 0) { missing.push(kind) }
@@ -361,35 +379,7 @@ export struct VeraPreview {
       this.error = 'Renderer is missing: ' + missing.join(', ')
     }
     this.watchDarkMode()
-    this.watchPage()
     this.load()
-  }
-
-  /**
-   * A page pushed over this one leaves this component alive, and a surface's frame loop with it: a game in the
-   * Generate preview, or a proof opened over another, went on drawing underneath and halved the frame rate of the
-   * one on top. The loop stops while this preview's own router page is hidden and starts again when it shows.
-   */
-  private watchPage(): void {
-    let page = this.queryRouterPageInfo()
-    if (page === undefined) { return }
-    let pageId = page.pageId
-    let listener = (info: uiObserver.RouterPageInfo): void => {
-      if (info.pageId !== pageId || this.disposed) { return }
-      if (info.state === uiObserver.RouterPageState.ON_PAGE_HIDE && !this.pageHidden) {
-        this.pageHidden = true
-        this.stopSurfaceLoop()
-      } else if (info.state === uiObserver.RouterPageState.ON_PAGE_SHOW && this.pageHidden) {
-        this.pageHidden = false
-        this.reconcileSurfaces(true)
-      }
-    }
-    try {
-      this.getUIContext().getUIObserver().on('routerPageUpdate', listener)
-      this.pageListener = listener
-    } catch (e) {
-      console.warn('VERA-SURFACE no page observer: ' + (e as Error).message)
-    }
   }
 
   onProgramChanged(): void {
@@ -428,13 +418,22 @@ export struct VeraPreview {
     }
   }
 
+  private invalidateEffects(): void {
+    this.effectGeneration += 1
+    this.heldEffects = []
+    this.pending = null
+    if (this.host !== null) { this.host!.pendingEffects = [] }
+  }
+
   private load(): void {
+    this.invalidateEffects()
     // A preview follows a screen being made: each program it is handed is the same screen a little further on, so its tree
     // is reconciled into the one already drawn. Replacing it rebuilt the whole screen for every piece of the plan, and
     // the screen flickered while it grew.
     let keep = this.previewOnly && this.liveRoot !== null && this.vbc2.length > 0
     this.stopAllTimers()
     this.vm = null
+    this.host = null
     this.currentState = null
     if (!keep) {
       this.liveRoot = null
@@ -469,22 +468,25 @@ export struct VeraPreview {
    * ticker under a stream of taps would never reach a full second.
    */
   private reconcileTimers(root: VeraUiNode | null): void {
-    let wanted = new Map<string, number>()
-    let actions = new Map<string, string>()
-    if (root !== null) { this.collectTickers(root!, wanted, actions) }
+    let wanted = new Map<string, TimerConfig>()
+    if (root !== null) { this.collectTickers(root!, wanted) }
 
     let live = Array.from(this.timers.keys())
     for (let id of live) {
       let want = wanted.get(id)
-      let current = this.timerIntervals.get(id)
-      if (want === undefined || want !== current) { this.stopTimer(id) }
+      let current = this.timerConfigs.get(id)
+      if (want === undefined || current === undefined || want.interval !== current.interval) {
+        this.stopTimer(id)
+      }
     }
     let ids = Array.from(wanted.keys())
     for (let id of ids) {
-      if (this.timers.has(id)) { continue }
-      let interval = wanted.get(id) as number
-      let action = actions.get(id) as string
-      this.startTimer(id, interval, action)
+      let config = wanted.get(id) as TimerConfig
+      if (this.timers.has(id)) {
+        this.timerConfigs.set(id, config)
+        continue
+      }
+      this.startTimer(id, config)
     }
   }
 
@@ -731,40 +733,60 @@ export struct VeraPreview {
     }
   }
 
-  private collectTickers(node: VeraUiNode, wanted: Map<string, number>,
-      actions: Map<string, string>): void {
-    if (node.kind === 'ticker' && node.checked && node.minimum > 0 &&
-        node.tickerId.length > 0 && node.action.length > 0) {
-      wanted.set(node.tickerId, node.minimum)
-      actions.set(node.tickerId, node.action)
+  /**
+   * The hosting page's NavDestination.onHidden()/onShown() set destinationHidden; the surface frame loop follows it.
+   * This replaces the old routerPageUpdate observer, which only fired when the whole app went away: every screen now
+   * lives inside one router page, so a proof opened over this one never stopped the loop underneath.
+   */
+  private onDestinationHidden(): void {
+    if (this.disposed) { return }
+    if (this.destinationHidden) {
+      if (!this.pageHidden) {
+        this.pageHidden = true
+        this.stopSurfaceLoop()
+      }
+    } else {
+      if (this.pageHidden) {
+        this.pageHidden = false
+        this.reconcileSurfaces(true)
+      }
     }
-    for (let child of node.children) { this.collectTickers(child, wanted, actions) }
   }
 
-  private startTimer(id: string, intervalMs: number, action: string): void {
-    let safe = intervalMs < 16 ? 16 : intervalMs
+  private collectTickers(node: VeraUiNode, wanted: Map<string, TimerConfig>): void {
+    if (node.kind === 'ticker' && node.checked && node.minimum > 0 &&
+        node.tickerId.length > 0 && node.action.length > 0) {
+      wanted.set(node.tickerId, new TimerConfig(node.minimum, node.action))
+    }
+    for (let child of node.children) { this.collectTickers(child, wanted) }
+  }
+
+  private startTimer(id: string, config: TimerConfig): void {
+    let safe = config.interval < 16 ? 16 : config.interval
+    this.timerConfigs.set(id, config)
     this.timerLastFire.set(id, Date.now())
     let handle = setInterval(() => {
       // A tick that arrives while the previous one is still running would
       // re-enter the VM with a half-applied state.
       if (this.ticking) { return }
+      let current = this.timerConfigs.get(id)
+      if (current === undefined) { return }
       let last = this.timerLastFire.get(id)
       let now = Date.now()
       let elapsed = last !== undefined ? now - (last as number) : safe
       this.timerLastFire.set(id, now)
       this.ticking = true
-      this.dispatch(action, new VeraNumberValue(Math.round(elapsed)))
+      this.dispatch(current.action, new VeraNumberValue(Math.round(elapsed)))
       this.ticking = false
     }, safe)
     this.timers.set(id, handle)
-    this.timerIntervals.set(id, intervalMs)
   }
 
   private stopTimer(id: string): void {
     let handle = this.timers.get(id)
     if (handle !== undefined) { clearInterval(handle as number) }
     this.timers.delete(id)
-    this.timerIntervals.delete(id)
+    this.timerConfigs.delete(id)
     this.timerLastFire.delete(id)
   }
 
@@ -782,17 +804,10 @@ export struct VeraPreview {
   aboutToDisappear(): void {
     // Without this the tickers -- and the VM they drive -- outlive the screen.
     this.disposed = true
+    this.invalidateEffects()
     this.stopAllTimers()
     // A running surface saves every few seconds; the frames since the last save would otherwise be lost.
     if (this.liveSurfaces.length > 0 && !this.previewOnly) { this.persistState() }
-    if (this.pageListener !== null) {
-      try {
-        this.getUIContext().getUIObserver().off('routerPageUpdate', this.pageListener!)
-      } catch (e) {
-        console.info('VERA-SURFACE page observer off failed: ' + (e as Error).message)
-      }
-      this.pageListener = null
-    }
     // The same applies to the dark-mode listener: it holds this component, and
     // its callback re-enters the VM.
     if (this.darkListener !== null) {
@@ -975,7 +990,7 @@ export struct VeraPreview {
    * does, rather than trapping again sixty times a second.
    */
   private surfaceFrame(): void {
-    if (this.disposed || this.framing || this.vm === null || this.currentState === null) { return }
+    if (this.disposed || this.pageHidden || this.framing || this.vm === null || this.currentState === null) { return }
     let now = Date.now()
     let elapsed = this.lastFrameAt > 0 ? Math.min(SURFACE_MAX_ELAPSED_MS, Math.max(0, now - this.lastFrameAt)) : 16
     this.lastFrameAt = now
@@ -1192,6 +1207,7 @@ export struct VeraPreview {
    * the component produces -- a number, a string or a boolean.
    */
   private dispatch(action: string, payload: RuntimeValue, persist: boolean = true): void {
+    if (this.disposed) { return }
     console.info('VERA-CLICK action=' + action + ' rev=' + this.revision.toString())
     if (this.vm === null || this.currentState === null || this.previewOnly) { return }
     let t0 = Date.now()
@@ -1234,7 +1250,7 @@ export struct VeraPreview {
    * a VM that is no longer running.
    */
   private drainEffects(): void {
-    if (this.host === null) { return }
+    if (this.disposed || this.host === null) { return }
     let effects: HostEffect[] = this.host!.pendingEffects
     if (effects.length === 0) { return }
     this.host!.pendingEffects = []
@@ -1250,6 +1266,7 @@ export struct VeraPreview {
    * whole mechanism exists to prevent.
    */
   private runQueued(): void {
+    if (this.disposed) { return }
     while (this.heldEffects.length > 0) {
       if (this.pending !== null) { return }
       let effect = this.heldEffects.shift() as HostEffect
@@ -1330,6 +1347,7 @@ export struct VeraPreview {
 
   /** The person allowed it: run it, then carry on with whatever was behind it. */
   private allowPending(): void {
+    if (this.disposed) { return }
     let effect = this.pending
     this.pending = null
     if (effect !== null) {
@@ -1349,6 +1367,7 @@ export struct VeraPreview {
    * and hears nothing back will show the person a screen that is quietly wrong.
    */
   private refusePending(): void {
+    if (this.disposed) { return }
     let effect = this.pending
     this.pending = null
     if (effect !== null) {
@@ -1360,6 +1379,8 @@ export struct VeraPreview {
 
   /** One effect, whichever host it belongs to, answered through its handler. */
   private runEffect(effect: HostEffect): void {
+    if (this.disposed) { return }
+    let generation = this.effectGeneration
     let answer: Promise<string>
     if (effect.kind === 'sdk' && effect.rawTarget.indexOf('/') >= 0) {
       // An intent-style target: it gets real dispatch through runRawIntent.
@@ -1375,10 +1396,10 @@ export struct VeraPreview {
       answer = runSdkAdapter(effect.rawTarget, effect.values)
     }
     answer.then((text: string) => {
-      if (this.disposed) { return }
+      if (this.disposed || generation !== this.effectGeneration) { return }
       this.dispatch(effect.resultHandler, new VeraStringValue(text))
     }).catch((e: Error) => {
-      if (this.disposed) { return }
+      if (this.disposed || generation !== this.effectGeneration) { return }
       this.dispatch(effect.resultHandler, new VeraStringValue('error: ' + e.message))
     })
   }
@@ -1399,7 +1420,7 @@ export struct VeraPreview {
     .alignContent(Alignment.Bottom)
   }
 
-  @Builder
+  @LocalBuilder
   consentSheet(effect: HostEffect) {
     Column() {
       Column() {
@@ -1454,7 +1475,7 @@ export struct VeraPreview {
     .width('100%')
   }
 
-  @Builder
+  @LocalBuilder
   programFrame() {
     Column() {
       if (this.error.length > 0) {
@@ -1547,7 +1568,7 @@ export struct VeraPreview {
     return false
   }
 
-  @Builder
+  @LocalBuilder
   renderChildren(node: LiveNode) {
     // Keyed by position and kind. Position, because reconcile keeps a node's
     // identity across frames, so a retained component is still reading a node
@@ -1627,7 +1648,7 @@ export struct VeraPreview {
   /** Vertical padding belongs to the fill, so an unfilled section has none. */
 
   /** A ui.Snackbar, drawn over the program at the bottom of its window (see programFrame). */
-  @Builder
+  @LocalBuilder
   snackbarBar(node: LiveNode) {
       Row({ space: this.t().gapBase }) {
         Text(node.text)
@@ -2206,7 +2227,7 @@ export struct VeraPreview {
   }
 
   /** An icon on a tinted disc: the anchor that lets the eye find a row or an empty screen. */
-  @Builder
+  @LocalBuilder
   iconChip(name: string, box: number, fill: string, colour: string) {
     Column() {
       this.drawIcon(name, Math.round(box * 0.5), colour)
@@ -2227,7 +2248,7 @@ export struct VeraPreview {
    * are stroked rather than filled -- see VeraIcons for why -- with round caps,
    * which is what keeps a two-segment tick from ending in two blunt chisels.
    */
-  @Builder
+  @LocalBuilder
   drawIcon(name: string, size: number, colour: string) {
     // The viewport is the whole trick, and its unit is half the trick.
     //
@@ -2264,7 +2285,7 @@ export struct VeraPreview {
   }
 
   /** One legend entry for a two-series ui.Sparkline: a tone-coloured dot and its name. */
-  @Builder
+  @LocalBuilder
   sparklineLegendEntry(text: string, colour: string) {
     Row({ space: this.t().gapTight }) {
       Column().width(8).height(8).borderRadius(4).backgroundColor(colour)
@@ -2272,7 +2293,7 @@ export struct VeraPreview {
     }
   }
 
-  @Builder
+  @LocalBuilder
   renderNode(node: LiveNode, parentKind: string) {
     if (node.kind === 'apptheme') {
       // The look itself is picked up in reconcileTheme, off the root of the
@@ -3778,7 +3799,7 @@ export struct VeraPreview {
           Row({ space: 6 }) {
             // barHeights is called once here, to build the array this
             // ForEach iterates -- not from inside its item builder. That
-            // distinction is the whole fix: renderNode is @Builder, and
+            // distinction is the whole fix: renderNode is @LocalBuilder, and
             // five shapes of this ForEach's item builder reading node.max-
             // imum itself -- a let before the loop, a @Component method
             // call, a bare function call, and two hand-written inline
@@ -4000,10 +4021,10 @@ export struct VeraPreview {
         Path({ commands: node.commands })
           .fill(pathFill(this.t(), node.style))
           .rotate({ angle: node.spinPeriodMs > 0 ? this.spin.angle : 0 })
-          .scale({ x: 2.4, y: 2.4 })
+          .scale({ x: this.getUIContext().vp2px(PATH_BAND_HEIGHT) / 100, y: this.getUIContext().vp2px(PATH_BAND_HEIGHT) / 100 })
       }
       .width('100%')
-      .height(240)
+      .height(PATH_BAND_HEIGHT)
       .alignItems(HorizontalAlign.Center)
       .justifyContent(FlexAlign.Center)
     } else if (node.kind === 'image') {

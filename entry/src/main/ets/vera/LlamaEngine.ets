@@ -10,9 +10,9 @@
  * blocked on release-provisioned installs — see GeneratePage.checkModel()).
  */
 
-import resourceManager from '@ohos.resourceManager'
-import fs from '@ohos.file.fs'
-import util from '@ohos.util'
+import { resourceManager } from '@kit.LocalizationKit'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { util } from '@kit.ArkTS'
 import nativeLlama from 'libllama.so'
 
 export class LlamaConfig {
@@ -47,6 +47,11 @@ export class GenerateResult {
   text: string = ''
   inputTokens: number = 0
   outputTokens: number = 0
+  cacheHitTokens: number = 0
+  finishReason: string = ''
+  prefillMs: number = 0
+  thinkMs: number = 0
+  toolRounds: number = 0
 }
 
 /**

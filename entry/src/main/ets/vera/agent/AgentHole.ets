@@ -4,7 +4,7 @@
  * that fills them. Whichever way the plan was made -- the agent's sketch or the blocks' layout -- it is filled the same way.
  */
 
-import { AgentHost, HoleRecord } from './AgentHost'
+import { AgentHost, HoleRecord, checkAgent, agentCancellation } from './AgentHost'
 import { CustomRequest, CustomResult, writeSection } from './AgentCustom'
 import { FragmentSpec, StateFieldSpec } from '../VeraTemplates'
 import { ScreenPlan, PlanComponent, PlanSlot, assemblePlan, FILL_HOLE, FILL_REPORTED } from '../ScreenPlan'
@@ -91,6 +91,8 @@ function withSection(plan: ScreenPlan, section: FragmentSpec | null): string {
  */
 export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[], host: AgentHost,
     facts: string[] = [], contract: PartsContract | null = null): Promise<CustomResult | null> {
+  checkAgent(host)
+  let cancellation = agentCancellation(host)
   let slots: PlanSlot[] = plan.toWrite()
   if (slots.length === 0) { return null }
   // Phone needs an earlier hole of this request already found nothing can do are reported as it said, not asked again.
@@ -112,6 +114,7 @@ export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[
       reported.cannot = why
       reported.failed = 'custom section cannot: ' + why + ' (known from an earlier hole)'
       host.onHole(recordOf(plan, prompt, known, reported, OUTCOME_KNOWN))
+      checkAgent(host)
       quietSubtitle(plan)
       return reported
     }
@@ -134,22 +137,29 @@ export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[
   // What the phone could do for each need: its functions found for every need, not only those the plan marked as the phone's.
   // Whether "show it on a map" or "turn the torch on" is the phone's job is not for a keyword or the plan to decide; the lookup
   // answers nothing for a need that is not, and the writer may call only what was found.
+  checkAgent(host)
   let texts = await Promise.all(slots.map(async (s: PlanSlot): Promise<string> => {
+    checkAgent(host)
     let text = host.looked.get(s.need) ?? await host.lookup(s.need)
+    checkAgent(host)
     host.looked.set(s.need, text)
     return text
   }))
+  checkAgent(host)
   let found: string[] = []
   for (let i = 0; i < slots.length; i++) {
     if (texts[i].length > 0) { found.push('For "' + slots[i].need + '":\n' + texts[i].substring(0, LOOKUP_CHARS)) }
   }
   asked.phone = found.join('\n\n')
-  let written = await writeSection(asked, host.language, host.askCode!)
+  checkAgent(host)
+  let written = await writeSection(asked, host.language, host.askCode!, cancellation)
+  checkAgent(host)
   // A refusal of several needs at once says nothing of each: a need the phone can do is not lost with one it cannot. Each is
   // then written on its own, with only the functions found for it.
   if (written.cannot.length > 0 && slots.length > 1 && !asked.whole) {
     host.onHole(recordOf(plan, prompt, slots, written, OUTCOME_REPORTED))
     for (let i = 0; i < slots.length; i++) {
+      checkAgent(host)
       let one = new CustomRequest()
       one.needs = [slots[i].need]
       one.prompt = prompt
@@ -159,8 +169,11 @@ export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[
       one.compose = asked.compose
       one.verify = host.askJev
       one.phone = texts[i].length > 0 ? 'For "' + slots[i].need + '":\n' + texts[i].substring(0, LOOKUP_CHARS) : ''
-      settle(plan, prompt, [slots[i]], one, await writeSection(one, host.language, host.askCode!), host)
+      let single = await writeSection(one, host.language, host.askCode!, cancellation)
+      checkAgent(host)
+      settle(plan, prompt, [slots[i]], one, single, host)
     }
+    checkAgent(host)
     quietSubtitle(plan)
     return written
   }
@@ -171,13 +184,16 @@ export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[
 
 /** Puts what writing the section did in the plan: the section for the slots it does, a notice for the rest. */
 function settle(plan: ScreenPlan, prompt: string, slots: PlanSlot[], asked: CustomRequest, written: CustomResult, host: AgentHost): void {
+  checkAgent(host)
   // Remembered for the rest of the request only when this was the need alone: a refusal of several says nothing of each.
   if (written.cannot.length > 0 && slots.length === 1 && slots[0].phone) { host.cannot.set(slots[0].need, written.cannot) }
   let record = recordOf(plan, prompt, slots, written, written.section === null ? OUTCOME_REPORTED :
     (written.missed.length > 0 ? OUTCOME_PARTIAL : OUTCOME_WRITTEN))
   record.whole = asked.whole
   record.lookup = asked.phone
+  checkAgent(host)
   host.onHole(record)
+  checkAgent(host)
   if (written.section !== null) {
     plan.components.push(new PlanComponent(FILL_HOLE, written.section, new Map<string, string>()))
     let at = plan.components.length - 1

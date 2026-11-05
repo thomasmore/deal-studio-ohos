@@ -17,15 +17,15 @@
  *
  * This is development tooling that happens to live in the app, because the app
  * is the thing already signed to call intents at all. It is reachable only from
- * a launch parameter, which means only from a shell on the device: a generated
- * program cannot name an intent this way, and nothing in std/intent routes
+ * a launch parameter sent by a native caller such as `hdc shell aa start`
+ * (EntryAbility.extractDevParameters ignores it from apps): a generated
+  * program cannot name an intent this way, and nothing in std/intent routes
  * here. The catalogue remains the only way a program reaches the platform.
  */
 
-import insightIntentDriver from '@ohos.app.ability.insightIntentDriver'
-import insightIntent from '@ohos.app.ability.insightIntent'
-import hilog from '@ohos.hilog'
-import { BusinessError } from '@ohos.base'
+import { insightIntentDriver, insightIntent } from '@kit.AbilityKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 
 const DOMAIN = 0x0000
 

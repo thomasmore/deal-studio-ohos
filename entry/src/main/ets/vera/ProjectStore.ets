@@ -1,4 +1,5 @@
-import fs from '@ohos.file.fs'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 import { requestHeadline } from './ProjectText'
 
 
@@ -102,7 +103,11 @@ function writeJson(path: string, content: string): void {
 }
 
 function removeRecursive(path: string): void {
-  try { fs.rmdirSync(path) } catch (_e) {}
+  try {
+    fs.rmdirSync(path)
+  } catch (e) {
+    if ((e as BusinessError)?.code !== 13900002) { throw e as Error }
+  }
 }
 
 export class ProjectStore {
@@ -253,9 +258,9 @@ export class ProjectStore {
     for (let p of projects) {
       if (p.id !== id) { filtered.push(p) }
     }
-    this.writeIndex(filtered)
-    removeRecursive(this.projectDir(id))
     this.summaries.delete(id)
+    removeRecursive(this.projectDir(id))
+    this.writeIndex(filtered)
   }
 
   listVersions(projectId: string): Version[] {
@@ -367,7 +372,12 @@ export class ProjectStore {
       this.deleteProject(projectId)
       return true
     }
-    fs.unlinkSync(this.versionPath(projectId, versionId))
+    try {
+      fs.unlinkSync(this.versionPath(projectId, versionId))
+    } catch (e) {
+      console.error('Delete version file failed: ' + (e as Error).message)
+      throw e as Error
+    }
     this.clearState(projectId, versionId)
     this.summaries.delete(projectId)
     return false

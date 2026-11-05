@@ -10,8 +10,8 @@
  * differ between modes. Run from GeneratePage once the embedding index is warm.
  */
 
-import hilog from '@ohos.hilog'
-import resourceManager from '@ohos.resourceManager'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { resourceManager } from '@kit.LocalizationKit'
 import { loadRawfileText, GenerateRequest, GenerateResult } from './LlamaEngine'
 import { deepseek } from './DeepSeekEngine'
 import { compileVeraSource } from './VeraCompiler'
@@ -67,10 +67,10 @@ export async function runUiAb(mgr: resourceManager.ResourceManager): Promise<voi
         deepseek.setThinking(false)
         let result: GenerateResult = await deepseek.generate(request, (_t: string): void => {})
         row['promptChars'] = request.systemPrompt.length
-        row['rounds'] = deepseek.lastToolRounds()
+        row['rounds'] = result.toolRounds
         row['inTokens'] = result.inputTokens
-        row['cacheHit'] = deepseek.lastCacheHitTokens()
-        row['finish'] = deepseek.lastFinishReason()
+        row['cacheHit'] = result.cacheHitTokens
+        row['finish'] = result.finishReason
         row['outTokens'] = result.outputTokens
         row['used'] = componentsUsedIn(result.text)
         try {

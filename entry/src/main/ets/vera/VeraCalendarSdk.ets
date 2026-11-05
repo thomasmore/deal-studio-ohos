@@ -1,5 +1,5 @@
-import calendarManager from '@ohos.calendarManager'
-import { BusinessError } from '@ohos.base'
+import { calendarManager } from '@kit.CalendarKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 import { AbilityContext } from './VeraPermissions'
 
 export class CalendarSdkContract {
@@ -673,19 +673,23 @@ function managerFor(params: Map<string, string>): calendarManager.CalendarManage
 }
 
 async function selectedCalendar(manager: calendarManager.CalendarManager, params: Map<string, string>, accountAllowed: boolean = false): Promise<calendarManager.Calendar> {
-  let idText = params.get('calendarId')
-  if (idText !== undefined) {
-    if (hasFields(params, ['name', 'type'])) { throw new Error('calendarId conflicts with account name/type') }
-    let id = idValue(idText, 'calendarId')
-    let calendars = await manager.getAllCalendars()
-    for (let calendar of calendars) { if (calendar.id === id) { return calendar } }
-    throw new Error('calendarId was not found among available calendars')
+  try {
+    let idText = params.get('calendarId')
+    if (idText !== undefined) {
+      if (hasFields(params, ['name', 'type'])) { throw new Error('calendarId conflicts with account name/type') }
+      let id = idValue(idText, 'calendarId')
+      let calendars = await manager.getAllCalendars()
+      for (let calendar of calendars) { if (calendar.id === id) { return calendar } }
+      throw new Error('calendarId was not found among available calendars')
+    }
+    if (accountAllowed && hasFields(params, ['name', 'type'])) {
+      let account = new CalendarAccount(text(params.get('name'), 'name', true)!, calendarType(params.get('type')))
+      return await manager.getCalendar(account)
+    }
+    return await manager.getCalendar()
+  } catch (e) {
+    throw e as Error
   }
-  if (accountAllowed && hasFields(params, ['name', 'type'])) {
-    let account = new CalendarAccount(text(params.get('name'), 'name', true)!, calendarType(params.get('type')))
-    return await manager.getCalendar(account)
-  }
-  return await manager.getCalendar()
 }
 
 function color(value: number | string): number | string {
@@ -744,127 +748,127 @@ function validateParams(target: string, params: Map<string, string>): void {
 }
 
 async function dispatchCalendar(target: string, params: Map<string, string>): Promise<string> {
-  validateParams(target, params)
-  if (target === PREFIX + 'EventFilter.filterById' || target === PREFIX + 'EventFilter.filterByTime' || target === PREFIX + 'EventFilter.filterByTitle') {
-    let kind = target === PREFIX + 'EventFilter.filterById' ? 'id' : target === PREFIX + 'EventFilter.filterByTime' ? 'time' : 'title'
-    let descriptor = filterDescriptor(params, kind)!
-    nativeFilter(descriptor)
-    return JSON.stringify(descriptor)
-  }
-  let manager = managerFor(params)
-  switch (target) {
-    case PREFIX + 'calendarManager.getCalendarManager': return MANAGER_TOKEN
-    case PREFIX + 'CalendarManager.getCalendar': return nativeId((await selectedCalendar(manager, params, true)).id, 'calendarId')
-    case PREFIX + 'CalendarManager.createCalendar': {
-      let account = new CalendarAccount(text(params.get('name'), 'name', true)!, calendarType(params.get('type')), text(params.get('displayName'), 'displayName', false, 64))
-      return nativeId((await manager.createCalendar(account)).id, 'created calendarId')
-    }
-    case PREFIX + 'CalendarManager.getAllCalendars': {
-      let calendars = await manager.getAllCalendars()
-      return JSON.stringify(calendars.map((c: calendarManager.Calendar): CalendarSummary => new CalendarSummary(c)))
-    }
-    case PREFIX + 'CalendarManager.deleteCalendar': {
-      idValue(params.get('calendarId'), 'calendarId')
-      if (params.get('confirm') !== 'true') { throw new Error('deleteCalendar requires confirm=true') }
-      let calendar = await selectedCalendar(manager, params)
-      let defaultCalendar = await manager.getCalendar()
-      if (calendar.id === defaultCalendar.id) { throw new Error('refusing to delete the default calendar') }
-      await manager.deleteCalendar(calendar)
-      let remaining = await manager.getAllCalendars()
-      let defaultFound = false
-      for (let item of remaining) {
-        if (item.id === calendar.id) { throw new Error('calendar deletion was not confirmed') }
-        if (item.id === defaultCalendar.id) { defaultFound = true }
-      }
-      if (!defaultFound) { throw new Error('calendar deletion verification unavailable') }
-      return 'ok'
-    }
-    case PREFIX + 'CalendarManager.editEvent': {
-      let result = await manager.editEvent(eventInput(params))
-      if (result === undefined || result === 0) { throw new Error('editEvent returned no event ID') }
-      if (result < 0) { return 'cancelled' }
-      return nativeId(result, 'editEvent result')
-    }
-  }
-  let calendar = await selectedCalendar(manager, params)
-  switch (target) {
-    case PREFIX + 'Calendar.addEvent': return nativeId(await calendar.addEvent(eventInput(params)), 'added event id')
-    case PREFIX + 'Calendar.addEvents': {
-      let source = params.get('events')
-      if (source === undefined) { throw new Error('events is required') }
-      let wires = JSON.parse(source) as EventWire[]
-      if (!Array.isArray(wires) || wires.length === 0) { throw new Error('events must be a nonempty JSON array') }
-      let events: calendarManager.Event[] = []
-      for (let wire of wires) { events.push(mergeWire(wire)) }
-      await calendar.addEvents(events)
-      return 'ok'
-    }
-    case PREFIX + 'Calendar.deleteEvent':
-      await calendar.deleteEvent(idValue(params.get('id')))
-      return 'ok'
-    case PREFIX + 'Calendar.deleteEvents':
-      await calendar.deleteEvents(ids(params.get('ids')))
-      return 'ok'
-    case PREFIX + 'Calendar.updateEvent': {
-      let id = idValue(params.get('id'))
-      let existing = await calendar.getEvents(calendarManager.EventFilter.filterById([id]), EVENT_KEYS as CalendarEventKey[])
-      let found: calendarManager.Event | undefined = undefined
-      for (let event of existing) { if (event.id === id) { found = event; break } }
-      if (found === undefined) { throw new Error('event id was not found') }
-      let merged = eventInput(params, found)
-      await calendar.updateEvent(merged)
-      return 'ok'
-    }
-    case PREFIX + 'Calendar.getEvents': {
-      let descriptor = filterDescriptor(params)
-      let filter = descriptor === undefined ? undefined : nativeFilter(descriptor)
-      let keys = eventKeys(params)
-      let events: calendarManager.Event[]
-      if (filter === undefined) {
-        events = await calendar.getEvents()
-        if (keys !== undefined && events.length > 0) {
-          let allIds: number[] = []
-          for (let event of events) { allIds.push(idValue(event.id?.toString())) }
-          events = await calendar.getEvents(calendarManager.EventFilter.filterById(allIds), keys)
-        }
-      }
-      else if (keys === undefined) { events = await calendar.getEvents(filter) }
-      else { events = await calendar.getEvents(filter, keys) }
-      return JSON.stringify(events.map((e: calendarManager.Event): EventWire => projectEvent(e, keys)))
-    }
-    case PREFIX + 'Calendar.queryEventInstances': {
-      let range = timeRange(params.get('start'), params.get('end'))
-      let selectedIds = params.has('ids') ? ids(params.get('ids')) : undefined
-      let keys = eventKeys(params)
-      let events: calendarManager.Event[]
-      if (keys !== undefined) { events = await calendar.queryEventInstances(range[0], range[1], selectedIds === undefined ? [] : selectedIds, keys) }
-      else if (selectedIds !== undefined) { events = await calendar.queryEventInstances(range[0], range[1], selectedIds) }
-      else { events = await calendar.queryEventInstances(range[0], range[1]) }
-      return JSON.stringify(events.map((e: calendarManager.Event): EventWire => projectEvent(e, keys)))
-    }
-    case PREFIX + 'Calendar.getConfig': return JSON.stringify(new CalendarConfig(calendar.getConfig()))
-    case PREFIX + 'Calendar.setConfig':
-      await calendar.setConfig(mergedConfig(params, calendar.getConfig()))
-      return 'ok'
-    case PREFIX + 'Calendar.getAccount': {
-      let account = calendar.getAccount()
-      return JSON.stringify(new CalendarAccount(account.name, account.type, account.displayName))
-    }
-    case PREFIX + 'Calendar.openEventEditPage': {
-      let id = idValue(params.get('id'))
-      if (typeof calendar.openEventEditPage !== 'function') { throw new Error('openEventEditPage requires API 26; unavailable on this device') }
-      await calendar.openEventEditPage(id)
-      return 'ok'
-    }
-    default: throw new Error('unsupported CalendarKit target ' + target)
-  }
-}
-
-export async function runCalendarSdkAdapter(target: string, params: Map<string, string>): Promise<string> {
   try {
-    return await dispatchCalendar(target, params)
+    validateParams(target, params)
+    if (target === PREFIX + 'EventFilter.filterById' || target === PREFIX + 'EventFilter.filterByTime' || target === PREFIX + 'EventFilter.filterByTitle') {
+      let kind = target === PREFIX + 'EventFilter.filterById' ? 'id' : target === PREFIX + 'EventFilter.filterByTime' ? 'time' : 'title'
+      let descriptor = filterDescriptor(params, kind)!
+      nativeFilter(descriptor)
+      return JSON.stringify(descriptor)
+    }
+    let manager = managerFor(params)
+    switch (target) {
+      case PREFIX + 'calendarManager.getCalendarManager': return MANAGER_TOKEN
+      case PREFIX + 'CalendarManager.getCalendar': return nativeId((await selectedCalendar(manager, params, true)).id, 'calendarId')
+      case PREFIX + 'CalendarManager.createCalendar': {
+        let account = new CalendarAccount(text(params.get('name'), 'name', true)!, calendarType(params.get('type')), text(params.get('displayName'), 'displayName', false, 64))
+        return nativeId((await manager.createCalendar(account)).id, 'created calendarId')
+      }
+      case PREFIX + 'CalendarManager.getAllCalendars': {
+        let calendars = await manager.getAllCalendars()
+        return JSON.stringify(calendars.map((c: calendarManager.Calendar): CalendarSummary => new CalendarSummary(c)))
+      }
+      case PREFIX + 'CalendarManager.deleteCalendar': {
+        idValue(params.get('calendarId'), 'calendarId')
+        if (params.get('confirm') !== 'true') { throw new Error('deleteCalendar requires confirm=true') }
+        let calendar = await selectedCalendar(manager, params)
+        let defaultCalendar = await manager.getCalendar()
+        if (calendar.id === defaultCalendar.id) { throw new Error('refusing to delete the default calendar') }
+        await manager.deleteCalendar(calendar)
+        let remaining = await manager.getAllCalendars()
+        let defaultFound = false
+        for (let item of remaining) {
+          if (item.id === calendar.id) { throw new Error('calendar deletion was not confirmed') }
+          if (item.id === defaultCalendar.id) { defaultFound = true }
+        }
+        if (!defaultFound) { throw new Error('calendar deletion verification unavailable') }
+        return 'ok'
+      }
+      case PREFIX + 'CalendarManager.editEvent': {
+        let result = await manager.editEvent(eventInput(params))
+        if (result === undefined || result === 0) { throw new Error('editEvent returned no event ID') }
+        if (result < 0) { return 'cancelled' }
+        return nativeId(result, 'editEvent result')
+      }
+    }
+    let calendar = await selectedCalendar(manager, params)
+    switch (target) {
+      case PREFIX + 'Calendar.addEvent': return nativeId(await calendar.addEvent(eventInput(params)), 'added event id')
+      case PREFIX + 'Calendar.addEvents': {
+        let source = params.get('events')
+        if (source === undefined) { throw new Error('events is required') }
+        let wires = JSON.parse(source) as EventWire[]
+        if (!Array.isArray(wires) || wires.length === 0) { throw new Error('events must be a nonempty JSON array') }
+        let events: calendarManager.Event[] = []
+        for (let wire of wires) { events.push(mergeWire(wire)) }
+        await calendar.addEvents(events)
+        return 'ok'
+      }
+      case PREFIX + 'Calendar.deleteEvent':
+        await calendar.deleteEvent(idValue(params.get('id')))
+        return 'ok'
+      case PREFIX + 'Calendar.deleteEvents':
+        await calendar.deleteEvents(ids(params.get('ids')))
+        return 'ok'
+      case PREFIX + 'Calendar.updateEvent': {
+        let id = idValue(params.get('id'))
+        let existing = await calendar.getEvents(calendarManager.EventFilter.filterById([id]), EVENT_KEYS as CalendarEventKey[])
+        let found: calendarManager.Event | undefined = undefined
+        for (let event of existing) { if (event.id === id) { found = event; break } }
+        if (found === undefined) { throw new Error('event id was not found') }
+        let merged = eventInput(params, found)
+        await calendar.updateEvent(merged)
+        return 'ok'
+      }
+      case PREFIX + 'Calendar.getEvents': {
+        let descriptor = filterDescriptor(params)
+        let filter = descriptor === undefined ? undefined : nativeFilter(descriptor)
+        let keys = eventKeys(params)
+        let events: calendarManager.Event[]
+        if (filter === undefined) {
+          events = await calendar.getEvents()
+          if (keys !== undefined && events.length > 0) {
+            let allIds: number[] = []
+            for (let event of events) { allIds.push(idValue(event.id?.toString())) }
+            events = await calendar.getEvents(calendarManager.EventFilter.filterById(allIds), keys)
+          }
+        }
+        else if (keys === undefined) { events = await calendar.getEvents(filter) }
+        else { events = await calendar.getEvents(filter, keys) }
+        return JSON.stringify(events.map((e: calendarManager.Event): EventWire => projectEvent(e, keys)))
+      }
+      case PREFIX + 'Calendar.queryEventInstances': {
+        let range = timeRange(params.get('start'), params.get('end'))
+        let selectedIds = params.has('ids') ? ids(params.get('ids')) : undefined
+        let keys = eventKeys(params)
+        let events: calendarManager.Event[]
+        if (keys !== undefined) { events = await calendar.queryEventInstances(range[0], range[1], selectedIds === undefined ? [] : selectedIds, keys) }
+        else if (selectedIds !== undefined) { events = await calendar.queryEventInstances(range[0], range[1], selectedIds) }
+        else { events = await calendar.queryEventInstances(range[0], range[1]) }
+        return JSON.stringify(events.map((e: calendarManager.Event): EventWire => projectEvent(e, keys)))
+      }
+      case PREFIX + 'Calendar.getConfig': return JSON.stringify(new CalendarConfig(calendar.getConfig()))
+      case PREFIX + 'Calendar.setConfig':
+        await calendar.setConfig(mergedConfig(params, calendar.getConfig()))
+        return 'ok'
+      case PREFIX + 'Calendar.getAccount': {
+        let account = calendar.getAccount()
+        return JSON.stringify(new CalendarAccount(account.name, account.type, account.displayName))
+      }
+      case PREFIX + 'Calendar.openEventEditPage': {
+        let id = idValue(params.get('id'))
+        if (typeof calendar.openEventEditPage !== 'function') { throw new Error('openEventEditPage requires API 26; unavailable on this device') }
+        await calendar.openEventEditPage(id)
+        return 'ok'
+      }
+      default: throw new Error('unsupported CalendarKit target ' + target)
+    }
   } catch (e) {
     let error = e as BusinessError
     return 'error: ' + (error.code === undefined ? '' : error.code.toString() + ': ') + error.message
   }
+}
+
+export async function runCalendarSdkAdapter(target: string, params: Map<string, string>): Promise<string> {
+  return await dispatchCalendar(target, params)
 }

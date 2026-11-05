@@ -5,8 +5,8 @@
  * prompts in docs/embeddings-benchmark.md, calling the search functions
  * directly, with no DeepSeek round trip involved at all.
  *
- * Same "dev-only diagnostic, reachable only from a launch parameter, from
- * a shell on the device" shape as IntentProbe.ets's runProbe, with one
+ * Same "dev-only diagnostic, reachable only from a launch parameter sent by a
+ * native caller such as the shell" shape as IntentProbe.ets's runProbe, with one
  * difference: unlike a raw intent call, this needs both corpus caches
  * already warm, which only happens inside GeneratePage.ets's own resource
  * loading -- so EntryAbility.ets's extractBenchmark only sets `requested`
@@ -36,7 +36,7 @@
  *     collecting the first version of this benchmark).
  */
 
-import hilog from '@ohos.hilog'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { findSdkFunctionFromCache, sdkIndexSize } from './VeraSdkIndex'
 import { findIntentFunction } from './VeraIntentIndex'
 import { findSdkFunctionByEmbedding, sdkEmbeddingsReady } from './VeraSdkEmbeddingCache'

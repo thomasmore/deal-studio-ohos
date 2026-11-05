@@ -7,10 +7,47 @@
  * same function bodies, same behavior, same budget.
  */
 
-import http from '@ohos.net.http'
+import { http } from '@kit.NetworkKit'
 import { settings } from './SettingsStore'
 import { noteService, httpFailure, SERVICE_EXA } from './ServiceHealth'
 import { noteTool } from './ToolLog'
+import { OperationCancellation, isCancelled, throwIfCancelled, cancellationError } from './OperationCancellation'
+
+export function requestWithCancellation(url: string, options: http.HttpRequestOptions,
+    cancellation?: OperationCancellation): Promise<http.HttpResponse> {
+  throwIfCancelled(cancellation)
+  return new Promise<http.HttpResponse>((resolve, reject): void => {
+    let client = http.createHttp()
+    let settled = false
+    let unsubscribe = (): void => {}
+    let cleanup = (): void => {
+      try { unsubscribe() } catch (_e) {}
+      try { client.destroy() } catch (_e) {}
+    }
+    let fail = (error: Error): void => {
+      if (settled) { return }
+      settled = true
+      reject(isCancelled(cancellation) ? cancellationError() : error)
+      cleanup()
+    }
+    if (cancellation !== undefined) {
+      unsubscribe = cancellation.onCancel((): void => { fail(cancellationError()) })
+      if (settled) { unsubscribe(); return }
+    }
+    try {
+      throwIfCancelled(cancellation)
+      client.request(url, options).then((response: http.HttpResponse): void => {
+        if (settled) { return }
+        if (isCancelled(cancellation)) { fail(cancellationError()); return }
+        settled = true
+        resolve(response)
+        cleanup()
+      }, (error: Error): void => { fail(error) })
+    } catch (e) {
+      fail(e as Error)
+    }
+  })
+}
 
 export const SEARCH_TOOL_NAME = 'web_search'
 export const SEARCH_RESULTS = 4
@@ -81,11 +118,12 @@ export class SearchHits {
  * The same Exa search as webSearch, but the results stay separate (title, address, text) so a caller can say which one a figure
  * came from. Never throws. Used by the live-data block's refresh (VeraLive.ets).
  */
-export async function webSearchHits(query: string, chars: number = SEARCH_CHARS_DATA): Promise<SearchHits> {
+export async function webSearchHits(query: string, chars: number = SEARCH_CHARS_DATA,
+    cancellation?: OperationCancellation): Promise<SearchHits> {
+  throwIfCancelled(cancellation)
   let out = new SearchHits()
   if (query.length === 0) { out.error = 'empty query'; return out }
   if (!settings.hasExaKey()) { out.error = 'no search key'; return out }
-  let client = http.createHttp()
   try {
     let body: Record<string, Object> = {}
     body['query'] = query
@@ -102,14 +140,15 @@ export async function webSearchHits(query: string, chars: number = SEARCH_CHARS_
     let header: Record<string, string> = {}
     header['Content-Type'] = 'application/json'
     header['x-api-key'] = settings.getExaKey()
-    let resp = await client.request(EXA_URL, {
+    let resp = await requestWithCancellation(EXA_URL, {
       method: http.RequestMethod.POST,
       header: header,
       extraData: JSON.stringify(body),
       expectDataType: http.HttpDataType.STRING,
       connectTimeout: 8000,
       readTimeout: 20000
-    })
+    }, cancellation)
+    throwIfCancelled(cancellation)
     if (resp.responseCode !== 200) { out.error = 'search answered HTTP ' + resp.responseCode.toString(); return out }
     let parsed = JSON.parse(resp.result as string) as Record<string, Object>
     let results = parsed['results'] as Object[]
@@ -126,18 +165,19 @@ export async function webSearchHits(query: string, chars: number = SEARCH_CHARS_
     }
     if (out.hits.length === 0) { out.error = 'no results' }
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     out.error = 'search failed: ' + (e as Error).message
-  } finally {
-    try { client.destroy() } catch (_e) {}
   }
   return out
 }
 
 /** Exa search, flattened to text a model can read. A failure comes back as text too, so the turn goes on. */
-export async function webSearch(query: string, chars: number = SEARCH_CHARS): Promise<string> {
+export async function webSearch(query: string, chars: number = SEARCH_CHARS,
+    cancellation?: OperationCancellation): Promise<string> {
+  throwIfCancelled(cancellation)
   if (query.length === 0) { noteTool(SEARCH_TOOL_NAME, query, 0, false, 'empty query'); return 'Search failed: empty query.' }
   let startedAt = Date.now()
-  let client = http.createHttp()
   try {
     let body: Record<string, Object> = {}
     body['query'] = query
@@ -153,7 +193,7 @@ export async function webSearch(query: string, chars: number = SEARCH_CHARS): Pr
     let header: Record<string, string> = {}
     header['Content-Type'] = 'application/json'
     header['x-api-key'] = settings.getExaKey()
-    let resp = await client.request(EXA_URL, {
+    let resp = await requestWithCancellation(EXA_URL, {
       method: http.RequestMethod.POST,
       header: header,
       extraData: JSON.stringify(body),
@@ -162,7 +202,8 @@ export async function webSearch(query: string, chars: number = SEARCH_CHARS): Pr
       expectDataType: http.HttpDataType.STRING,
       connectTimeout: 10000,
       readTimeout: 20000
-    })
+    }, cancellation)
+    throwIfCancelled(cancellation)
     if (resp.responseCode !== 200) {
       let page = String(resp.result)
       let at = page.indexOf('<title>')
@@ -199,11 +240,11 @@ export async function webSearch(query: string, chars: number = SEARCH_CHARS): Pr
     }
     return out
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     console.info('VERA-SEARCH failed: ' + (e as Error).message)
     noteService(SERVICE_EXA, false, (e as Error).message)
     noteTool(SEARCH_TOOL_NAME, query, Date.now() - startedAt, false, (e as Error).message)
     return 'Search failed: ' + (e as Error).message
-  } finally {
-    try { client.destroy() } catch (_e) {}
   }
 }

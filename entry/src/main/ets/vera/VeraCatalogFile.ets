@@ -26,8 +26,8 @@
  * because "runs without asking" is a claim about evidence, and a file has none.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { INTENT_CATALOG, IntentSpec, IntentParam } from './VeraIntentCatalog'
 
 const DOMAIN = 0x0000

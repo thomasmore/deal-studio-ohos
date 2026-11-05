@@ -39,8 +39,8 @@ import { registryEntries, RegistryEntry, requestWords } from './VeraIntentRegist
 import { identifierTokens, needWords } from './VeraSdkIndex'
 import { CeliaIntentEntry, celiaIntentIndexEntries, celiaIndexSize } from './VeraCeliaIntentIndex'
 import { loadRawfileText } from './LlamaEngine'
-import resourceManager from '@ohos.resourceManager'
-import hilog from '@ohos.hilog'
+import { resourceManager } from '@kit.LocalizationKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 
 const DOMAIN = 0x0000
 

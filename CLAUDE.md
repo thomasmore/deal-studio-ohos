@@ -126,6 +126,8 @@ The same goes for `vera-server`, if the Server generation mode is wanted:
 `--ps veraServer http://host:port`. None of these has a default, and none
 belongs in the source.
 
+Development launch parameters are ignored when another app starts the ability; only native callers such as `hdc shell aa start` are honoured (see `LaunchTrust.ets`).
+
 **Prompts typed into the Generate screen are written in English**, even when the
 conversation is not.
 

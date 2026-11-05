@@ -12,6 +12,13 @@ const c = loadVera('VeraCompose')
 const nc = loadVera('NeedsChoose')
 const np = loadVera('NeedsPlan')
 const align = loadVera('agent/AgentAlign')
+const {OperationController} = loadVera('OperationCancellation')
+const route = loadVera('agent/VeraBuildRoute')
+const {settings} = loadVera('SettingsStore')
+const {serviceNotes} = loadVera('ServiceHealth')
+const {toolCalls} = loadVera('ToolLog')
+const ts = process.env.VERA_TYPESCRIPT_PATH ? require(process.env.VERA_TYPESCRIPT_PATH) : require('typescript')
+const {sourceRoot} = require('./source-loader')
 
 const fixture = (label, file) => fs.readFileSync(path.join(__dirname, 'compose', label, file), 'utf8')
 const says = (choice, confidence = 0.9) => ({type: 'choice', choice, confidence})
@@ -52,7 +59,360 @@ const fixedLength = (s, a) => {
   if (a) { delete a['effect.notifyDone']; delete a['moment.notifyDone']; a['countdown.length'] = says('brewTime', 1) }
 }
 
+function networkSource(name, dependencies = {}) {
+  const file = path.join(sourceRoot, 'vera', name + '.ets')
+  const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+    fileName: name + '.ts', reportDiagnostics: true,
+    compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}
+  })
+  assert.equal((compiled.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error).length, 0)
+  const mod = {exports: {}}
+  new Function('require', 'module', 'exports', compiled.outputText)(name => {
+    if (name === '@kit.NetworkKit') return {http: {
+      RequestMethod: {POST: 'POST'}, HttpDataType: {STRING: 'STRING'},
+      createHttp() { return globalThis.__veraHttp() }
+    }}
+    if (Object.hasOwn(dependencies, name)) return dependencies[name]
+    assert.ok(name.startsWith('.'), 'unexpected network dependency: ' + name)
+    return loadVera(path.relative(path.join(sourceRoot, 'vera'), path.resolve(path.dirname(file), name)))
+  }, mod, mod.exports)
+  return mod.exports
+}
+
+function deferred() {
+  let resolve, reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  return {promise, resolve, reject}
+}
+
+const drain = () => new Promise(resolve => setImmediate(resolve))
+const observe = promise => promise.then(value => ({value}), error => ({error}))
+
+async function settled(promise) {
+  let timer
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('cancelled operation remained pending')), 500)
+    })])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function rejectedCancellation(promise) {
+  const result = await settled(promise)
+  assert.equal(result.error?.name, 'OperationCancelledError')
+  assert.equal(result.error.message, 'Operation cancelled')
+  return result
+}
+
+async function patched(changes, run) {
+  const originals = changes.map(([object, key]) => Object.getOwnPropertyDescriptor(object, key))
+  changes.forEach(([object, key, value]) => { object[key] = value })
+  try {
+    return await run()
+  } finally {
+    changes.forEach(([object, key], i) => {
+      if (originals[i]) Object.defineProperty(object, key, originals[i])
+      else delete object[key]
+    })
+  }
+}
+
+async function networkCancellationChecks() {
+  const search = networkSource('VeraWebSearch')
+  const proxy = networkSource('JevProxy', {'./VeraWebSearch': search})
+  const compose = networkSource('VeraCompose', {'./VeraWebSearch': search, './JevProxy': proxy})
+  const body = count => JSON.stringify({state: 'packing checklist', questions: Object.fromEntries(
+    Array.from({length: count}, (_, i) => ['ready.' + i, {type: 'choice', criteria: {checklist: 'packing', note: 'prose'}}]))})
+  const exaResponse = {responseCode: 200, result: JSON.stringify({results: [{title: 'Packing', url: 'https://example.test/packing', text: 'Bring water'}]})}
+  const jevResponse = {responseCode: 200, result: '{"answers":{"ready.0":{"choice":"checklist","confidence":1}}}'}
+  const cloudResponse = {responseCode: 200, result: JSON.stringify({choices: [{message: {content: 'A'}}]})}
+  let count = 0
+  const test = async (label, run) => {
+    try { await run(); count++ } catch (error) { error.message = label + ': ' + error.message; throw error }
+  }
+  await patched([
+    [settings, 'getExaKey', () => 'test-exa-key'],
+    [settings, 'getApiKey', () => 'test-cloud-key'],
+    [settings, 'getBaseUrl', () => 'https://cloud.example.test/v1'],
+    [settings, 'getModel', () => 'test-model'],
+    [settings, 'isDeepSeek', () => false]
+  ], async () => {
+    for (const mode of ['exa', 'http', 'proxy']) {
+      const invoke = cancellation => mode === 'exa'
+        ? search.webSearch('packing checklist', 400, cancellation)
+        : compose.askJev(body(mode === 'proxy' ? 6 : 1), 'test-selector-key', cancellation)
+      const response = mode === 'exa' ? exaResponse : mode === 'http' ? jevResponse : cloudResponse
+      await patched([[settings, 'useJevProxy', () => mode === 'proxy']], async () => {
+        await test(mode + ' successful control', async () => {
+          let requests = 0, destroyed = 0
+          await patched([[globalThis, '__veraHttp', () => ({
+            request() { requests++; return Promise.resolve(response) },
+            destroy() { destroyed++ }
+          })]], async () => {
+            const result = await invoke(new OperationController())
+            if (mode === 'exa') assert.match(result, /Bring water/)
+            else assert.equal(JSON.parse(result).answers['ready.0'].choice, 'checklist')
+          })
+          assert.equal(requests, mode === 'proxy' ? 6 : 1)
+          assert.equal(destroyed, requests)
+        })
+        await test(mode + ' pre-cancelled', async () => {
+          const cancellation = new OperationController()
+          cancellation.cancel()
+          await patched([[globalThis, '__veraHttp', () => assert.fail('pre-cancelled request created a transport')]], async () => {
+            await rejectedCancellation(observe(invoke(cancellation)))
+          })
+        })
+        for (const late of ['resolve', 'reject']) {
+          await test(mode + ' hung transport with late ' + late, async () => {
+            const clients = []
+            const cancellation = new OperationController()
+            const notes = serviceNotes(), tools = toolCalls()
+            await patched([[globalThis, '__veraHttp', () => {
+              const response = deferred()
+              const client = {response, destroyed: 0, url: '', options: null,
+                request(url, options) { client.url = url; client.options = options; return response.promise },
+                destroy() { client.destroyed++ }
+              }
+              clients.push(client)
+              return client
+            }]], async () => {
+              const pending = observe(invoke(cancellation))
+              await drain()
+              assert.equal(clients.length, mode === 'proxy' ? 4 : 1)
+              for (const client of clients) {
+                assert.equal(client.destroyed, 0)
+                assert.equal(client.options.method, 'POST')
+                if (mode === 'exa') {
+                  assert.equal(client.url, search.EXA_URL)
+                  assert.equal(JSON.parse(client.options.extraData).query, 'packing checklist')
+                } else if (mode === 'proxy') {
+                  assert.equal(client.url, 'https://cloud.example.test/v1/chat/completions')
+                  assert.equal(JSON.parse(client.options.extraData).model, 'test-model')
+                } else {
+                  assert.equal(client.options.extraData, body(1))
+                  assert.equal(client.options.header.Authorization, 'Bearer test-selector-key')
+                }
+              }
+              cancellation.cancel()
+              const result = await rejectedCancellation(pending)
+              assert.ok(clients.every(client => client.destroyed === 1))
+              assert.deepEqual(serviceNotes(), notes)
+              assert.deepEqual(toolCalls(), tools)
+              for (const client of clients) {
+                if (late === 'resolve') client.response.resolve(response)
+                else client.response.reject(Error('late transport failure'))
+              }
+              await drain()
+              cancellation.cancel()
+              assert.strictEqual(await pending, result)
+              assert.equal(clients.length, mode === 'proxy' ? 4 : 1, 'no queued questions after cancellation')
+              assert.ok(clients.every(client => client.destroyed === 1), 'late callbacks do not repeat cleanup')
+              assert.deepEqual(serviceNotes(), notes, 'late callback cannot publish service health')
+              assert.deepEqual(toolCalls(), tools, 'late callback cannot publish tool results')
+            })
+          })
+        }
+      })
+    }
+    for (const backoff of [500, 1000, 2000]) {
+      await test('proxy cancellation during ' + backoff + 'ms backoff', async () => {
+        const cancellation = new OperationController()
+        const timers = []
+        let requests = 0, destroyed = 0
+        const notes = serviceNotes()
+        await patched([
+          [settings, 'useJevProxy', () => true],
+          [globalThis, '__veraHttp', () => ({
+            request() { requests++; return Promise.resolve({responseCode: 429, result: 'rate limited'}) },
+            destroy() { destroyed++ }
+          })],
+          [globalThis, 'setTimeout', (callback, ms) => { const timer = {callback, ms, cleared: false}; timers.push(timer); return timer }],
+          [globalThis, 'clearTimeout', timer => { timer.cleared = true }]
+        ], async () => {
+          const pending = observe(compose.askJev(body(1), 'test-selector-key', cancellation))
+          for (const ms of [500, 1000, 2000]) {
+            await drain()
+            const timer = timers[timers.length - 1]
+            assert.equal(timer.ms, ms)
+            if (ms === backoff) break
+            timer.callback()
+          }
+          const timer = timers[timers.length - 1]
+          const before = requests
+          assert.equal(before, [500, 1000, 2000].indexOf(backoff) + 1)
+          cancellation.cancel()
+          await drain()
+          const result = await Promise.race([pending, Promise.resolve({error: Error('backoff cancellation remained pending')})])
+          assert.equal(result.error?.name, 'OperationCancelledError')
+          assert.equal(timer.cleared, true, 'backoff timer is cleared')
+          for (const timer of timers) timer.callback()
+          await drain()
+          assert.equal(requests, before, 'even an already queued timer cannot retry after cancellation')
+          assert.equal(destroyed, requests)
+          assert.deepEqual(serviceNotes(), notes)
+        })
+      })
+    }
+  })
+  return count
+}
+
+async function agentCancellationChecks() {
+  let count = 0
+  const sketch = JSON.parse(fixture('sections-beach', 'sketch.json'))
+  sketch.questions = [{id: 'q', ask: 'Which beach?', options: ['nearby', 'far away'], default: 0}]
+  const plan = JSON.stringify(needsOf(sketch))
+  assert.ok(np.parseNeedsPlan(plan))
+  assert.ok(np.sketchFrom(np.parseNeedsPlan(plan)).questions.length > 0)
+  for (const routed of [false, true]) {
+    for (const answer of [plan, null, 'invalid plan', Error('late plan failure')]) {
+      const cancellation = new OperationController()
+      const reply = deferred()
+      const host = new AgentHost()
+      const seen = {plans: 0, jev: 0, sections: 0, questions: 0, fallback: 0, lookup: 0, holes: 0, previews: 0, status: []}
+      let stream
+      host.cancellation = cancellation
+      host.askPlan = (system, user, onText) => { seen.plans++; stream = onText; return reply.promise }
+      host.askJev = async () => { seen.jev++; return '' }
+      host.fillBlocks = async request => { seen.sections++; return defaultBlockFill(request) }
+      host.ask = async () => { seen.questions++; return 0 }
+      host.askCode = async () => { seen.fallback++; return null }
+      host.lookup = async () => { seen.lookup++; return '' }
+      host.onHole = () => { seen.holes++ }
+      host.preview = () => { seen.previews++ }
+      host.status = text => { seen.status.push(text) }
+      const request = Object.assign(new AgentRequest(), {prompt: 'beach packing checklist'})
+      const pending = observe(routed ? route.buildScreen(Object.assign(new route.RouteRequest(), {agent: request}), host) : runAgent(request, host))
+      await drain()
+      assert.equal(seen.plans, 1)
+      const before = structuredClone(seen)
+      cancellation.cancel()
+      stream(plan)
+      if (answer instanceof Error) reply.reject(answer)
+      else reply.resolve(answer)
+      if (routed) {
+        const result = await settled(pending)
+        assert.equal(result.value?.kind, route.OUTCOME_CANCELLED)
+        assert.equal(result.value.agent, null)
+        assert.equal(result.value.reason, '')
+      } else if (answer instanceof Error) {
+        assert.strictEqual((await settled(pending)).error, answer)
+      } else await rejectedCancellation(pending)
+      stream(plan)
+      await drain()
+      assert.deepEqual(seen, before, 'cancelled plan cannot retry, preview, choose sections, ask questions or enter fallback')
+      assert.equal(seen.jev + seen.sections + seen.questions + seen.fallback + seen.lookup + seen.holes + seen.previews, 0)
+      count++
+    }
+  }
+  return count
+}
+
+async function appHostOwnershipChecks() {
+  const {deepseek} = networkSource('DeepSeekEngine', {'@kit.ArkTS': {util: {TextDecoder: {
+    create(encoding) {
+      const decoder = new TextDecoder(encoding)
+      return {decodeToString: (bytes, options) => decoder.decode(bytes, options)}
+    }
+  }}}})
+  const {appBlockCalls} = networkSource('SectionFillApp', {'./DeepSeekEngine': {deepseek}})
+  const {appAgentHost} = networkSource('agent/AgentAppHost', {
+    '../DeepSeekEngine': {deepseek}, '../SectionFillApp': {appBlockCalls}
+  })
+  const {BlockRequest} = loadVera('SectionFill')
+  let requests = 0, destroyed = 0, beforeReply = () => {}
+  await patched([
+    [settings, 'hasApiKey', () => true],
+    [settings, 'getApiKey', () => 'test-cloud-key'],
+    [settings, 'hasExaKey', () => false],
+    [settings, 'getBaseUrl', () => 'https://cloud.example.test/v1'],
+    [settings, 'getModel', () => 'test-model'],
+    [settings, 'isDeepSeek', () => false],
+    [globalThis, '__veraHttp', () => {
+      let listener
+      return {
+        on(event, callback) { assert.equal(event, 'dataReceive'); listener = callback },
+        off() {},
+        destroy() { destroyed++ },
+        async requestInStream(url, options) {
+          requests++
+          assert.equal(url, 'https://cloud.example.test/v1/chat/completions')
+          assert.equal(JSON.parse(options.extraData).model, 'test-model')
+          beforeReply()
+          const bytes = Buffer.from('data: ' + JSON.stringify({
+            choices: [{delta: {content: '{"title":"Ownership"}'}, finish_reason: 'stop'}],
+            usage: {prompt_tokens: 17, completion_tokens: 3, prompt_cache_hit_tokens: 5}
+          }) + '\n\ndata: [DONE]\n\n')
+          listener(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+          return 200
+        }
+      }
+    }]
+  ], async () => {
+    const originalController = new OperationController(), otherOwner = new OperationController()
+    const host = appAgentHost(() => {}, () => {}, () => false, '', '', originalController)
+    const otherHost = appAgentHost(() => {}, () => {}, () => false, '', '', otherOwner)
+    const calls = appBlockCalls(false, () => {}, () => false, originalController)
+    const streamed = []
+    assert.strictEqual(calls.cancellation, originalController)
+    deepseek.clearSideCalls()
+    assert.equal(await host.askPlan('system', 'plan', text => streamed.push(text), false), '{"title":"Ownership"}')
+    assert.deepEqual(streamed, ['{"title":"Ownership"}'])
+    assert.equal(await host.askCode('system', 'code', 100, false), '{"title":"Ownership"}')
+    const filled = await host.fillBlocks(Object.assign(new BlockRequest(), {kinds: ['checklist'], prompt: 'packing checklist'}))
+    assert.equal(filled.globals.get('__TITLE__'), 'Ownership')
+    assert.equal(await calls.content('system', 'content', 100), '{"title":"Ownership"}')
+    assert.equal(await calls.hole('system', 'hole'), '{"title":"Ownership"}')
+    await otherHost.askCode('system', 'independent', 100, false)
+    const owned = deepseek.getSideCalls(originalController)
+    assert.deepEqual(owned.map(call => call.purpose), [
+      'Plan of needs', 'A section of its own', 'Text for the blocks', 'Text for the blocks', 'Function bodies for the blocks'
+    ])
+    assert.ok(owned.every(call => call.ok))
+    assert.deepEqual(owned.reduce((sum, call) => [sum[0] + call.inputTokens, sum[1] + call.cachedTokens,
+      sum[2] + call.outputTokens], [0, 0, 0]), [85, 25, 15])
+    assert.equal(deepseek.getSideCalls().length, 6)
+    const independent = deepseek.getSideCalls(otherOwner)
+    assert.equal(independent.length, 1)
+    assert.ok(!owned.includes(independent[0]), 'metrics exclude another operation owner')
+    assert.deepEqual(deepseek.getSideCalls(new OperationController()), [])
+
+    for (const withController of [false, true]) {
+      for (const late of [false, true]) {
+        let cancelled = !late
+        const seen = []
+        const cancellation = withController ? new OperationController() : undefined
+        const guardedHost = appAgentHost(text => seen.push(text), text => seen.push(text), () => cancelled, '', '', cancellation)
+        const guardedCalls = appBlockCalls(false, text => seen.push(text), () => cancelled, cancellation)
+        for (const invoke of [
+          () => guardedHost.askPlan('system', 'plan', text => seen.push(text), false),
+          () => guardedHost.askCode('system', 'code', 100, false),
+          () => guardedCalls.content('system', 'content', 100),
+          () => guardedCalls.hole('system', 'hole')
+        ]) {
+          cancelled = !late
+          beforeReply = () => { cancelled = true }
+          const before = requests
+          await rejectedCancellation(observe(invoke()))
+          assert.equal(requests, before + (late ? 1 : 0))
+          guardedHost.status('late status')
+          guardedHost.preview('late preview')
+          guardedCalls.status('late block status')
+          assert.deepEqual(seen, [], 'predicate cancellation guards callbacks with or without a controller')
+        }
+      }
+    }
+  })
+  assert.equal(destroyed, requests)
+  return 17
+}
+
 ;(async () => {
+  const cancellationChecks = await networkCancellationChecks() + await agentCancellationChecks() + await appHostOwnershipChecks()
+  console.log('needs-choose-check cancellation: ' + cancellationChecks + ' passed')
   // A request that names one length starts the input that holds a length on it.
   {
     const mk = (kind, measure, extra) => c.parseSketch(JSON.stringify({title: 'T', inputs: [Object.assign({id: 'len', label: 'Length', kind, measure}, extra)]}))

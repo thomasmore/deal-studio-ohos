@@ -1,5 +1,87 @@
 # Changelog
 
+## Fix miscellaneous errors
+
+- Fixed warm launches from the widget, shortcuts and the launcher icon no longer navigating: `navigateToProject()` had been moved inside `extractDevParameters`, which returns early for app callers, so the route queued by `extractProjectId` in `onNewWant` was never drained. It is now called explicitly at the end of both `onCreate` and `onNewWant`, after both extracts, and `extractDevParameters` no longer touches navigation — which also stops `hdc shell aa start` launches from queueing their route twice.
+- `DeepSeekEngine.stop()` now destroys the in-flight HTTP client itself through a new idempotent `disposeClient()` instead of depending on a callback inside `runOperation`. The callback and `runOperation`'s `finally` still call it, and `cleanup(client)` keeps its identity guard so a stale stream cannot tear down a newer round's client. Behavior is unchanged when the callback is intact, but `stop()` is no longer silently broken if that callback is moved or removed.
+- `VeraPreview` drew a standalone `ui.Path` (outside a Canvas) with a fixed `.scale({x: 2.4, y: 2.4})`, which left the shape at 1/density of its band on any screen whose density was not 1. It now scales by `this.getUIContext().vp2px(PATH_BAND_HEIGHT) / 100` - the same density-crossing formula the canvas branch uses - and the band height (240 vp) is a named module constant `PATH_BAND_HEIGHT`, shared by the scale and the band's `height()`.
+- Fixed incomplete generation-metric cleanup after **New**: a shared `resetRunMetrics()` now clears attempts, timing, side calls, stages, service health, tool logs, and trouble notes immediately, and is reused by generation and model-refinement entry points. New also clears the status; refinement preserves cumulative and accepted-version metrics. Added three host regression checks for reset completeness, idempotence, and shared entry-point behavior. All 25 Generate checks, metric checks, and the unsigned ArkTS build passed.
+
+## Development launch parameters are accepted only from a native caller
+
+This entry records a security hardening of `EntryAbility`, found while reviewing the code against HarmonyOS 7.0 (API 26.0.0). It is a handoff reference for people and AI agents, not a release certification. It does not change the shortcut, widget, or project-launch behavior.
+
+Behavior was checked on the host and on the device; see "Verification". File paths are repository-relative.
+
+### Summary
+
+- `EntryAbility` is exported and used to apply development launch parameters from `want.parameters` without checking who started it. They are now applied only when no app started the ability; `hdc shell aa start … --ps …` works as before.
+- Added `entry/src/main/ets/components/LaunchTrust.ets`, which decides who the caller is from the identity keys the ability manager writes into `want.parameters`.
+- Navigation parameters (`projectId`, `launchMode`, `veraRun`) are unchanged and still accepted from any caller.
+
+### 1. What was exposed
+
+`EntryAbility` is `exported: true` (the launcher, shortcuts, and the widget start it), and it read the following parameters from any caller. Comments claimed they were "reachable only from a shell on the device", which does not hold for an exported ability.
+
+- Keys: `deepseekKey`, `typesafeKey`, `exaKey`, `reasoningEffort`.
+- The generation server: `veraServer`. It is persisted, and Server mode executes the bytecode the server returns.
+- Probes that call adapters with the app's system permissions: `probeTarget`, `probeParams`, `probeMode`, `probeSdkTarget`, `probeSdkParams`, `probeSdkSearch`.
+- Benchmark and evaluation triggers: `veraBenchmark`, `veraSdkEval`, `veraUiEval`, `veraUiAb`.
+- Behaviour flags: `veraCompose`, `veraComposePlan`, `veraCustom`, `veraAlign`, `veraWhole`, `veraTemplateSelect`.
+
+### 2. The change
+
+- `LaunchTrust.ets` exports `startedByApp`, `presentDevParameters`, `describeCaller`, and `DEV_PARAMETER_NAMES` (21 names). `startedByApp` is true when `ohos.aafwk.param.callerBundleName` or `ohos.aafwk.param.callerAppId` is non-empty, or `ohos.aafwk.param.callerUid` is 10000 or higher. The ability manager writes these keys and replaces what a caller puts there. A native caller such as the shell's `aa` tool carries none of them.
+- `EntryAbility` calls `extractProjectId` directly and all development extractors through the new `extractDevParameters`, from both `onCreate` and `onNewWant`. For an app caller no development extractor runs and a warning lists the parameter names (never the values) and the caller. For a native caller the extractors run as before, with an info log when development parameters are present.
+- The rule is "an app identity means ignore" rather than an allowlist of bundle names: it cannot lock out the shell workflow if `aa` carries no identity, and bundle-name-only checks are discouraged.
+- The comments in `EntryAbility.ets`, `IntentProbe.ets`, `VeraSearchBenchmark.ets`, and `VeraSdkProbe.ets` no longer claim these paths are shell-only by construction.
+
+Main files: `LaunchTrust.ets`, `EntryAbility.ets`.
+
+### 3. Verification performed
+
+- The decision logic was tested on the host with node on 18 cases: shell with and without a native name, root uid, another app with bundle and uid, app id only, app uid only (also as a string), a launcher caller, missing and null parameters, an empty bundle name, the dev names found in a hostile want, and the list contents (21 unique names, none of them navigation names).
+- The patched `EntryAbility.ets` parses, and each extractor is still called once.
+- ArkTS build; the positive device test (`aa start` with `--ps deepseekKey …` and the expected `native caller` log line).
+- Not performed: the negative test from a second app (a start with `veraServer` must log "Ignored development launch parameters" and leave the settings unchanged).
+
+### 4. Known limitations
+
+- Whether `aa` on the target HarmonyOS 7 build arrives without an app identity is not verified. If it carries one, development parameters are ignored and the warning log shows the caller.
+- Any other native or root process is still trusted.
+- Values persisted before this change are not reset. If an earlier build was exposed, check `veraServer` and the keys in `{filesDir}/vera/settings.json`.
+- Unchanged: `veraServer` is still persisted and may be `http://`, and the keys are still stored in plain text in `settings.json`.
+
+### 5. Handoff rules for future changes
+
+1. Add a new development launch parameter only inside `extractDevParameters`, and add its name to `DEV_PARAMETER_NAMES`. Do not read development parameters in `onCreate`, `onNewWant`, or anywhere else.
+2. Keep side effects out of the navigation parameters; they are accepted from any caller and may only open a project.
+3. Log parameter names, never values.
+4. Do not replace the check with a bundle-name allowlist. After changing the check, and after each OS update, repeat the positive and negative tests above.
+5. Do not describe an exported entry point as shell-only. Review other entry points (extensions, new exported abilities) the same way.
+
+## Preview lifecycle and stale effect replies
+
+- `VeraPreview.aboutToAppear()` resets `disposed` before registering listeners and loading the program, allowing the same component instance to work when it appears again.
+- Each program load and component disappearance advances a separate effect generation and clears queued effects, pending consent, and the old host's pending effects. Loading also releases the old host, including when the bytecode is empty or invalid; UI identity remains independent of effect generation.
+- Both successful and failed asynchronous effect replies are delivered only while the component is active and their captured generation is still current. Disposed components no longer dispatch actions, process consent, drain queues, or launch effects.
+- Added 34 host regression checks for reappearance, program replacement, empty and invalid bytecode, preview reconciliation, queue cleanup, stale replies, and current-generation replies. Already-sent system actions are not cancelled; their stale replies are ignored. Device lifecycle behavior has not been verified.
+
+## Chat and generation cancellation
+
+- Added request-scoped cancellation: Stop cancels the active chat or generation without interrupting independent requests or a newer run.
+- Cancellation aborts supported network requests, stops queued work, closes pending questions, and rejects late results and preview updates. Chat drafts, completed widgets, and the last successful generation remain intact.
+- Added host regression tests for cancellation, overlapping requests, and screen disposal.
+- Fixed tickers retaining an outdated handler when their ID and interval stayed unchanged: each tick now uses the latest handler without restarting the timer or resetting its phase. Added host regression coverage for handler changes and timer lifecycle cleanup.
+- Project deletion now reports filesystem errors instead of silently succeeding, ignores only an already-missing directory, and removes the project directory before updating the index so failed removal remains retryable. Added 25 host regression checks for deletion, error propagation, cache invalidation, and retries.
+
+## Navigation and kit imports
+
+- Replaced app page-router navigation with a single `AppShell`, shared `Navigation`/`NavPathStack`, and `NavDestination` screens. External launches replace the stack while preserving isolated shortcut launches, widget launch behavior, and mini-app Back handling.
+- Bound navigation readiness to the active window stage and shared storage; hidden or removed screens ignore stale asynchronous updates.
+- Surface frame loops now follow `NavDestination.onShown` / `onHidden` instead of router-page events, pausing covered Generate, Runner, and Chat previews and resuming when shown. Previews created while hidden honor that state before loading, and late frames do no work while hidden. Added 22 host regression checks for visibility propagation, initialization, and pause/resume with both display sync and the interval fallback.
+- Migrated application imports from `@ohos.*` to named `@kit` exports, preserving aliases. Updated SDK backend generation and host mocks, added explicit socket result types, and switched remaining Generate animations to scoped UI APIs.
+
 ## Shortcut processing
 
 ### Desktop shortcuts and launch behavior

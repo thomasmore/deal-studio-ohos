@@ -12,8 +12,8 @@
  * flag, GeneratePage.ets runs the eval once the SDK embedding cache is warm.
  */
 
-import hilog from '@ohos.hilog'
-import resourceManager from '@ohos.resourceManager'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { resourceManager } from '@kit.LocalizationKit'
 import { findSdkFunctionFromCache, SdkEntry } from './VeraSdkIndex'
 import { findSdkFunctionByEmbedding } from './VeraSdkEmbeddingCache'
 import { isSdkTargetImplemented } from './VeraSdkBackend'

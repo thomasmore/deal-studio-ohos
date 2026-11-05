@@ -8,7 +8,7 @@
  * question; the plan model then decides, and a "no" goes on to the agent as before.
  */
 
-import { AgentHost } from './AgentHost'
+import { AgentHost, checkAgent, agentCancellation } from './AgentHost'
 import { repairProgram } from './AgentRepair'
 import { compileVeraSource, CompileError } from '../VeraCompiler'
 import { smokeRun } from '../VeraSmoke'
@@ -173,9 +173,12 @@ export class SurfaceResult {
  * brief of kind SURFACE_NONE when it said no.
  */
 export async function briefSurface(prompt: string, host: AgentHost): Promise<SurfaceBrief | null> {
+  checkAgent(host)
   if (!surfaceRoute || host.surfaceGuide.length === 0 || host.askCode === null || !looksLikeSurface(prompt)) { return null }
   host.status('Is this a game?')
+  checkAgent(host)
   let reply = await host.askPlan(SURFACE_CLASSIFY_PROMPT, 'Request: ' + prompt, (_soFar: string): void => {}, false)
+  checkAgent(host)
   if (reply === null) { return null }
   return parseSurfaceBrief(reply)
 }
@@ -185,18 +188,21 @@ export async function briefSurface(prompt: string, host: AgentHost): Promise<Sur
  * written once more with thinking on when that did not hold.
  */
 export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host: AgentHost): Promise<SurfaceResult> {
+  checkAgent(host)
   let out = new SurfaceResult()
   out.brief = brief
   let system = surfaceLanguage(host.language, host.surfaceGuide)
   let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + brief.design +
     '\n\nWrite the complete program for it on one ui.Surface. Output the source only.'
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
-    if (host.cancelled()) { out.failed = 'cancelled'; break }
+    checkAgent(host)
     let think = attempt > 0
     host.status(think ? 'Writing the game again, thinking it through...' : 'Writing ' + (brief.title.length > 0 ? brief.title : 'the game') + '...')
     out.attempts = attempt + 1
     let writeStart = Date.now()
+    checkAgent(host)
     let reply = await host.askCode!(system, user, SURFACE_TOKENS, think)
+    checkAgent(host)
     out.writeMs += Date.now() - writeStart
     if (reply === null || reply.trim().length === 0) { out.failed = 'no program came back'; continue }
     let source = sourceIn(reply)
@@ -205,7 +211,9 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
     out.checkMs += Date.now() - checkStart
     if (problem.length > 0 && !host.cancelled()) {
       host.status('Playing it and fixing what broke...')
-      let repaired = await repairProgram(source, problem, prompt, system, host.askCode!, checkSurfaceProgram)
+      checkAgent(host)
+      let repaired = await repairProgram(source, problem, prompt, system, host.askCode!, checkSurfaceProgram, agentCancellation(host))
+      checkAgent(host)
       out.rounds += repaired.rounds
       if (repaired.source.length > 0) {
         source = repaired.source
@@ -214,6 +222,7 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
         problem = repaired.failed
       }
     }
+    checkAgent(host)
     if (problem.length > 0) { out.failed = problem.split('\n')[0]; continue }
     out.source = source
     out.vbc2 = compileVeraSource(source).vbc2

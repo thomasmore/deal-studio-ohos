@@ -10,6 +10,7 @@
  * compiles, so a hole can cost the customisation but never the screen.
  */
 
+import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
 import { fragments, FragmentSpec, HoleSpec } from './VeraTemplates'
 import { markedHole } from './VeraSectionCompose'
 import { compileVeraSource, CompileError, Diagnostic } from './VeraCompiler'
@@ -281,20 +282,26 @@ function without(bodies: Map<string, string>, drop: string[]): Map<string, strin
  * throws: every failure ends as the default bodies with the reason in `note`.
  */
 export async function fillHoles(userPrompt: string, kinds: string[], ask: HoleAsk, build: HoleBuild,
-    instanceValues: Map<string, string>[] | null = null, sdkContext: string = ''): Promise<HoleFill> {
+    instanceValues: Map<string, string>[] | null = null, sdkContext: string = '',
+    cancellation?: OperationCancellation): Promise<HoleFill> {
+  throwIfCancelled(cancellation)
   let holes = holesOf(kinds, instanceValues).filter((h: HoleInstance): boolean => h.spec.byModel)
   let empty: Map<string, string> = new Map<string, string>()
   if (holes.length === 0) { return new HoleFill(empty, '', 0) }
   try {
     let first = buildHolePrompt(userPrompt, holes, sdkContext)
+    throwIfCancelled(cancellation)
     let raw = await ask(first[0], first[1])
+    throwIfCancelled(cancellation)
     let bodies = parseHoleAnswer(raw, holes)
     if (bodies.size === 0) {
       return new HoleFill(empty, 'holes=default(' + (raw === null ? 'no answer' : 'unusable answer') + ')', 0)
     }
     let repairs = 0
     while (true) {
+      throwIfCancelled(cancellation)
       let diagnostics = diagnosticsOf(build(bodies))
+      throwIfCancelled(cancellation)
       if (diagnostics !== null && diagnostics.length === 0) {
         return new HoleFill(bodies, 'holes=filled(' + bodies.size.toString() + ')' + (repairs > 0 ? ' repaired=' + repairs.toString() : ''), repairs)
       }
@@ -314,13 +321,17 @@ export async function fillHoles(userPrompt: string, kinds: string[], ask: HoleAs
         return new HoleFill(empty, 'holes=default(still failing after ' + repairs.toString() + ' repairs)', repairs)
       }
       let again = buildRepairPrompt(userPrompt, holes, bodies, mapped.inside, sdkContext)
+      throwIfCancelled(cancellation)
       let reply = await ask(again[0], again[1])
+      throwIfCancelled(cancellation)
       let fixed = parseHoleAnswer(reply, holes)
       // A failing hole the reply did not answer keeps failing and is dropped at the end; the others stay.
       fixed.forEach((v: string, k: string) => { bodies.set(k, v) })
       repairs++
     }
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     return new HoleFill(empty, 'holes=default(' + (e as Error).message + ')', 0)
   }
 }

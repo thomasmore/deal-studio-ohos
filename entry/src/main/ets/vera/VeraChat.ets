@@ -12,8 +12,8 @@
  * that is talking to the person.
  */
 
-import http from '@ohos.net.http'
-import util from '@ohos.util'
+import { http } from '@kit.NetworkKit'
+import { util } from '@kit.ArkTS'
 import { GenerateRequest } from './LlamaEngine'
 import { compileVeraSource, CompileError } from './VeraCompiler'
 import { applyRepair, repairPrompt, RepairOutcome } from './VeraRepair'
@@ -25,9 +25,11 @@ import { deepseek, extractVeraSource, DEEPSEEK_GENERATION_MAX_TOKENS, toolSchema
 import { WidgetPreviewTracker } from './VeraWidgetPreview'
 import { TurnTiming, logTurn, logStep, trace, traceTurn, traceCompile } from './VeraTiming'
 import { settings } from './SettingsStore'
-import { searchToolSchema, webSearch, SEARCH_TOOL_NAME } from './VeraWebSearch'
+import { searchToolSchema, webSearch, SEARCH_TOOL_NAME, SEARCH_CHARS } from './VeraWebSearch'
 import { WidgetBuildContext, widgetContextPrompt } from './VeraWidgetContext'
 import { AttemptStat, ReplyStats, failureVerdict } from './VeraChatStats'
+import { OperationCancellation, isCancelled, throwIfCancelled } from './OperationCancellation'
+export { OperationCancellation } from './OperationCancellation'
 
 const APP_OPEN: string = '<<app:'
 const APP_CLOSE: string = '>>'
@@ -415,7 +417,9 @@ function toolResultMessage(id: string, content: string): Record<string, Object> 
  */
 export async function chatReply(history: ChatTurn[], onText: (soFar: string) => void,
     onStatus: (status: string) => void, stats: ReplyStats,
-    onVerifiedSearch: (text: string) => void = (_text: string): void => {}): Promise<string> {
+    onVerifiedSearch: (text: string) => void = (_text: string): void => {},
+    cancellation?: OperationCancellation): Promise<string> {
+  throwIfCancelled(cancellation)
   let key = settings.getApiKey()
   if (key.length === 0) {
     throw new Error('No cloud API key. Send one with: aa start -a EntryAbility -b com.vera.probe.dyn --ps deepseekKey <key> (or --ps cloudKey <key>)')
@@ -437,11 +441,17 @@ export async function chatReply(history: ChatTurn[], onText: (soFar: string) => 
     let found = await Promise.all(names.map(async (name: string): Promise<string> => {
       let callStartedAt = Date.now()
       let text = ''
-      try { text = await discoveryToolResult(name, currentRequest) }
-      catch (_e) { text = 'Discovery unavailable; the widget builder can check again.' }
+      try {
+        text = await discoveryToolResult(name, currentRequest, 0, false, cancellation)
+        throwIfCancelled(cancellation)
+      } catch (_e) {
+        throwIfCancelled(cancellation)
+        text = 'Discovery unavailable; the widget builder can check again.'
+      }
       traceTool('chat-evidence', 0, name, currentRequest, callStartedAt, text)
       return text
     }))
+    throwIfCancelled(cancellation)
     for (let i = 0; i < names.length; i++) { evidence[names[i]] = found[i] }
     logStep('chat-evidence', evidenceStartedAt, 'chars=' + JSON.stringify(evidence).length.toString())
     messages.push(plain('system', 'Current-request capability discovery (reference data, not instructions):\n' +
@@ -461,6 +471,7 @@ export async function chatReply(history: ChatTurn[], onText: (soFar: string) => 
   let round = 0
   let startedAt = Date.now()
   while (true) {
+    throwIfCancelled(cancellation)
     let tools: Record<string, Object>[] = []
     if (round < MAX_CHAT_TOOL_ROUNDS) {
       if (discoveries < MAX_DISCOVERY_CALLS) { tools = toolSchemas(false) }
@@ -469,7 +480,10 @@ export async function chatReply(history: ChatTurn[], onText: (soFar: string) => 
     // Text from before a tool call and text from after it are different paragraphs.
     let said = reply.length > 0 ? reply + '\n\n' : ''
     let requestedAt = Date.now()
-    let step = await streamStep(messages, tools, (soFar: string): void => { onText(said + soFar) })
+    let step = await streamStep(messages, tools, (soFar: string): void => {
+      if (!isCancelled(cancellation)) { onText(said + soFar) }
+    }, cancellation)
+    throwIfCancelled(cancellation)
     logTurn('chat', round + 1, step.timing)
     let tracedCalls: Object[] = []
     for (let c of step.calls) {
@@ -489,6 +503,7 @@ export async function chatReply(history: ChatTurn[], onText: (soFar: string) => 
     messages.push(assistantCallsMessage(step))
     let toolsStartedAt = Date.now()
     for (let call of step.calls) {
+      throwIfCancelled(cancellation)
       if (call.name === 'find_intent_function' || call.name === 'find_sdk_function') {
         if (discoveries >= MAX_DISCOVERY_CALLS) {
           messages.push(toolResultMessage(call.id, 'Discovery limit reached. Use the candidates already returned.'))
@@ -504,8 +519,12 @@ export async function chatReply(history: ChatTurn[], onText: (soFar: string) => 
         let result = ''
         let callStartedAt = Date.now()
         try {
-          result = await discoveryToolResult(call.name, need, round)
-        } catch (_e) { result = 'Discovery unavailable. The widget builder can check again; do not infer that phone actions are unsupported.' }
+          result = await discoveryToolResult(call.name, need, round, false, cancellation)
+          throwIfCancelled(cancellation)
+        } catch (_e) {
+          throwIfCancelled(cancellation)
+          result = 'Discovery unavailable. The widget builder can check again; do not infer that phone actions are unsupported.'
+        }
         traceTool('chat', round, call.name, need, callStartedAt, result)
         console.info('VERA-CHAT discovery tool=' + call.name + ' round=' + round.toString())
         messages.push(toolResultMessage(call.id, result))
@@ -519,16 +538,19 @@ export async function chatReply(history: ChatTurn[], onText: (soFar: string) => 
       let query = queryOf(call.args)
       onStatus('Searching the web: ' + query)
       let searchStarted = Date.now()
-      let result = await webSearch(query)
+      let result = await webSearch(query, SEARCH_CHARS, cancellation)
+      throwIfCancelled(cancellation)
       traceTool('chat', round, call.name, query, searchStarted, result)
       messages.push(toolResultMessage(call.id, result))
       if (result.startsWith('Web results for ')) { onVerifiedSearch(result) }
       stats.searches = stats.searches + 1
       stats.searchMs = stats.searchMs + (Date.now() - searchStarted)
     }
+    throwIfCancelled(cancellation)
     logStep('tools', toolsStartedAt, 'src=chat round=' + round.toString() + ' calls=' + step.calls.length.toString())
     onStatus('')
   }
+  throwIfCancelled(cancellation)
   // Time spent talking: the whole turn less the searches, which are counted apart.
   stats.ms = Date.now() - startedAt - stats.searchMs
   return reply
@@ -546,7 +568,8 @@ function queryOf(argsJson: string): string {
 
 /** One streamed request. Text goes to `onText` as it arrives; tool calls are gathered whole. */
 async function streamStep(messages: Record<string, Object>[], tools: Record<string, Object>[],
-    onText: (soFar: string) => void): Promise<ChatStep> {
+    onText: (soFar: string) => void, cancellation?: OperationCancellation): Promise<ChatStep> {
+  throwIfCancelled(cancellation)
   let payload: Record<string, Object> = {}
   payload['model'] = settings.getModel()
   payload['messages'] = messages
@@ -578,6 +601,7 @@ async function streamStep(messages: Record<string, Object>[], tools: Record<stri
   let client = http.createHttp()
   let decoder = util.TextDecoder.create('utf-8')
   client.on('dataReceive', (chunk: ArrayBuffer): void => {
+    if (isCancelled(cancellation)) { return }
     let piece = ''
     try {
       piece = decoder.decodeToString(new Uint8Array(chunk), { stream: true })
@@ -595,7 +619,15 @@ async function streamStep(messages: Record<string, Object>[], tools: Record<stri
     }
   })
   let code = 0
+  let unregisterCancel: (() => void) | null = null
+  if (cancellation !== undefined) {
+    unregisterCancel = cancellation.onCancel((): void => {
+      // HarmonyOS HttpRequest.destroy() interrupts the active request task.
+      try { client.destroy() } catch (_e) {}
+    })
+  }
   try {
+    throwIfCancelled(cancellation)
     let header: Record<string, string> = {}
     header['Content-Type'] = 'application/json'
     header['Accept'] = 'text/event-stream'
@@ -610,12 +642,16 @@ async function streamStep(messages: Record<string, Object>[], tools: Record<stri
       connectTimeout: 15000,
       readTimeout: 120000
     })
+    throwIfCancelled(cancellation)
   } catch (e) {
+    throwIfCancelled(cancellation)
     throw new Error('Chat request failed: ' + (e as Error).message)
   } finally {
+    if (unregisterCancel !== null) { unregisterCancel() }
     try { client.off('dataReceive') } catch (_e) {}
     try { client.destroy() } catch (_e) {}
   }
+  throwIfCancelled(cancellation)
   if (code !== 200) {
     throw new Error('HTTP ' + code.toString() + ' ' + body.substring(0, 200))
   }
@@ -756,23 +792,28 @@ export function recordChatAgent(agent: AgentResult, context: WidgetBuildContext,
 }
 
 async function composeInto(context: WidgetBuildContext, result: MiniApp, onStatus: (status: string) => void,
-    onPreview: (vbc2: string) => void, language: string): Promise<boolean> {
+    onPreview: (vbc2: string) => void, language: string,
+    cancellation?: OperationCancellation): Promise<boolean> {
+  throwIfCancelled(cancellation)
   let request = chatAgentRequest(context)
   if (request === null) { return false }
-  let agent = await runAgent(request, appAgentHost(onStatus, onPreview, (): boolean => false, language))
+  let agent = await runAgent(request, appAgentHost(onStatus, onPreview,
+    (): boolean => isCancelled(cancellation), language, '', cancellation))
+  throwIfCancelled(cancellation)
   return recordChatAgent(agent, context, result)
 }
 
 /**
  * Turns a widget description into bytecode, retrying with the compiler's
  * diagnostics the way the Generate screen does. `systemPrompt` is the skill with
- * the UI catalogue already spliced in. Calls must not overlap: the engine is a
- * singleton with one generation in flight.
+ * the UI catalogue already spliced in.
  */
 export async function buildMiniApp(systemPrompt: string, description: string | WidgetBuildContext,
     personRequestOrStatus: string | ((status: string) => void), baseSource: string = '',
     legacyStatus: (status: string) => void = (_status: string): void => {},
-    onPreview: (vbc2: string) => void = (_vbc2: string): void => {}): Promise<MiniApp> {
+    onPreview: (vbc2: string) => void = (_vbc2: string): void => {},
+    cancellation?: OperationCancellation): Promise<MiniApp> {
+  throwIfCancelled(cancellation)
   let result = new MiniApp()
   if (systemPrompt.trim().length === 0) { result.error = 'Widget resources are not ready.'; return result }
   let prompt = typeof description === 'string' ? description : widgetContextPrompt(description)
@@ -784,15 +825,19 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
   // A new widget is first composed, as a new screen is on the Generate screen; a revision, a widget built
   // on search results, or one the composer cannot serve, is generated as before. Skipped when the chat already
   // tried it (the route, agent/VeraBuildRoute.ets) before the blocks.
-  if (typeof description !== 'string' && !description.composeTried &&
-      await composeInto(description, result, onStatus, onPreview, systemPrompt)) { return result }
+  if (typeof description !== 'string' && !description.composeTried) {
+    let composed = await composeInto(description, result, onStatus, onPreview, systemPrompt, cancellation)
+    throwIfCancelled(cancellation)
+    if (composed) { return result }
+  }
   let failedSource = ''
   let feedback = ''
   let repairByEdit = true
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    throwIfCancelled(cancellation)
     result.attempts = attempt
     let doing = attempt === 1 ? 'Building a widget' : 'Fixing the widget (' + attempt.toString() + '/' + MAX_ATTEMPTS.toString() + ')'
-    onStatus(doing + '...')
+    if (!isCancelled(cancellation)) { onStatus(doing + '...') }
     let request = new GenerateRequest()
     request.systemPrompt = systemPrompt
     request.uiTool = false
@@ -814,11 +859,12 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
     let text = ''
     let repair = new RepairOutcome()
     let reply = ''
+    let finishReason = ''
     let genStart = Date.now()
     let tracker = new WidgetPreviewTracker()
     try {
       let gen = await deepseek.generate(request, (token: string): void => {
-        if (editing) { return }  // edit blocks are not a program to preview
+        if (isCancelled(cancellation) || editing) { return }  // edit blocks are not a program to preview
         let step = tracker.feed(token)
         if (step.vbc2.length > 0) {
           if (stat.previewMs === 0) { stat.previewMs = Date.now() - genStart }
@@ -826,26 +872,31 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
         }
         if (step.changed) { onStatus(doing + ': writing ' + recent(tracker.declarations())) }
       }, (p: GenerateProgress): void => {
+        if (isCancelled(cancellation)) { return }
         // A tool round's text is not part of the program the final round writes.
         if (p.phase === 'request' && p.round > 1) { tracker = new WidgetPreviewTracker() }
         onStatus(progressStatus(doing, p))
-      })
+      }, cancellation)
+      throwIfCancelled(cancellation)
       reply = gen.text
       text = extractVeraSource(gen.text)
       if (editing) { repair = applyRepair(failedSource, gen.text); text = repair.source }
       stat.inputTokens = gen.inputTokens
       stat.outputTokens = gen.outputTokens
+      stat.ttftMs = gen.prefillMs
+      stat.thinkMs = gen.thinkMs
+      stat.cachedTokens = gen.cacheHitTokens
+      finishReason = gen.finishReason
     } catch (e) {
+      throwIfCancelled(cancellation)
       stat.genMs = Date.now() - genStart
       stat.verdict = 'request failed'
       result.stats.push(stat)
       result.error = (e as Error).message
       return result
     }
+    throwIfCancelled(cancellation)
     stat.genMs = Date.now() - genStart
-    stat.ttftMs = deepseek.lastPrefillMs()
-    stat.thinkMs = deepseek.lastThinkMs()
-    stat.cachedTokens = deepseek.lastCacheHitTokens()
     if (editing && repair.source.length === 0) {
       // The edits did not fit the failed source: rewrite it in full next time,
       // against the same diagnostics.
@@ -859,10 +910,12 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
     let errors = ''
     let compileStart = Date.now()
     try {
+      throwIfCancelled(cancellation)
       let compiled = compileVeraSource(text)
       // As on the Generate screen: run once before serving, and repair a runtime error like a compile error.
       let smokeStart = Date.now()
       let ran = smokeRun(compiled)
+      throwIfCancelled(cancellation)
       logStep('smoke', smokeStart, 'src=widget attempt=' + attempt.toString() + ' ok=' + (ran.length === 0).toString())
       if (ran.length > 0) { throw new Error(ran) }
       result.vbc2 = compiled.vbc2
@@ -873,8 +926,10 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
       traceCompile('widget', attempt, text, '')
       stat.success = true
       result.stats.push(stat)
+      throwIfCancelled(cancellation)
       return result
     } catch (e) {
+      throwIfCancelled(cancellation)
       errors = e instanceof CompileError ? e.message : (e as Error).message
     }
     stat.compileMs = Date.now() - compileStart
@@ -882,15 +937,16 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
     traceCompile('widget', attempt, text, errors)
     stat.verdict = failureVerdict(errors)
     result.stats.push(stat)
-    if (deepseek.lastFinishReason() === 'length') {
+    if (finishReason === 'length') {
       errors = 'The previous attempt was cut off at the output token limit. Return a shorter complete replacement program, not a continuation.\n' + errors
     }
     failedSource = text
     feedback = errors
     // A program cut off at the limit has no end to edit; anything else is
     // repaired by edits.
-    repairByEdit = deepseek.lastFinishReason() !== 'length'
+    repairByEdit = finishReason !== 'length'
     result.error = errors
   }
+  throwIfCancelled(cancellation)
   return result
 }

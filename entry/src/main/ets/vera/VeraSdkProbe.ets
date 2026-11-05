@@ -14,14 +14,14 @@
  *
  *   hdc shell hilog -x | grep VERA-SDK-PROBE
  *
- * Reachable only from a launch parameter -- a generated program cannot name
+ * Reachable only from a launch parameter of a native caller (hdc shell) -- a generated program cannot name
  * a target this way, and nothing in std/sdk routes here. Params are a flat
  * JSON object of strings, matching what sdk.call itself hands an adapter
  * (Map<string, string>), not the nested-object shape IntentProbe.ets takes
  * for the intent registry.
  */
 
-import hilog from '@ohos.hilog'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { runSdkAdapter, isSdkTargetImplemented } from './VeraSdkBackend'
 import { findSdkFunctionFromCache, SdkEntry } from './VeraSdkIndex'
 import { findSdkFunctionByEmbedding } from './VeraSdkEmbeddingCache'

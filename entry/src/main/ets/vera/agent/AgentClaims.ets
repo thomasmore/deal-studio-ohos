@@ -5,17 +5,21 @@
  * to be written, or reported on the screen, rather than lost without a word.
  */
 
+import { OperationCancellation, throwIfCancelled } from '../OperationCancellation'
 import { CustomRequest, DOES_ABOVE, undone, verifyRequest } from './AgentCustom'
 import { ScreenPlan } from '../ScreenPlan'
 
 /** The claimed needs the program, as assembled, is not read as doing; [] when it does all, or Jev did not answer. */
 export async function claimsUndone(claimed: string[], prompt: string, source: string,
-    askJev: (body: string) => Promise<string>): Promise<string[]> {
+    askJev: (body: string) => Promise<string>, cancellation?: OperationCancellation): Promise<string[]> {
+  throwIfCancelled(cancellation)
   if (claimed.length === 0) { return [] }
   let request = new CustomRequest()
   request.needs = claimed
   request.prompt = prompt
-  return undone(request, await askJev(verifyRequest(request, source)))
+  let reply = await askJev(verifyRequest(request, source))
+  throwIfCancelled(cancellation)
+  return undone(request, reply)
 }
 
 /** Puts the needs back in the plan as slots to write; the section hole that follows writes them, or reports them. */
@@ -29,7 +33,8 @@ export function putBack(plan: ScreenPlan, needs: string[]): void {
  * entries are labelled, what a chart is drawn from) is then not written again.
  */
 export async function claimsDone(needs: string[], prompt: string, source: string,
-    askJev: (body: string) => Promise<string>): Promise<string[]> {
+    askJev: (body: string) => Promise<string>, cancellation?: OperationCancellation): Promise<string[]> {
+  throwIfCancelled(cancellation)
   if (needs.length === 0) { return [] }
   let request = new CustomRequest()
   request.needs = needs
@@ -37,9 +42,12 @@ export async function claimsDone(needs: string[], prompt: string, source: string
   let answers: Record<string, Object> = {}
   try {
     let reply = await askJev(verifyRequest(request, source))
+    throwIfCancelled(cancellation)
     if (reply.length === 0) { return [] }
     answers = (JSON.parse(reply) as Record<string, Object>)['answers'] as Record<string, Object>
   } catch (_e) {
+    throwIfCancelled(cancellation)
+    if ((_e as Error).name === 'OperationCancelledError') { throw (_e as Error) }
     return []
   }
   let out: string[] = []

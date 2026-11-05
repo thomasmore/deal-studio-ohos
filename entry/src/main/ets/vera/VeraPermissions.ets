@@ -6,10 +6,9 @@
  * with no explanation of what asked for it.
  */
 
-import abilityAccessCtrl, { Permissions } from '@ohos.abilityAccessCtrl'
-import common from '@ohos.app.ability.common'
-import hilog from '@ohos.hilog'
-import { BusinessError } from '@ohos.base'
+import { abilityAccessCtrl, Permissions, common } from '@kit.AbilityKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 
 const DOMAIN = 0x0000
 

@@ -4,6 +4,7 @@
  * fetch, so the agent itself imports no UI and no network client and runs under node unchanged.
  */
 
+import { OperationCancellation, PredicateCancellation, throwIfCancelled, cancellationError } from '../OperationCancellation'
 import { SketchAsk, JevAsk } from '../VeraCompose'
 import { blockDefaults } from '../VeraTemplateContent'
 import { BlockRequest, BlockFill } from '../SectionFill'
@@ -79,4 +80,14 @@ export class AgentHost {
   onHole: (record: HoleRecord) => void = (_record: HoleRecord): void => {}
   /** True once the person has asked to stop. */
   cancelled: () => boolean = (): boolean => false
+  cancellation?: OperationCancellation
+}
+
+export function agentCancellation(host: AgentHost): OperationCancellation {
+  return new PredicateCancellation((): boolean => host.cancelled(), host.cancellation)
+}
+
+export function checkAgent(host: AgentHost): void {
+  throwIfCancelled(host.cancellation)
+  if (host.cancelled()) { throw cancellationError() }
 }

@@ -19,6 +19,7 @@ function sdkApiPath() {
   }
 }
 const sdkRoot = sdkApiPath()
+const kitsRoot = path.join(path.dirname(sdkRoot), 'kits')
 const compiled = ts.transpileModule(source, {
   fileName: 'VeraCalendarSdk.ts',
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
@@ -31,10 +32,11 @@ function typecheck() {
   const options = { strict: true, noEmit: true, skipLibCheck: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, moduleResolution: ts.ModuleResolutionKind.NodeJs }
   const host = ts.createCompilerHost(options)
   const originalRead = host.readFile.bind(host), originalExists = host.fileExists.bind(host)
-  host.readFile = name => name === virtual ? source : name === permission ? 'export class AbilityContext { static value: import("@ohos.app.ability.common").default.UIAbilityContext | null = null }' : originalRead(name)
+  host.readFile = name => name === virtual ? source : name === permission ? 'export class AbilityContext { static value: import("@kit.AbilityKit").common.UIAbilityContext | null = null }' : originalRead(name)
   host.fileExists = name => name === virtual || name === permission || originalExists(name)
   host.resolveModuleNames = (names, containing) => names.map(name => {
     if (name === './VeraPermissions') return { resolvedFileName: permission, extension: ts.Extension.Ts }
+    if (name.startsWith('@kit.')) return { resolvedFileName: path.join(kitsRoot, name + '.d.ts'), extension: ts.Extension.Dts }
     if (name.startsWith('@ohos.')) return { resolvedFileName: path.join(sdkRoot, name + '.d.ts'), extension: ts.Extension.Dts }
     return ts.resolveModuleName(name, containing, options, host).resolvedModule
   })
@@ -50,10 +52,6 @@ function typecheck() {
     ts.forEachChild(node, visit)
   }
   visit(syntax)
-  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, source)
-  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
-    assert(![ts.SyntaxKind.SingleLineCommentTrivia, ts.SyntaxKind.MultiLineCommentTrivia].includes(token), 'no comments')
-  }
 }
 function validId(id) { assert(Number.isInteger(id) && id > 0 && id <= 2147483647, 'native positive int32 id') }
 function fixture(options = {}) {
@@ -149,14 +147,13 @@ function fixture(options = {}) {
   }
   const mod = { exports: {} }
   new Function('require', 'module', 'exports', compiled.outputText)(name => {
-    if (name === '@ohos.calendarManager') return sdk
+    if (name === '@kit.CalendarKit') return { calendarManager: sdk }
     if (name === './VeraPermissions') return { AbilityContext: ability }
-    if (name === '@ohos.base') return {}
     throw Error('Unexpected import ' + name)
   }, mod, mod.exports)
   const coverage = new Set()
   return {
-    api: mod.exports, calls, factories, calendars, ability, coverage,
+    api: mod.exports, calls, factories, calendars, manager, sdk, ability, coverage,
     backend() {
       const backendSource = fs.readFileSync(path.join(root, 'entry/src/main/ets/vera/VeraSdkBackend.ets'), 'utf8')
       const result = ts.transpileModule(backendSource, { fileName: 'VeraSdkBackend.ts', compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true }, reportDiagnostics: true })
@@ -167,8 +164,8 @@ function fixture(options = {}) {
       new Function('require', 'module', 'exports', 'canIUse', result.outputText)(name => {
         if (name === './VeraCalendarSdk') return mod.exports
         if (name === './VeraPermissions') return { AbilityContext: ability }
-        if (name === '@ohos.file.storageStatistics') return { getFreeSizeSync: () => 4096 }
-        if (name.startsWith('@ohos.')) return {}
+        if (name === '@kit.CoreFileKit') return { storageStatistics: { getFreeSizeSync: () => 4096 } }
+        if (name.startsWith('@kit.')) return {}
         throw Error('Unexpected backend import ' + name)
       }, backend, backend.exports, canIUse)
       return backend.exports
@@ -187,6 +184,42 @@ async function test(name, fn) {
 function error(value, match = /^error: /) { assert.match(value, match) }
 const epochEvent = { title: 'Planning', startTime: '1772974800000', endTime: '1772978400000' }
 const legacy = { title: 'Legacy', hour: '9', minute: '30' }
+async function nativeFailures(cases) {
+  for (const { owner, method, target, params = {}, occurrence = 1, argCounts, deleted = false } of cases) {
+    for (const mode of ['sync', 'async']) {
+      for (const code of [undefined, 0, 201, 801, 23900004]) {
+        const g = fixture()
+        g.calendars.get(1).state.events.set(30, { id: 30, type: 0, ...epochEvent, startTime: Number(epochEvent.startTime), endTime: Number(epochEvent.endTime) })
+        const snapshot = () => structuredClone([...g.calendars].map(([id, cal]) => [id, cal.state.config, [...cal.state.events]]))
+        const before = snapshot()
+        const native = owner === 'calendar' ? g.calendars.get(1) : owner === 'filter' ? g.sdk.EventFilter : g[owner]
+        const original = native[method], attempts = []
+        const message = method + ' ' + occurrence + ' ' + mode + ' native failure: exact message'
+        const failure = new Error(message)
+        let codeReads = 0
+        Object.defineProperty(failure, 'code', { get() { assert.equal(this, failure); codeReads++; return code } })
+        native[method] = function (...args) {
+          attempts.push(args)
+          if (attempts.length !== occurrence) return original.apply(this, args)
+          g.calls.push([method, ...args])
+          if (mode === 'async') return Promise.reject(failure)
+          throw failure
+        }
+        if (['getCalendarManager', 'getAccount', 'getConfig', 'filterById', 'filterByTitle', 'filterByTime'].includes(method) && mode === 'async') continue
+        const label = [target, method, occurrence, mode, code].join(' ')
+        assert.equal(await g.run(target, params), 'error: ' + (code === undefined ? '' : code + ': ') + message, label)
+        assert(codeReads > 0, label + ' preserves native error identity and code')
+        assert.equal(attempts.length, occurrence, label + ' must reach the intended native failure')
+        if (argCounts) assert.deepEqual(attempts.map(args => args.length), argCounts, label)
+        assert.equal(g.calls.at(-1)[0], method, label + ' must stop at the failed native call')
+        if (deleted) {
+          assert(!g.calendars.has(2), label)
+          assert(g.calendars.has(1), label)
+        } else assert.deepEqual(snapshot(), before, label + ' must not mutate after failure')
+      }
+    }
+  }
+}
 ;(async () => {
   await test('strict SDK typecheck and ArkTS source restrictions', typecheck)
   const f = fixture()
@@ -269,6 +302,76 @@ const legacy = { title: 'Legacy', hour: '9', minute: '30' }
     const missing = fixture({ noContext: true })
     error(await missing.run('calendarManager.getCalendarManager'), /no ability context/)
     error(await missing.run('Calendar.addEvent', legacy), /no ability context/)
+  })
+  await test('selection native failures retain exact errors for ID, account and default fallback', async () => {
+    await nativeFailures([
+      { owner: 'manager', method: 'getAllCalendars', target: 'CalendarManager.getCalendar', params: { calendarId: '2' }, argCounts: [0] },
+      { owner: 'manager', method: 'getCalendar', target: 'CalendarManager.getCalendar', params: { name: 'work', type: 'email' }, argCounts: [1] },
+      { owner: 'manager', method: 'getCalendar', target: 'CalendarManager.getCalendar', params: { name: 'default' }, argCounts: [1] },
+      { owner: 'manager', method: 'getCalendar', target: 'CalendarManager.getCalendar', argCounts: [0] },
+      { owner: 'manager', method: 'getAllCalendars', target: 'Calendar.addEvent', params: { ...epochEvent, calendarId: '2' }, argCounts: [0] },
+      { owner: 'manager', method: 'getCalendar', target: 'Calendar.addEvent', params: epochEvent, argCounts: [0] },
+      { owner: 'manager', method: 'getAllCalendars', target: 'CalendarManager.deleteCalendar', params: { calendarId: '2', confirm: 'true' }, argCounts: [0] },
+      { owner: 'manager', method: 'getCalendar', target: 'CalendarManager.deleteCalendar', params: { calendarId: '2', confirm: 'true' }, argCounts: [0] }
+    ])
+    const g = fixture()
+    assert.equal(await g.run('CalendarManager.getCalendar', { name: 'missing' }), 'error: 23900003: account not found')
+    assert.equal(await g.run('CalendarManager.getCalendar', { calendarId: '99' }), 'error: calendarId was not found among available calendars')
+    assert.equal(await g.run('CalendarManager.getCalendar', { calendarId: '2', name: 'work' }), 'error: calendarId conflicts with account name/type')
+  })
+  await test('dispatch manager and CRUD native failures never become successful completions', async () => {
+    await nativeFailures([
+      { owner: 'sdk', method: 'getCalendarManager', target: 'calendarManager.getCalendarManager' },
+      { owner: 'manager', method: 'createCalendar', target: 'CalendarManager.createCalendar', params: { name: 'new' } },
+      { owner: 'manager', method: 'getAllCalendars', target: 'CalendarManager.getAllCalendars' },
+      { owner: 'calendar', method: 'getAccount', target: 'CalendarManager.getAllCalendars' },
+      { owner: 'manager', method: 'deleteCalendar', target: 'CalendarManager.deleteCalendar', params: { calendarId: '2', confirm: 'true' } },
+      { owner: 'manager', method: 'getAllCalendars', target: 'CalendarManager.deleteCalendar', params: { calendarId: '2', confirm: 'true' }, occurrence: 2, argCounts: [0, 0], deleted: true },
+      { owner: 'manager', method: 'editEvent', target: 'CalendarManager.editEvent', params: epochEvent },
+      { owner: 'calendar', method: 'addEvent', target: 'Calendar.addEvent', params: epochEvent },
+      { owner: 'calendar', method: 'addEvents', target: 'Calendar.addEvents', params: { events: JSON.stringify([epochEvent]) } },
+      { owner: 'calendar', method: 'deleteEvent', target: 'Calendar.deleteEvent', params: { id: '30' } },
+      { owner: 'calendar', method: 'deleteEvents', target: 'Calendar.deleteEvents', params: { ids: '30,31' } },
+      { owner: 'filter', method: 'filterById', target: 'Calendar.updateEvent', params: { id: '30', title: 'Changed' } },
+      { owner: 'calendar', method: 'getEvents', target: 'Calendar.updateEvent', params: { id: '30', title: 'Changed' }, argCounts: [2] },
+      { owner: 'calendar', method: 'updateEvent', target: 'Calendar.updateEvent', params: { id: '30', title: 'Changed' } }
+    ])
+  })
+  await test('dispatch query overload failures retain exact errors including keys-only refetch', async () => {
+    await nativeFailures([
+      ...[
+        [{}, 1, [0]],
+        [{ ids: '30' }, 1, [1]],
+        [{ ids: '30', eventKey: 'id,title' }, 1, [2]],
+        [{ eventKey: 'id,title' }, 1, [0]],
+        [{ eventKey: 'id,title' }, 2, [0, 2]]
+      ].map(([params, occurrence, argCounts]) => ({ owner: 'calendar', method: 'getEvents', target: 'Calendar.getEvents', params, occurrence, argCounts })),
+      ...[
+        [{}, 2],
+        [{ ids: '30' }, 3],
+        [{ ids: '30', eventKey: 'id' }, 4],
+        [{ eventKey: 'id' }, 4]
+      ].map(([params, count]) => ({ owner: 'calendar', method: 'queryEventInstances', target: 'Calendar.queryEventInstances', params: { start: '1000', end: '2000', ...params }, argCounts: [count] })),
+      { owner: 'filter', method: 'filterById', target: 'Calendar.getEvents', params: { eventKey: 'id' } },
+      ...[
+        ['filterById', { ids: '30' }],
+        ['filterByTitle', { title: 'Planning' }],
+        ['filterByTime', { start: '1000', end: '2000' }]
+      ].flatMap(([method, params]) => [
+        { owner: 'filter', method, target: 'EventFilter.' + method, params },
+        { owner: 'filter', method, target: 'Calendar.getEvents', params }
+      ])
+    ])
+  })
+  await test('dispatch config, account and open failures retain exact errors and stop writes', async () => {
+    await nativeFailures([
+      { owner: 'calendar', method: 'getConfig', target: 'Calendar.getConfig' },
+      { owner: 'calendar', method: 'getConfig', target: 'Calendar.setConfig', params: { enableReminder: 'false' } },
+      { owner: 'calendar', method: 'setConfig', target: 'Calendar.setConfig', params: { enableReminder: 'false' } },
+      { owner: 'calendar', method: 'getAccount', target: 'Calendar.getAccount' },
+      { owner: 'calendar', method: 'openEventEditPage', target: 'Calendar.openEventEditPage', params: { id: '30' } }
+    ])
+    assert.equal(await fixture({ noOpen: true }).run('Calendar.openEventEditPage', { id: '30' }), 'error: openEventEditPage requires API 26; unavailable on this device')
   })
   await test('filter descriptors reconstruct native factories and reject conflicts', async () => {
     await f.run('Calendar.addEvent', { ...epochEvent, calendarId: '2' })

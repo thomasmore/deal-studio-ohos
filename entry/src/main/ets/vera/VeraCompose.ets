@@ -24,7 +24,9 @@
  * status line names it.
  */
 
-import http from '@ohos.net.http'
+import { http } from '@kit.NetworkKit'
+import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
+import { requestWithCancellation } from './VeraWebSearch'
 import { FragmentSpec, StateFieldSpec, PortSpec, VetoSpec, fragments, vetoes } from './VeraTemplates'
 import { composeFragments } from './VeraSectionCompose'
 import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'
@@ -4030,25 +4032,26 @@ export class ComposeResult {
   composition: Composition | null = null
 }
 
-export async function askJev(body: string, apiKey: string): Promise<string> {
+export async function askJev(body: string, apiKey: string, cancellation?: OperationCancellation): Promise<string> {
+  throwIfCancelled(cancellation)
   // Route the selector calls through the on-device cloud proxy when it is on,
   // instead of TypeSafe; otherwise the real TypeSafe endpoint, unchanged.
   if (settings.useJevProxy()) {
-    return askJevViaCloud(body)
+    return askJevViaCloud(body, cancellation)
   }
-  let client = http.createHttp()
   try {
     let headers: Record<string, string> = {}
     headers['Content-Type'] = 'application/json'
     headers['Authorization'] = 'Bearer ' + apiKey
-    let response = await client.request(JEV_ENDPOINT, {
+    let response = await requestWithCancellation(JEV_ENDPOINT, {
       method: http.RequestMethod.POST,
       header: headers,
       extraData: body,
       expectDataType: http.HttpDataType.STRING,
       connectTimeout: 5000,
       readTimeout: 15000
-    })
+    }, cancellation)
+    throwIfCancelled(cancellation)
     if ((response.responseCode as number) !== 200) {
       console.warn('VERA-JEV http ' + (response.responseCode as number).toString() + ' bytes=' + body.length.toString() + ' ' +
         String(response.result).substring(0, 300))
@@ -4058,11 +4061,11 @@ export async function askJev(body: string, apiKey: string): Promise<string> {
     noteService(SERVICE_JEV, true)
     return response.result as string
   } catch (e) {
+    throwIfCancelled(cancellation)
+    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     console.warn('VERA-JEV failed bytes=' + body.length.toString() + ': ' + (e as Error).message)
     noteService(SERVICE_JEV, false, (e as Error).message)
     return ''
-  } finally {
-    client.destroy()
   }
 }
 
@@ -4083,7 +4086,9 @@ export type PlanReview = (sketch: Sketch) => Promise<string>
  * are named in `settled`, so Jev is not asked them twice.
  */
 export async function composeFromSketch(result: ComposeResult, prompt: string, sketch: Sketch, askChoices: JevAsk,
-    widget: boolean = false, pre: Record<string, Object> | null = null, settled: string[] = []): Promise<ComposeResult> {
+    widget: boolean = false, pre: Record<string, Object> | null = null, settled: string[] = [],
+    cancellation?: OperationCancellation): Promise<ComposeResult> {
+  throwIfCancelled(cancellation)
   result.parsed = sketch
   let started = Date.now()
   let chosen: Map<string, string> = new Map<string, string>()
@@ -4097,9 +4102,15 @@ export async function composeFromSketch(result: ComposeResult, prompt: string, s
     }
   }
   let request = buildComposeRequest(prompt, sketch, widget, settled, chosen)
+  throwIfCancelled(cancellation)
   let body = await askChoices(request)
+  throwIfCancelled(cancellation)
   // No answer is most often the network: once more before the plan is left to the route's wider holes.
-  if (body.length === 0) { body = await askChoices(request) }
+  if (body.length === 0) {
+    throwIfCancelled(cancellation)
+    body = await askChoices(request)
+    throwIfCancelled(cancellation)
+  }
   result.jevMs += Date.now() - started
   if (body.length === 0) { result.note = 'Jev did not answer twice'; return result }
   if (pre !== null) { body = withAnswers(body, pre!) }

@@ -33,9 +33,9 @@
  * nothing to catch it.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
-import resourceManager from '@ohos.resourceManager'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { resourceManager } from '@kit.LocalizationKit'
 import { SdkEntry, sdkIndexEntries, SdkTargetFilter } from './VeraSdkIndex'
 import { embedBatch, embedOne, embeddingModelReady, MODEL_FILE } from './VeraEmbeddings'
 import { nativeScanCorpus } from './LlamaEngine'

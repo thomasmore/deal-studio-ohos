@@ -6,7 +6,7 @@
  * Any failure answers "nothing confirmed", which is what happens today.
  */
 
-import hilog from '@ohos.hilog'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { fragments, FragmentSpec } from './VeraTemplates'
 import { deepseek } from './DeepSeekEngine'
 

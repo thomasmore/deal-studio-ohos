@@ -1,7 +1,5 @@
-import FormExtensionAbility from '@ohos.app.form.FormExtensionAbility'
-import formBindingData from '@ohos.app.form.formBindingData'
-import formProvider from '@ohos.app.form.formProvider'
-import Want from '@ohos.app.ability.Want'
+import { FormExtensionAbility, formBindingData, formProvider } from '@kit.FormKit'
+import { Want } from '@kit.AbilityKit'
 import { store, Project } from '../vera/ProjectStore'
 import { buildFormBinding } from '../vera/FormUpdater'
 

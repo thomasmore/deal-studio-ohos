@@ -1,11 +1,11 @@
 import { copyText } from '../components/Clipboard'
-import common from '@ohos.app.ability.common'
-import { KeyboardAvoidMode } from '@ohos.arkui.UIContext'
-import fs from '@ohos.file.fs'
-import http from '@ohos.net.http'
-import request from '@ohos.request'
-import window from '@ohos.window'
+import { common } from '@kit.AbilityKit'
+import { KeyboardAvoidMode, window } from '@kit.ArkUI'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { http } from '@kit.NetworkKit'
+import { request } from '@kit.BasicServicesKit'
 import { Version, VersionMetrics, store } from '../vera/ProjectStore'
+import { AppRouteParams } from '../vera/AppNavigation'
 import { refreshForms } from '../vera/FormUpdater'
 import { engine, LlamaEngine, GenerateRequest, GenerateResult, loadRawfileText } from '../vera/LlamaEngine'
 import { compileVeraSource, CompileError } from '../vera/VeraCompiler'
@@ -13,6 +13,7 @@ import { applyRepair, repairPrompt } from '../vera/VeraRepair'
 import { smokeRun } from '../vera/VeraSmoke'
 import { logMark, logStep, initTrace, trace, traceCompile } from '../vera/VeraTiming'
 import { deepseek, DEEPSEEK_GENERATION_MAX_TOKENS, SideCall } from '../vera/DeepSeekEngine'
+import { OperationController, throwIfCancelled } from '../vera/OperationCancellation'
 import { VeraPreview } from '../components/VeraPreview'
 import { settings } from '../vera/SettingsStore'
 import { resetLogprobsProbe } from '../vera/JevProxy'
@@ -45,8 +46,8 @@ import { suggestAppName, suggestAppIcon } from '../vera/AppName'
 import { app, PrimaryButton, TonalButton, QuietButton } from '../components/AppStyle'
 import { MetricCard, MetricTile, MetricChip, MetricLine } from '../components/MetricCard'
 import { buildScreen, RouteRequest, RouteOutcome, OUTCOME_AGENT, OUTCOME_CANCELLED } from '../vera/agent/VeraBuildRoute'
-import { webSearch } from '../vera/VeraWebSearch'
-import { foundResults, liveFiguresNote } from '../vera/LiveFigures'
+import { webSearch, SEARCH_CHARS } from '../vera/VeraWebSearch'
+import { LIVE_QUERY_PROMPT, parseLiveQuery, foundResults, liveFiguresNote } from '../vera/LiveFigures'
 import { templateSelectEnabled } from '../vera/VeraTemplateSelectFlag'
 import { ToolCall, ToolTotal, toolCalls, resetToolLog, toolTotals, toolMs } from '../vera/ToolLog'
 import { ServiceNote, serviceNotes, resetServiceHealth, describeService, silent, serviceTrouble } from '../vera/ServiceHealth'
@@ -253,9 +254,18 @@ function decodeServerResponse(body: string): ServerDecodedResponse {
   return result
 }
 
-@Entry
+class GeneratePageParams extends AppRouteParams {
+  prompt: string = ''
+  run: string = ''
+}
+
 @Component
-struct GeneratePage {
+export struct GeneratePage {
+  params: AppRouteParams = new AppRouteParams()
+  private disposed: boolean = false
+
+  @Consume('navPathStack') pathStack: NavPathStack
+
   @State projectId: string = ''
   @State baseVersionId: string = ''
   @State prompt: string = ''
@@ -346,6 +356,7 @@ struct GeneratePage {
   /** The window the keyboard's height is heard from, and the listener, to stop listening when the page goes. */
   private keyboardWindow: window.Window | null = null
   private keyboardListener: (height: number) => void = (height: number) => {
+    if (this.disposed) { return }
     let open = height > 0
     if (open !== this.keyboardOpen) { this.keyboardOpen = open }
   }
@@ -380,6 +391,8 @@ struct GeneratePage {
   @State fullscreen: boolean = false
   /** Full screen with the request box folded away; see composer. */
   @State composerHidden: boolean = false
+  /** True while another destination covers this page; flows to VeraPreview so its surface frame loop stops underneath. */
+  @State destinationHidden: boolean = false
   /** The result card's request line is open to the whole history of requests. */
   @State requestOpen: boolean = false
   private scroller: Scroller = new Scroller()
@@ -412,6 +425,12 @@ struct GeneratePage {
   private runId: number = 0
   private genStartTime: number = 0
   private cancelRequested: boolean = false
+  private activeOperation: OperationController = new OperationController()
+  // The server request is the only GeneratePage operation whose transport is
+  // owned directly by this page; retain its destroy function so Stop and page
+  // disposal can interrupt the in-flight HTTP request, not only ignore its result.
+  private activeServerAbort: (() => void) | null = null
+  private activeServerAbortRun: number = -1
   private lastRequest: string = ''
   private failedSource: string = ''
   private serverBytecode: string = ''
@@ -434,6 +453,13 @@ struct GeneratePage {
   private metricPendingRuns: Set<number> = new Set<number>()
   private metricStaleRuns: Set<number> = new Set<number>()
 
+  private beginOperation(): OperationController {
+    this.activeOperation.cancel()
+    this.settleQuestion(null)
+    this.activeOperation = new OperationController()
+    return this.activeOperation
+  }
+
   private prepareRequest(ask: string): void {
     this.finishMetrics(this.runId)
     this.pendingBase = this.currentBase()
@@ -447,7 +473,7 @@ struct GeneratePage {
     this.metricPriced = this.mode === MODE_DEEPSEEK && this.metricModel === 'deepseek-flash' &&
       settings.getBaseUrl().replace(/\/+$/, '') === 'https://api.deepseek.com'
     this.metricRates = [this.ratePerMillion('cache'), this.ratePerMillion('fresh'), this.ratePerMillion('output')]
-    this.metricSeenSideCalls = new Set<SideCall>(deepseek.getSideCalls())
+    this.metricSeenSideCalls = new Set<SideCall>()
     let totals = this.metricTotals
     if (totals.runs === 0) {
       totals.provider = this.modeLabel()
@@ -480,25 +506,19 @@ struct GeneratePage {
   }
 
   private async metricWork<T>(run: number, work: () => Promise<T>): Promise<T> {
+    let totals = this.metricTotals
     this.metricPendingRuns.add(run)
     try {
       return await work()
     } finally {
       this.metricPendingRuns.delete(run)
-      if (this.metricStaleRuns.delete(run) && this.metricRunId >= 0) {
-        this.metricSeenSideCalls = new Set<SideCall>(deepseek.getSideCalls())
-        this.metricTotals.partial = true
-      }
+      if (this.metricStaleRuns.delete(run)) { totals.partial = true }
     }
   }
 
   private collectMetricSideCalls(run: number): void {
     if (this.metricRunId !== run || this.metricMode === MODE_SERVER) { return }
-    if (this.metricStaleRuns.size > 0) {
-      this.metricTotals.partial = true
-      return
-    }
-    for (let call of deepseek.getSideCalls()) {
+    for (let call of deepseek.getSideCalls(this.activeOperation)) {
       if (this.metricSeenSideCalls.has(call)) { continue }
       this.metricSeenSideCalls.add(call)
       if (!call.ok || (call.inputTokens === 0 && call.outputTokens === 0)) {
@@ -516,9 +536,8 @@ struct GeneratePage {
   private recordMetricResult(run: number, result: GenerateResult): void {
     if (this.metricRunId !== run) { return }
     let known = result.inputTokens > 0 || result.outputTokens > 0
-    let completeCache = this.metricMode === MODE_DEEPSEEK && deepseek.lastToolRounds() === 0 &&
-      this.metricStaleRuns.size === 0
-    let cached = completeCache && known ? deepseek.lastCacheHitTokens() : -1
+    let completeCache = this.metricMode === MODE_DEEPSEEK
+    let cached = completeCache && known ? result.cacheHitTokens : -1
     this.addMetricUsage(known ? result.inputTokens : -1, cached,
       known ? result.outputTokens : -1, this.metricPriced && completeCache)
     this.collectMetricSideCalls(run)
@@ -616,14 +635,12 @@ struct GeneratePage {
   }
 
   aboutToAppear(): void {
-    let params = this.getUIContext().getRouter().getParams() as Record<string, string>
-    if (params !== null && params !== undefined) {
-      this.projectId = params['projectId'] || ''
-      this.baseVersionId = params['baseVersionId'] || ''
-      // A request typed on the home screen waits in the box for the person to send it.
-      this.prompt = params['prompt'] || ''
-      this.runOnOpen = (params['run'] || '').length > 0 && this.prompt.trim().length > 0
-    }
+    let params = this.params as GeneratePageParams
+    this.projectId = params.projectId
+    this.baseVersionId = params.baseVersionId
+    this.prompt = params.prompt || ''
+    this.draft = this.prompt
+    this.runOnOpen = (params.run || '').length > 0 && this.prompt.trim().length > 0
     let context = this.hostContext()
     store.init(context.filesDir)
     let versions = this.projectId.length > 0 ? store.listVersions(this.projectId) : []
@@ -665,16 +682,31 @@ struct GeneratePage {
     // Whether the keyboard is up is the window's to say. Reading it from the page's height took any lasting drop -- a turn
     // to landscape, a fold, split screen -- for an open keyboard, for good.
     window.getLastWindow(context).then((win: window.Window) => {
+      if (this.disposed) { return }
       this.keyboardWindow = win
       win.on('keyboardHeightChange', this.keyboardListener)
     }).catch((e: Error) => { console.warn('VERA keyboard listener unavailable: ' + e.message) })
     this.loadResources().then((): void => {
       // The request came with "send it": it goes now that the prompt and the catalogue are loaded.
-      if (this.runOnOpen) { this.runOnOpen = false; this.doGenerate() }
+      if (!this.disposed && this.runOnOpen) {
+        this.runOnOpen = false
+        this.doGenerate()
+        if (this.generating) { this.draft = '' }
+      }
     }).catch((_e: Error): void => {})
   }
 
   aboutToDisappear(): void {
+    this.disposed = true
+    if (this.generating) {
+      this.stopGeneration()
+    } else {
+      this.finishMetrics(this.runId)
+      this.cancelRequested = true
+      this.runId++
+      this.settleQuestion(null)
+      this.activeOperation.cancel()
+    }
     if (this.keyboardWindow !== null) {
       try { this.keyboardWindow.off('keyboardHeightChange', this.keyboardListener) } catch (_e) { /* the window is already gone */ }
       this.keyboardWindow = null
@@ -683,7 +715,9 @@ struct GeneratePage {
 
   // The key can arrive from a launch parameter while this page sits in the
   // foreground, so re-read it whenever the page comes back into view.
-  onPageShow(): void {
+  private destinationShown(): void {
+    if (this.disposed) { return }
+    this.destinationHidden = false
     if (this.mode === MODE_DEEPSEEK && !this.generating) {
       this.checkDeepSeek()
     }
@@ -707,6 +741,7 @@ struct GeneratePage {
           extra.problems.join('; '))
       }
       let skill = await loadRawfileText(mgr, 'vera-skill.txt')
+      if (this.disposed) { return }
       // The UI catalogue is the same for every request, so it is spliced in
       // once. The intent catalogue is not spliced at
       // all any more: find_intent_function (DeepSeekEngine.ets,
@@ -714,10 +749,13 @@ struct GeneratePage {
       // registry, when the model decides it needs one.
       this.skillText = skill
       try {
-        this.surfaceGuide = await loadRawfileText(mgr, 'vera-surface-skill.txt')
+        let surfaceGuide = await loadRawfileText(mgr, 'vera-surface-skill.txt')
+        if (this.disposed) { return }
+        this.surfaceGuide = surfaceGuide
       } catch (e) {
         console.warn('VERA-SURFACE no guide, games go to the agent: ' + (e as Error).message)
       }
+      if (this.disposed) { return }
       this.promptTemplate = skill
         .replace('{{UI_CATALOG}}', describeCatalogForPrompt())
         .replace('{{UI_TOOL_NOTE}}\n', '')
@@ -725,9 +763,12 @@ struct GeneratePage {
       ensureCapabilities(context)
       this.ensureEmbeddingsReady()
       this.systemPrompt = this.promptTemplate
-      this.grammar = await loadRawfileText(mgr, 'vera.gbnf')
+      let grammar = await loadRawfileText(mgr, 'vera.gbnf')
+      if (this.disposed) { return }
+      this.grammar = grammar
       this.status = 'Resources loaded'
     } catch (e) {
+      if (this.disposed) { return }
       this.status = 'Failed to load resources: ' + (e as Error).message
     }
     this.resourcesLoaded = true
@@ -811,6 +852,7 @@ struct GeneratePage {
         connectTimeout: 5000,
         readTimeout: 5000
       })
+      if (this.disposed) { return }
       if (resp.responseCode === 200) {
         let body = resp.result as string
         let health = JSON.parse(body) as Record<string, Object>
@@ -819,6 +861,7 @@ struct GeneratePage {
         this.status = 'Server error: HTTP ' + resp.responseCode
       }
     } catch (e) {
+      if (this.disposed) { return }
       this.status = 'Server unreachable: ' + (e as Error).message
     } finally {
       client.destroy()
@@ -840,6 +883,7 @@ struct GeneratePage {
       // model is fetched from the vera-server /models endpoint instead.
       await this.downloadModel(modelPath)
     }
+    if (this.disposed) { return }
     this.modelReady = LlamaEngine.modelExists(filesDir)
     if (!this.modelReady) {
       this.status = 'Model not found'
@@ -875,7 +919,7 @@ struct GeneratePage {
             filePath: modelPath
           })
           task.on('progress', (received: number, total: number): void => {
-            if (total > 0) {
+            if (!this.disposed && total > 0) {
               this.status = 'Downloading model ' + Math.floor(received * 100 / total).toString() + '%'
             }
           })
@@ -883,6 +927,7 @@ struct GeneratePage {
             task.on('complete', (): void => { resolve() })
             task.on('fail', (err: number): void => { reject(new Error('download failed, code ' + err.toString())) })
           })
+          if (this.disposed) { return }
           this.status = 'Model downloaded'
           return
         }
@@ -890,9 +935,10 @@ struct GeneratePage {
       }
       throw new Error('SystemCapability.Request.FileTransferAgent is not supported')
     } catch (e) {
+      if (this.disposed) { return }
       this.status = 'Model download failed: ' + (e as Error).message
     } finally {
-      this.downloading = false
+      if (!this.disposed) { this.downloading = false }
     }
   }
 
@@ -928,8 +974,21 @@ struct GeneratePage {
     }
   }
 
+  private resetRunMetrics(): void {
+    this.attempt = 1
+    this.attempts = []
+    this.totalMs = 0
+    this.sideCalls = []
+    this.stages = []
+    this.services = []
+    resetServiceHealth()
+    this.troubleNote = ''
+    this.tools = []
+    resetToolLog()
+  }
+
   private doGenerate(): void {
-    if (this.prompt.trim().length === 0 || this.baseError.length > 0 || this.generating) { return }
+    if (this.disposed || this.prompt.trim().length === 0 || this.baseError.length > 0 || this.generating) { return }
     // Sent before the prompt and the catalogue were read: it goes when they are (aboutToAppear).
     if (!this.resourcesLoaded) { this.runOnOpen = true; return }
     if (this.compiledSource.length > 0) { this.previousSource = this.compiledSource }
@@ -944,20 +1003,12 @@ struct GeneratePage {
     }
     if (this.mode === MODE_LOCAL && !this.modelReady) { return }
     this.prepareRequest(this.prompt.trim())
+    let operation = this.beginOperation()
     this.generating = true
     this.generatedSource = ''
     this.compiled = false
     this.compileErrors = ''
-    this.attempt = 1
-    this.attempts = []
-    this.totalMs = 0
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
+    this.resetRunMetrics()
     this.serverBytecode = ''
     this.previewVbc2 = ''
     this.previewNote = ''
@@ -977,14 +1028,6 @@ struct GeneratePage {
     this.startRun(this.prompt.trim())
     this.genStartTime = Date.now()
     logMark('gen-start', 'chars=' + this.prompt.trim().length.toString())
-    deepseek.clearSideCalls()
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
     let startFields: Record<string, Object> = {}
     startFields['prompt'] = this.prompt.trim()
     startFields['refining'] = this.previousSource.length > 0
@@ -1008,54 +1051,69 @@ struct GeneratePage {
       }
     }
     if (route.agent !== null) {
-      this.tryLiveFigures(this.prompt.trim(), route)
+      this.tryLiveFigures(this.prompt.trim(), route, operation)
       return
     }
-    this.startAttemptOne(this.prompt.trim())
+    this.startAttemptOne(this.prompt.trim(), operation)
   }
 
   /**
    * A new screen that shows a current figure (the weather, a rate, a price) is written by the model on a search made now
    * (LiveFigures.ets), not built by the agent; everything else, and a search that found nothing, goes to the route.
    */
-  private async tryLiveFigures(userPrompt: string, route: RouteRequest): Promise<void> {
+  private async tryLiveFigures(userPrompt: string, route: RouteRequest, operation: OperationController): Promise<void> {
+    if (this.disposed || operation.isCancelled()) { return }
     let run = this.runId
-    if (settings.hasExaKey()) {
-      this.status = 'Checking whether it needs current figures...'
-      let checkStart = Date.now()
-      let query = await this.metricWork(run, (): Promise<string> => deepseek.extractLiveQuery(userPrompt))
-      addStage(this.stages, 'Does it need current figures', WHO_MODEL, Date.now() - checkStart)
-      if (run !== this.runId || this.cancelRequested) { return }
-      if (query.length > 0) {
-        this.status = 'Looking up current figures...'
-        let searchStart = Date.now()
-        let results = await this.metricWork(run, (): Promise<string> => webSearch(query))
-        addStage(this.stages, 'Looking up current figures', WHO_SEARCH, Date.now() - searchStart, query)
-        if (run !== this.runId || this.cancelRequested) { return }
-        let fields: Record<string, Object> = {}
-        fields['query'] = query
-        fields['found'] = foundResults(results)
-        trace('live-figures', fields)
-        if (foundResults(results)) {
-          this.startAttemptOne(userPrompt, 'Generating', liveFiguresNote(results))
-          return
+    try {
+      if (settings.hasExaKey()) {
+        this.status = 'Checking whether it needs current figures...'
+        let checkStart = Date.now()
+        let answer = await this.metricWork(run, (): Promise<string | null> =>
+          deepseek.extractTemplateContent(LIVE_QUERY_PROMPT, userPrompt, 60, 'Does it need current figures', false, operation))
+        if (this.disposed || run !== this.runId || this.cancelRequested || operation.isCancelled()) { return }
+        addStage(this.stages, 'Does it need current figures', WHO_MODEL, Date.now() - checkStart)
+        let query = parseLiveQuery(answer === null ? '' : answer)
+        if (query.length > 0) {
+          this.status = 'Looking up current figures...'
+          let searchStart = Date.now()
+          let results = await this.metricWork(run, (): Promise<string> => webSearch(query, SEARCH_CHARS, operation))
+          if (this.disposed || run !== this.runId || this.cancelRequested || operation.isCancelled()) { return }
+          addStage(this.stages, 'Looking up current figures', WHO_SEARCH, Date.now() - searchStart, query)
+          let fields: Record<string, Object> = {}
+          fields['query'] = query
+          fields['found'] = foundResults(results)
+          trace('live-figures', fields)
+          if (foundResults(results)) {
+            this.startAttemptOne(userPrompt, operation, 'Generating', liveFiguresNote(results))
+            return
+          }
         }
       }
+    } catch (e) {
+      if (this.disposed || run !== this.runId || operation.isCancelled()) { return }
+      throw (e as Error)
     }
-    this.tryRoute(userPrompt, route)
+    this.tryRoute(userPrompt, route, operation)
   }
 
-  private async tryRoute(userPrompt: string, route: RouteRequest): Promise<void> {
+  private async tryRoute(userPrompt: string, route: RouteRequest, operation: OperationController): Promise<void> {
+    if (this.disposed || operation.isCancelled()) { return }
     let run = this.runId
     this.metricTotals.partial = true
     let host = appAgentHost((s: string): void => { if (run === this.runId) { this.status = s } }, (vbc2: string): void => {
       if (run !== this.runId || this.cancelRequested) { return }
       this.previewVbc2 = vbc2
       this.previewNote = 'Sketching the screen...'
-    }, (): boolean => run !== this.runId || this.cancelRequested, this.promptTemplate, this.surfaceGuide)
-    host.ask = (question: AgentQuestion): Promise<PersonAnswer> => this.askPerson(question)
-    let outcome: RouteOutcome = await this.metricWork(run, (): Promise<RouteOutcome> => buildScreen(route, host))
-    if (run !== this.runId) { return }
+    }, (): boolean => run !== this.runId || this.cancelRequested, this.promptTemplate, this.surfaceGuide, operation)
+    host.ask = (question: AgentQuestion): Promise<PersonAnswer> => this.askPerson(question, run, operation)
+    let outcome: RouteOutcome
+    try {
+      outcome = await this.metricWork(run, (): Promise<RouteOutcome> => buildScreen(route, host))
+    } catch (e) {
+      if (run !== this.runId || operation.isCancelled()) { return }
+      throw (e as Error)
+    }
+    if (run !== this.runId || operation.isCancelled()) { return }
     if (outcome.kind === OUTCOME_CANCELLED) {
       this.metricTotals.partial = true
       this.finishMetrics(run)
@@ -1136,7 +1194,9 @@ struct GeneratePage {
    * ready), describes the whole catalogue. The choice is made once and kept for
    * the retries, which only rewrite the user prompt.
    */
-  private async startAttemptOne(userPrompt: string, label: string = 'Generating', plan: string = ''): Promise<void> {
+  private async startAttemptOne(userPrompt: string, operation: OperationController,
+      label: string = 'Generating', plan: string = ''): Promise<void> {
+    if (this.disposed || operation.isCancelled()) { return }
     let run = this.runId
     this.systemPrompt = this.promptTemplate
     this.uiSelected = []
@@ -1146,7 +1206,7 @@ struct GeneratePage {
       let selected = await this.metricWork(run,
         (): Promise<Set<string> | null> => selectUiForPrompt(UI_SELECT_MODE, userPrompt, this.previousSource))
       logStep('ui-select', selectStartedAt, 'mode=' + UI_SELECT_MODE)
-      if (run !== this.runId || this.cancelRequested) { return }
+      if (run !== this.runId || this.cancelRequested || operation.isCancelled()) { return }
       if (selected === null) {
         console.info('VERA-UI-SELECT fallback to the whole catalogue')
       } else {
@@ -1169,27 +1229,20 @@ struct GeneratePage {
     this.status = label + ' (attempt 1/' + MAX_RETRIES + ')...'
     let contextPrompt = this.requestHistory.length > 0 ?
       'Version request history:\n' + this.requestHistory + '\n\nCurrent change request:\n' + userPrompt : userPrompt
-    this.runAttempt(plan.length > 0 ? contextPrompt + '\n\n' + plan : contextPrompt, '')
+    this.runAttempt(plan.length > 0 ? contextPrompt + '\n\n' + plan : contextPrompt, '', operation)
   }
 
   private async doServerGenerate(ask: string = ''): Promise<void> {
     let submitted = ask.length > 0 ? ask : this.prompt.trim()
     this.prepareRequest(submitted)
+    let operation = this.beginOperation()
     this.cancelRequested = false
     let run = ++this.runId
     this.generating = true
     this.generatedSource = ''
     this.compiled = false
     this.compileErrors = ''
-    this.attempts = []
-    this.totalMs = 0
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
+    this.resetRunMetrics()
     this.serverBytecode = ''
     this.program = new RunTotals()
     this.delta = new SourceDelta()
@@ -1203,6 +1256,15 @@ struct GeneratePage {
     metrics.attempt = 1
     this.beginMetricAttempt(run)
     let client = http.createHttp()
+    let clientDestroyed = false
+    let destroyClient = (): void => {
+      if (clientDestroyed) { return }
+      clientDestroyed = true
+      client.destroy()
+    }
+    this.activeServerAbortRun = run
+    this.activeServerAbort = destroyClient
+    let unsubscribe = operation.onCancel(destroyClient)
     try {
       let genStart = Date.now()
       // Refinement: send the base version's source so the server can edit it
@@ -1242,7 +1304,7 @@ struct GeneratePage {
         this.compositionJson = ''
         this.modelWrote = true
         this.acceptRequest()
-        animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
+        this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
         this.tab = TAB_PREVIEW
         this.compiled = true
         this.compileErrors = ''
@@ -1274,7 +1336,14 @@ struct GeneratePage {
       this.compileErrors = 'Request failed: ' + (e as Error).message
       this.status = 'Server unreachable'
     } finally {
-      client.destroy()
+      // Do not clear a newer request's abort hook if Stop was followed quickly
+      // by another generation before this request's promise settled.
+      if (this.activeServerAbortRun === run) {
+        this.activeServerAbort = null
+        this.activeServerAbortRun = -1
+      }
+      unsubscribe()
+      destroyClient()
       if (run === this.runId) { this.finishMetrics(run) }
     }
 
@@ -1287,19 +1356,27 @@ struct GeneratePage {
    * The one place that knows which model is behind the loop. Everything after
    * it -- compile, collect diagnostics, retry -- is identical for both.
    */
-  private async callModel(request: GenerateRequest, onToken: (token: string) => void, run: number): Promise<GenerateResult> {
+  private async callModel(request: GenerateRequest, onToken: (token: string) => void, run: number,
+      operation: OperationController): Promise<GenerateResult> {
+    throwIfCancelled(operation)
     if (this.mode === MODE_DEEPSEEK) {
       // Initial generation, refinement, and retries share reasoning and output settings.
       await ensureCapabilities(this.hostContext())
-      if (run !== this.runId || this.cancelRequested) { return new GenerateResult() }
+      if (run !== this.runId || this.cancelRequested || operation.isCancelled()) { return new GenerateResult() }
       deepseek.setThinking(true)
       request.maxTokens = DEEPSEEK_GENERATION_MAX_TOKENS
-      return deepseek.generate(request, onToken)
+      return deepseek.generate(request, onToken, undefined, operation)
     }
-    return Promise.resolve(engine.generate(request, onToken))
+    let unsubscribe = operation.onCancel((): void => { engine.stop() })
+    try {
+      return engine.generate(request, onToken)
+    } finally {
+      unsubscribe()
+    }
   }
 
-  private async runAttempt(userPrompt: string, errorFeedback: string): Promise<void> {
+  private async runAttempt(userPrompt: string, errorFeedback: string, operation: OperationController): Promise<void> {
+    if (operation.isCancelled()) { return }
     let run = this.runId
     this.generatedSource = ''
     let metrics = new AttemptMetrics()
@@ -1338,17 +1415,17 @@ struct GeneratePage {
     this.beginMetricAttempt(run)
     try {
       genResult = await this.metricWork(run, (): Promise<GenerateResult> => this.callModel(request, (token: string) => {
-        if (run !== this.runId || this.cancelRequested) { return }
+        if (run !== this.runId || this.cancelRequested || operation.isCancelled()) { return }
         if (firstTokenAt === 0) { firstTokenAt = Date.now() }
         this.generatedSource += token
-      }, run))
-      if (run !== this.runId) { return }
+      }, run, operation))
+      if (run !== this.runId || operation.isCancelled()) { return }
       this.recordMetricResult(run, genResult)
       if (genResult.text.length > 0) {
         this.generatedSource = genResult.text
       }
     } catch (e) {
-      if (run !== this.runId) { return }
+      if (run !== this.runId || operation.isCancelled()) { return }
       this.metricTotals.partial = true
       metrics.genMs = Date.now() - genStart
       metrics.failLayer = 'request'
@@ -1375,15 +1452,15 @@ struct GeneratePage {
     metrics.inputTokens = genResult.inputTokens
     metrics.outputTokens = genResult.outputTokens
     if (this.mode === MODE_DEEPSEEK) {
-      metrics.cacheHitTokens = deepseek.lastCacheHitTokens()
-      metrics.finishReason = deepseek.lastFinishReason()
+      metrics.cacheHitTokens = genResult.cacheHitTokens
+      metrics.finishReason = genResult.finishReason
       metrics.thinking = true
       // Prefill from the engine rather than the token callback: the callback
       // only fires on visible content, so with reasoning on it would report
       // the thinking time as waiting.
-      let prefill = deepseek.lastPrefillMs()
+      let prefill = genResult.prefillMs
       if (prefill > 0) { metrics.ttftMs = prefill }
-      metrics.thinkMs = deepseek.lastThinkMs()
+      metrics.thinkMs = genResult.thinkMs
     }
 
     if (editing && this.generatedSource.trim().length > 0) {
@@ -1399,7 +1476,7 @@ struct GeneratePage {
           this.repairByEdit = false
           this.attempt++
           this.status = 'Edit did not apply, rewriting (attempt ' + this.attempt + '/' + MAX_RETRIES + ')...'
-          await this.runAttempt(userPrompt, errorFeedback)
+          await this.runAttempt(userPrompt, errorFeedback, operation)
         } else {
           this.totalMs = Date.now() - this.genStartTime
           this.traceEnd('compile')
@@ -1450,7 +1527,7 @@ struct GeneratePage {
     // A program cut off at the token ceiling fails to parse somewhere near its
     // end. Saying so is worth more to the next attempt than the parse error,
     // which describes the cut rather than the mistake.
-    if (errors.length > 0 && this.mode === MODE_DEEPSEEK && deepseek.lastFinishReason() === 'length') {
+    if (errors.length > 0 && this.mode === MODE_DEEPSEEK && genResult.finishReason === 'length') {
       errors = 'The previous attempt was cut off at the output token limit before the program ended, so it did not parse. Write a shorter program.\n' + errors
     }
 
@@ -1469,7 +1546,7 @@ struct GeneratePage {
       this.compiledVbc2 = vbc2
       this.compiledSource = this.generatedSource.trim()
       this.refinePrompt = ''
-      animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
+      this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
       // Only when the program first appears: yanking the pane away from
       // someone reading the source or the numbers is worse than leaving it.
       if (!hadProgram) { this.tab = TAB_PREVIEW }
@@ -1501,11 +1578,11 @@ struct GeneratePage {
       this.failedSource = this.generatedSource.trim()
       // A program cut off at the limit has no end to edit; anything else is
       // repaired by edits.
-      this.repairByEdit = !(this.mode === MODE_DEEPSEEK && deepseek.lastFinishReason() === 'length')
+      this.repairByEdit = !(this.mode === MODE_DEEPSEEK && genResult.finishReason === 'length')
       this.attempt++
       this.status = (metrics.failLayer === 'runtime' ? 'Stopped on its first run' : 'Compile failed') +
         ', retrying (attempt ' + this.attempt + '/' + MAX_RETRIES + ')...'
-      await this.runAttempt(userPrompt, errors)
+      await this.runAttempt(userPrompt, errors, operation)
     } else {
       this.totalMs = Date.now() - this.genStartTime
       this.generating = false
@@ -1532,7 +1609,7 @@ struct GeneratePage {
    */
   private closeRun(byAgent: boolean, attempts: number): void {
     let ms = this.totalMs > 0 ? this.totalMs : Date.now() - this.genStartTime
-    this.sideCalls = deepseek.getSideCalls()
+    this.sideCalls = deepseek.getSideCalls(this.activeOperation)
     let rest = ms - appMs(this.stages) - yourMs(this.stages)
     let stages = this.stages.slice()
     if (byAgent) {
@@ -1547,7 +1624,7 @@ struct GeneratePage {
   }
 
   private addToProgram(metrics: AttemptMetrics): void {
-    this.sideCalls = deepseek.getSideCalls()
+    this.sideCalls = deepseek.getSideCalls(this.activeOperation)
     let record = this.currentRun()
     if (record !== null) {
       record!.attempts = [...record!.attempts, metrics]
@@ -1780,7 +1857,7 @@ struct GeneratePage {
    */
   private doRefine(): void {
     let ask = this.refinePrompt.trim()
-    if (ask.length === 0 || this.compiledSource.length === 0 || this.generating || this.baseError.length > 0) { return }
+    if (this.disposed || ask.length === 0 || this.compiledSource.length === 0 || this.generating || this.baseError.length > 0) { return }
     // What the person typed into the preview is kept through the refine.
     this.carriedState = this.liveState
     // A change that only adds, removes, replaces or moves a block of a composed screen is made on its
@@ -1800,19 +1877,33 @@ struct GeneratePage {
       return
     }
     this.prepareRequest(ask)
+    let operation = this.beginOperation()
     this.generating = true
     this.cancelRequested = false
     let run = ++this.runId
     this.genStartTime = Date.now()
     this.metricTotals.partial = true
     this.status = 'Checking whether this changes the structure...'
-    let result: EditResult = await this.metricWork(run, (): Promise<EditResult> => editComposition(ask, record!, this.mode,
-      (request: string, c: Composition): Promise<CompositionEdit> => selectEdit(request, c, settings.getSelectorKey())))
+    let result: EditResult
+    try {
+      result = await this.metricWork(run, (): Promise<EditResult> => editComposition(ask, record!, this.mode,
+        async (request: string, c: Composition): Promise<CompositionEdit> => {
+          throwIfCancelled(operation)
+          let edit = await selectEdit(request, c, settings.getSelectorKey(), operation)
+          throwIfCancelled(operation)
+          return edit
+        }, operation))
+    } catch (e) {
+      if (run !== this.runId || operation.isCancelled()) { return }
+      this.status = 'Could not change the structure: ' + (e as Error).message
+      this.generating = false
+      return
+    }
     // Stop bumps runId too, and has already said Stopped.
-    if (run !== this.runId) { return }
+    if (run !== this.runId || operation.isCancelled()) { return }
     this.lastTemplatePick = result.note
     if (!result.applied || result.composition === null) {
-      this.refineWithModel(ask, true)
+      this.refineWithModel(ask, operation)
       return
     }
     this.startRun(ask)
@@ -1832,13 +1923,15 @@ struct GeneratePage {
     this.status = 'Changed the structure: ' + result.note
   }
 
-  private refineWithModel(ask: string, continuing: boolean = false): void {
+  private refineWithModel(ask: string, continuingOperation?: OperationController): void {
+    let continuing = continuingOperation !== undefined
+    if (continuingOperation !== undefined && continuingOperation.isCancelled()) { return }
     // Refine from the last program that compiled, not from generatedSource --
     // a failed attempt leaves its broken text in there.
     this.previousSource = this.compiledSource
     // A game or a scene is changed by edits, with its guide, and played before it is served (AgentSurfaceEdit.ets).
     if (this.mode === MODE_DEEPSEEK && surfaceRouteEnabled() && drawsSurface(this.compiledSource)) {
-      this.editSurface(ask, continuing)
+      this.editSurface(ask, continuingOperation)
       return
     }
     if (this.mode === MODE_SERVER) {
@@ -1847,19 +1940,11 @@ struct GeneratePage {
       return
     }
     if (!continuing) { this.prepareRequest(ask) }
+    let operation = continuingOperation !== undefined ? continuingOperation : this.beginOperation()
     this.generating = true
     this.compiled = false
     this.compileErrors = ''
-    this.attempt = 1
-    this.attempts = []
-    this.totalMs = 0
-    this.sideCalls = []
-    this.stages = []
-    this.services = []
-    resetServiceHealth()
-    this.troubleNote = ''
-    this.tools = []
-    resetToolLog()
+    this.resetRunMetrics()
     this.serverBytecode = ''
     this.cancelRequested = false
     if (!continuing) { this.runId++ }
@@ -1869,26 +1954,36 @@ struct GeneratePage {
     if (!continuing) { this.genStartTime = Date.now() }
     this.lastRequest = ask
     this.status = 'Refining (attempt 1/' + MAX_RETRIES + ')...'
-    this.startAttemptOne(ask, 'Refining')
+    this.startAttemptOne(ask, operation, 'Refining')
   }
 
   /**
    * A change to a program that draws on a ui.Surface: edits made with the guide it was written with, played before they
    * are served. One that does not pass leaves the program on the screen as it was, saying why.
    */
-  private async editSurface(ask: string, continuing: boolean): Promise<void> {
+  private async editSurface(ask: string, continuingOperation?: OperationController): Promise<void> {
+    let continuing = continuingOperation !== undefined
+    if (continuingOperation !== undefined && continuingOperation.isCancelled()) { return }
     if (!continuing) { this.prepareRequest(ask) }
+    let operation = continuingOperation !== undefined ? continuingOperation : this.beginOperation()
     this.generating = true
     this.cancelRequested = false
     let run = continuing ? this.runId : ++this.runId
     if (!continuing) { this.genStartTime = Date.now() }
     this.metricTotals.partial = true
     let host = appAgentHost((text: string): void => { if (run === this.runId) { this.status = text } },
-      (_vbc2: string): void => {}, (): boolean => run !== this.runId || this.cancelRequested, this.promptTemplate, this.surfaceGuide)
+      (_vbc2: string): void => {}, (): boolean => run !== this.runId || this.cancelRequested,
+      this.promptTemplate, this.surfaceGuide, operation)
     let base = this.compiledSource
-    let made: SurfaceEdit = await this.metricWork(run,
-      (): Promise<SurfaceEdit> => editSurfaceProgram(base, ask, this.requestHistory, host))
-    if (run !== this.runId) { return }
+    let made: SurfaceEdit
+    try {
+      made = await this.metricWork(run,
+        (): Promise<SurfaceEdit> => editSurfaceProgram(base, ask, this.requestHistory, host))
+    } catch (e) {
+      if (run !== this.runId || operation.isCancelled()) { return }
+      throw (e as Error)
+    }
+    if (run !== this.runId || operation.isCancelled()) { return }
     let fields: Record<string, Object> = {}
     fields['change'] = ask
     fields['game'] = made.game
@@ -1936,7 +2031,10 @@ struct GeneratePage {
   }
 
   /** Puts the agent's question on the screen; the promise settles with the person's tap. */
-  private askPerson(question: AgentQuestion): Promise<PersonAnswer> {
+  private askPerson(question: AgentQuestion, run: number, operation: OperationController): Promise<PersonAnswer> {
+    if (this.disposed || this.cancelRequested || run !== this.runId || operation.isCancelled()) {
+      return Promise.resolve(null)
+    }
     this.settleQuestion(null)
     return new Promise<PersonAnswer>((resolve: (answer: PersonAnswer) => void) => {
       this.questionText = question.text
@@ -1954,8 +2052,17 @@ struct GeneratePage {
     this.settleQuestion(null)
     this.cancelRequested = true
     this.runId++
-    if (this.mode === MODE_LOCAL) { engine.stop() }
-    if (this.mode === MODE_DEEPSEEK) { deepseek.stop() }
+    // Abort the server transport as well as fencing its eventual result. The
+    // request's finally block owns the matching cleanup and is idempotent.
+    let abortServer = this.activeServerAbort
+    this.activeServerAbort = null
+    this.activeServerAbortRun = -1
+    if (abortServer !== null) {
+      try { abortServer() } catch (e) {
+        console.warn('VERA server request abort failed: ' + (e as Error).message)
+      }
+    }
+    this.activeOperation.cancel()
     this.generating = false
     this.totalMs = Date.now() - this.genStartTime
     this.status = 'Stopped'
@@ -1963,7 +2070,7 @@ struct GeneratePage {
 
   /** Save: a new app is named first, an app that already exists takes the result as its next version. */
   private doSave(): void {
-    if (this.generating || this.compiledSource.length === 0 || !this.hasResult()) { return }
+    if (this.disposed || this.generating || this.compiledSource.length === 0 || !this.hasResult()) { return }
     if (this.projectId.length === 0) {
       this.saveName = suggestAppName(this.compiledSource, this.acceptedRequest)
       let icon = suggestAppIcon(this.saveName, this.acceptedRequest)
@@ -1978,6 +2085,7 @@ struct GeneratePage {
 
   /** The name was confirmed: the project is made now, with the default picture, and the result is its first version. */
   private confirmName(): void {
+    if (this.disposed || !this.naming || this.generating || !this.hasResult()) { return }
     let name = this.saveName.trim()
     if (name.length === 0) { return }
     let project = store.createProject(name, this.saveIcon)
@@ -2000,8 +2108,9 @@ struct GeneratePage {
   }
 
   private close(): void {
+    if (this.disposed || this.closing) { return }
     this.closing = true
-    this.getUIContext().getRouter().back()
+    this.pathStack.pop()
   }
 
   /** A result that no version holds yet: the one thing Save can keep. */
@@ -2021,7 +2130,7 @@ struct GeneratePage {
    * Back with work that was never saved asks first, instead of dropping it. A screen with nothing on it,
    * or with everything saved, goes straight back.
    */
-  onBackPress(): boolean | void {
+  private handleBack(): boolean {
     if (this.closing) { return false }
     // The naming window is on top: Back closes it and keeps the result, instead of leaving the page with it.
     if (this.naming) { this.cancelName(); return true }
@@ -2043,6 +2152,7 @@ struct GeneratePage {
   }
 
   private commitSave(): void {
+    if (this.disposed || this.generating || this.compiledSource.length === 0 || !this.hasResult()) { return }
     let note = this.acceptedRequest
     if (note.length > 100) { note = note.substring(0, 100) + '...' }
     let saved = store.createVersion(this.projectId, this.compiledSource, this.compiledVbc2, note,
@@ -2255,7 +2365,7 @@ struct GeneratePage {
    * Where the time of the run went: the app's total, how it divides between the model, Jev, the search and the phone, and then
    * every stage in the order it happened, each with its share drawn as a bar. The person's own waiting is listed, never counted.
    */
-  @Builder
+  @LocalBuilder
   stagesPanel() {
     MetricCard({ title: 'Where the time went', value: this.formatMs(appMs(this.stages)) }) {
       if (yourMs(this.stages) > 0) {
@@ -2276,14 +2386,14 @@ struct GeneratePage {
   }
 
   /** What the check of whether a refine changes the structure decided, kept after the status line moves on. */
-  @Builder
+  @LocalBuilder
   editCheckPanel() {
     MetricCard({ title: 'Structure edit check', value: '' }) {
       Text(this.lastTemplatePick).fontSize(11).fontColor(app.warningInk).width('100%')
     }
   }
 
-  @Builder
+  @LocalBuilder
   stageRow(st: Stage, total: number) {
     Column({ space: 3 }) {
       Row({ space: 6 }) {
@@ -2314,7 +2424,7 @@ struct GeneratePage {
    * the cost over all of them; then each call on a line of its own. The program's own attempts and the small calls (the plan,
    * the sections' text and functions, a section the model writes) count together.
    */
-  @Builder
+  @LocalBuilder
   tokensPanel() {
     MetricCard({ title: 'Model calls', value: this.mode === MODE_DEEPSEEK ? '~' + this.formatUsd(this.allCost()) : '' }) {
       Row({ space: 8 }) {
@@ -2342,14 +2452,14 @@ struct GeneratePage {
    * The lookups of the run: how many and how long they took on the head line; a tap opens each with what it asked for and what
    * came back. A run that made none says so, so an empty card is a fact and not a card that failed to load.
    */
-  @Builder
+  @LocalBuilder
   toolsPanel() {
     MetricCard({
       title: 'Tool calls',
       value: this.tools.length === 0 ? 'none' : this.tools.length + ' \u00B7 ' + this.formatMs(toolMs(this.tools)),
       chevron: this.tools.length === 0 ? '' : (this.toolsOpen ? '\u25B2' : '\u25BC'),
       onHead: (): void => {
-        if (this.tools.length > 0) { animateTo({ duration: 200, curve: Curve.EaseInOut }, () => { this.toolsOpen = !this.toolsOpen }) }
+        if (this.tools.length > 0) { this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseInOut }, () => { this.toolsOpen = !this.toolsOpen }) }
       }
     }) {
       if (this.tools.length === 0) {
@@ -2375,7 +2485,7 @@ struct GeneratePage {
    * Who answered: one line per service the run called (Jev, Exa, DeepSeek), red when it answered nothing, amber when some calls
    * failed. What a slow or fallen-back run owes to a service that was not there reads here, with what it said.
    */
-  @Builder
+  @LocalBuilder
   servicesPanel() {
     MetricCard({ title: 'Services', value: this.servicesSummary(), valueColor: this.servicesTone() }) {
       ForEach(this.services, (n: ServiceNote) => {
@@ -2398,7 +2508,7 @@ struct GeneratePage {
    * The program the model wrote itself (a run the agent did not serve, or a refine): how long it took, what the compiler cost,
    * each attempt, and the runs before it.
    */
-  @Builder
+  @LocalBuilder
   attemptsPanel() {
     MetricCard({ title: 'Model writes the program', value: this.formatMs(this.runLlmMs()) }) {
       Row({ space: 8 }) {
@@ -2815,8 +2925,9 @@ struct GeneratePage {
     Column() {
       Stack({ alignContent: Alignment.TopEnd }) {
         // With the box folded, the round button lies over the bottom corner: the program gets room to scroll clear of it.
-        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState, bottomRoom: this.composerHidden ? FOLD_ROOM : 0,
-          onStateSnapshot: (encoded: string): void => { this.liveState = encoded } })
+        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState, destinationHidden: this.destinationHidden,
+          bottomRoom: this.composerHidden ? FOLD_ROOM : 0,
+          onStateSnapshot: (encoded: string): void => { if (!this.disposed) { this.liveState = encoded } } })
           .width('100%')
           .height('100%')
         Row({ space: 8 }) {
@@ -2941,8 +3052,8 @@ struct GeneratePage {
 
       Stack() {
         // Kept built under the other tabs, hidden, so what was typed into the running program is still there on return.
-        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState,
-          onStateSnapshot: (encoded: string): void => { this.liveState = encoded } })
+        VeraPreview({ vbc2: this.compiledVbc2, seedState: this.carriedState, destinationHidden: this.destinationHidden,
+          onStateSnapshot: (encoded: string): void => { if (!this.disposed) { this.liveState = encoded } } })
           .width('100%')
           .height('100%')
           .visibility(this.tab === TAB_PREVIEW ? Visibility.Visible : Visibility.Hidden)
@@ -3185,7 +3296,7 @@ struct GeneratePage {
 
   private send(): void {
     let text = this.draft.trim()
-    if (text.length === 0 || this.generating) { return }
+    if (this.disposed || text.length === 0 || this.generating) { return }
     if (this.rewriting) {
       this.rewriting = false
       if (this.acceptedBase !== null) { this.restoreBase(this.acceptedBase!) }
@@ -3214,7 +3325,7 @@ struct GeneratePage {
   }
 
   private scrollDown(): void {
-    setTimeout(() => { this.scroller.scrollEdge(Edge.Bottom) }, 80)
+    setTimeout(() => { if (!this.disposed) { this.scroller.scrollEdge(Edge.Bottom) } }, 80)
   }
 
   /** New starts the thread over; with a result that was never saved it asks first. */
@@ -3238,8 +3349,7 @@ struct GeneratePage {
     this.startNew()
     this.runs = []
     this.program = new RunTotals()
-    this.attempts = []
-    this.stages = []
+    this.resetRunMetrics()
     this.status = ''
     this.draft = ''
     this.tab = TAB_PREVIEW
@@ -3251,83 +3361,83 @@ struct GeneratePage {
 
   /** The thread is a list of turns: the person's requests, and under the last one what is being built or was built. */
   build() {
-    // The windows are siblings of the page, not children of its content: their dimming then covers the title bar too.
-    Stack() {
-    Navigation() {
-      Column() {
-        if (this.baseError.length > 0 && !this.fullscreen) {
-          Text(this.baseError).fontSize(13).fontColor(app.dangerInk).width('100%').padding({ left: 16, right: 16, top: 8 })
-        }
-        if (this.settingsOpen && !this.fullscreen) {
-          Column() { this.settingsPanel() }
-            .width('100%')
-            .padding({ left: 12, right: 12, top: 8 })
-        }
-        // A program that runs takes the whole space between the bar and the box, as the whole of the screen it is; before
-        // and while it is built, and when it was not, the page is a thread of cards.
-        if (this.fullscreen && this.hasResult()) {
-          this.fullscreenPane()
-        } else if (!this.generating && this.hasResult()) {
-          this.resultPane()
-        } else {
-        List({ space: 10, scroller: this.scroller }) {
-          // Nothing asked for yet: ready-made requests to start from, as an empty chat has. A tap sends one.
-          if (this.runs.length === 0 && !this.generating && this.baseVersionId.length === 0 && !this.hasResult()) {
-            ListItem() {
-              ChatStarters({ en: APP_STARTERS, flat: true, onPick: (prompt: string): void => {
-                if (this.generating) { return }
-                this.prompt = prompt
-                this.doGenerate()
-              } })
-            }
-            if (this.setupHint.length > 0) {
-              ListItem() {
-                Text(this.setupHint).fontSize(12).fontColor(app.inkMuted).padding({ left: 4, right: 4 })
-                  .copyOption(CopyOptions.LocalDevice)
+    NavDestination() {
+      Stack() {
+        Column() {
+          if (this.baseError.length > 0 && !this.fullscreen) {
+            Text(this.baseError).fontSize(13).fontColor(app.dangerInk).width('100%').padding({ left: 16, right: 16, top: 8 })
+          }
+          if (this.settingsOpen && !this.fullscreen) {
+            Column() { this.settingsPanel() }
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 8 })
+          }
+          // A program that runs takes the whole space between the bar and the box, as the whole of the screen it is; before
+          // and while it is built, and when it was not, the page is a thread of cards.
+          if (this.fullscreen && this.hasResult()) {
+            this.fullscreenPane()
+          } else if (!this.generating && this.hasResult()) {
+            this.resultPane()
+          } else {
+            List({ space: 10, scroller: this.scroller }) {
+              // Nothing asked for yet: ready-made requests to start from, as an empty chat has. A tap sends one.
+              if (this.runs.length === 0 && !this.generating && this.baseVersionId.length === 0 && !this.hasResult()) {
+                ListItem() {
+                  ChatStarters({ en: APP_STARTERS, flat: true, onPick: (prompt: string): void => {
+                    if (this.generating) { return }
+                    this.prompt = prompt
+                    this.doGenerate()
+                  } })
+                }
+                if (this.setupHint.length > 0) {
+                  ListItem() {
+                    Text(this.setupHint).fontSize(12).fontColor(app.inkMuted).padding({ left: 4, right: 4 })
+                      .copyOption(CopyOptions.LocalDevice)
+                  }
+                }
+              }
+              if (this.generating) {
+                ListItem() { this.buildCard() }
+              } else if (this.runs.length > 0 && !this.compiled) {
+                ListItem() { this.failedCard() }
+              }
+              if (this.mode === MODE_LOCAL && !this.modelReady && !this.generating && !this.downloading) {
+                ListItem() { this.modelCard() }
               }
             }
+            .layoutWeight(1)
+            .width('100%')
+            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+            .scrollBar(BarState.Off)
           }
-          if (this.generating) {
-            ListItem() { this.buildCard() }
-          } else if (this.runs.length > 0 && !this.compiled) {
-            ListItem() { this.failedCard() }
-          }
-          if (this.mode === MODE_LOCAL && !this.modelReady && !this.generating && !this.downloading) {
-            ListItem() { this.modelCard() }
-          }
-        }
-        .layoutWeight(1)
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-        .scrollBar(BarState.Off)
-        }
 
-        // Full screen can fold the box away, leaving the program the whole screen; a round button brings it back.
-        // While a field of the program has the keyboard, the box would only take room from the program.
-        if (!(this.fullscreen && this.composerHidden && this.hasResult()) &&
-          !(this.keyboardOpen && !this.composerFocused && this.hasResult())) {
-          this.composer()
+          // Full screen can fold the box away, leaving the program the whole screen; a round button brings it back.
+          // While a field of the program has the keyboard, the box would only take room from the program.
+          if (!(this.fullscreen && this.composerHidden && this.hasResult()) &&
+            !(this.keyboardOpen && !this.composerFocused && this.hasResult())) {
+            this.composer()
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor(app.background)
+        if (this.naming) {
+          this.nameOverlay()
+        }
+        if (this.leaving) {
+          this.leaveOverlay()
         }
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(app.background)
     }
     .title(this.baseVersionId.length > 0 ? 'Refine · Version ' + this.baseVersionNumber.toString() :
       (this.projectId.length === 0 ? 'New app' : 'New version'))
-    .titleMode(NavigationTitleMode.Mini)
-    .hideTitleBar(this.fullscreen && this.hasResult())
+    .hideTitleBar((this.fullscreen && this.hasResult()) || this.naming || this.leaving)
     .backgroundColor(app.background)
     .menus(this.barMenus())
-
-    if (this.naming) {
-      this.nameOverlay()
-    }
-    if (this.leaving) {
-      this.leaveOverlay()
-    }
-    }
-    .width('100%')
-    .height('100%')
+    .onBackPressed((): boolean => this.handleBack())
+    .onShown(() => { this.destinationShown() })
+    .onHidden(() => { this.destinationHidden = true })
   }
 }

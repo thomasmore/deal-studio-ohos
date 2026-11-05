@@ -32,9 +32,9 @@
  */
 
 import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'
-import http from '@ohos.net.http'
-import hilog from '@ohos.hilog'
-import { BusinessError } from '@ohos.base'
+import { http } from '@kit.NetworkKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { BusinessError } from '@kit.BasicServicesKit'
 import { layouts, arrangeInLayout, completeRequiredSlots, swapForLayout, layoutKinds, kindsOfLayout, placeKinds, fitToSlots, LAYOUT_NONE, LAYOUT_STACK } from './VeraLayouts'
 import { FragmentSpec, StateFieldSpec, SlotSpec, VetoSpec, ContentFieldSpec, fragments, vetoes, bannerSectionView } from './VeraTemplates'
 

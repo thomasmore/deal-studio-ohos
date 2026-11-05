@@ -28,133 +28,126 @@
  * trusting it -- the same rule every other row in this codebase follows.
  */
 
-import storageStatistics from '@ohos.file.storageStatistics'
+import {
+  storageStatistics,
+  fileIo as fs,
+  cloudSync,
+  cloudSyncManager,
+  Environment,
+  fileUri,
+  hash,
+  keyManager,
+  securityLabel,
+  statfs
+} from '@kit.CoreFileKit'
 import { AbilityContext } from './VeraPermissions'
 import { calendarSdkTargets, runCalendarSdkAdapter } from './VeraCalendarSdk'
 import { LIVE_TARGET, liveFetch } from './VeraLive'
-import camera from '@ohos.multimedia.camera'
-import audio from '@ohos.multimedia.audio'
-import fs from '@ohos.file.fs'
-import abilityAccessCtrl from '@ohos.abilityAccessCtrl'
-import partnerAgent from '@ohos.FusionConnectivity.partnerAgent'
-import ranging from '@ohos.FusionConnectivity.ranging'
-import PiPWindow from '@ohos.PiPWindow'
-import accessibility from '@ohos.accessibility'
-import osAccount from '@ohos.account.osAccount'
-import abilityManager from '@ohos.app.ability.abilityManager'
-import appManager from '@ohos.app.ability.appManager'
-import appRecovery from '@ohos.app.ability.appRecovery'
-import application from '@ohos.app.ability.application'
-import autoStartupManager from '@ohos.app.ability.autoStartupManager'
-import childProcessManager from '@ohos.app.ability.childProcessManager'
-import dataUriUtils from '@ohos.app.ability.dataUriUtils'
-import hyperSnapManager from '@ohos.app.ability.hyperSnapManager'
-import quickFixManager from '@ohos.app.ability.quickFixManager'
-import wantAgent from '@ohos.app.ability.wantAgent'
-import startupManager from '@ohos.app.appstartup.startupManager'
-import formHost from '@ohos.app.form.formHost'
-import formProvider from '@ohos.app.form.formProvider'
-import uriPermissionManager from '@ohos.application.uriPermissionManager'
-import performanceMonitor from '@ohos.arkui.performanceMonitor'
-import batteryInfo from '@ohos.batteryInfo'
-import batteryStats from '@ohos.batteryStatistics'
-import access from '@ohos.bluetooth.access'
-import bluetoothConnection from '@ohos.bluetooth.connection'
-import socket from '@ohos.bluetooth.socket'
-import brightness from '@ohos.brightness'
-import buffer from '@ohos.buffer'
-import bundleManager from '@ohos.bundle.bundleManager'
-import defaultAppManager from '@ohos.bundle.defaultAppManager'
-import distributedBundleManager from '@ohos.bundle.distributedBundleManager'
-import freeInstall from '@ohos.bundle.freeInstall'
-import overlay from '@ohos.bundle.overlay'
-import shortcutManager from '@ohos.bundle.shortcutManager'
-import serial from '@ohos.busManager.serial'
-import commonEventManager from '@ohos.commonEventManager'
-import configPolicy from '@ohos.configPolicy'
-import customConfig from '@ohos.customization.customConfig'
-import distributedDataObject from '@ohos.data.distributedDataObject'
-import relationalStore from '@ohos.data.relationalStore'
-import uniformTypeDescriptor from '@ohos.data.uniformTypeDescriptor'
-import display from '@ohos.display'
-import mechanicManager from '@ohos.distributedHardware.mechanicManager'
-import abilityConnectionManager from '@ohos.distributedsched.abilityConnectionManager'
-import dlpPermission from '@ohos.dlpPermission'
-import adminManager from '@ohos.enterprise.adminManager'
-import applicationManager from '@ohos.enterprise.applicationManager'
-import browser from '@ohos.enterprise.browser'
-import emitter from '@ohos.events.emitter'
-import fastbuffer from '@ohos.fastbuffer'
-import cloudSync from '@ohos.file.cloudSync'
-import cloudSyncManager from '@ohos.file.cloudSyncManager'
-import Environment from '@ohos.file.environment'
-import fileUri from '@ohos.file.fileuri'
-import hash from '@ohos.file.hash'
-import keyManager from '@ohos.file.keyManager'
-import securityLabel from '@ohos.file.securityLabel'
-import statfs from '@ohos.file.statvfs'
-import geoLocationManager from '@ohos.geoLocationManager'
-import hiTraceChain from '@ohos.hiTraceChain'
-import hiTraceMeter from '@ohos.hiTraceMeter'
-import hichecker from '@ohos.hichecker'
-import hidebug from '@ohos.hidebug'
-import hilog from '@ohos.hilog'
-import hiAppEvent from '@ohos.hiviewdfx.hiAppEvent'
-import hiRetrieval from '@ohos.hiviewdfx.hiRetrieval'
-import jsLeakWatcher from '@ohos.hiviewdfx.jsLeakWatcher'
-import i18n from '@ohos.i18n'
-import identifier from '@ohos.identifier.oaid'
-import inputMethod from '@ohos.inputMethod'
-import avSession from '@ohos.multimedia.avsession'
-import drm from '@ohos.multimedia.drm'
-import media from '@ohos.multimedia.media'
-import videoProcessingEngine from '@ohos.multimedia.videoProcessingEngine'
-import metadataBinding from '@ohos.multimodalAwareness.metadataBinding'
-import inputDevice from '@ohos.multimodalInput.inputDevice'
-import pointer from '@ohos.multimodalInput.pointer'
-import shortKey from '@ohos.multimodalInput.shortKey'
-import netConnection from '@ohos.net.connection'
-import ethernet from '@ohos.net.ethernet'
-import networkSecurity from '@ohos.net.networkSecurity'
-import statistics from '@ohos.net.statistics'
-import nfcController from '@ohos.nfc.controller'
-import notificationManager from '@ohos.notificationManager'
-import notificationSubscribe from '@ohos.notificationSubscribe'
-import power from '@ohos.power'
-import process from '@ohos.process'
-import promptAction from '@ohos.promptAction'
-import reminderAgentManager from '@ohos.reminderAgentManager'
-import cacheDownload from '@ohos.request.cacheDownload'
-import backgroundProcessManager from '@ohos.resourceschedule.backgroundProcessManager'
-import backgroundTaskManager from '@ohos.resourceschedule.backgroundTaskManager'
-import workScheduler from '@ohos.resourceschedule.workScheduler'
-import screen from '@ohos.screen'
-import screenLock from '@ohos.screenLock'
-import certificateManagerDialog from '@ohos.security.certManagerDialog'
-import huksExternalCrypto from '@ohos.security.huksExternalCrypto'
-import selectionManager from '@ohos.selectionInput.selectionManager'
-import sensor from '@ohos.sensor'
-import settings from '@ohos.settings'
-import systemCapability from '@ohos.systemCapability'
-import systemDateTime from '@ohos.systemDateTime'
-import systemParameterEnhance from '@ohos.systemParameterEnhance'
-import taskpool from '@ohos.taskpool'
-import call from '@ohos.telephony.call'
-import data from '@ohos.telephony.data'
-import eSIM from '@ohos.telephony.esim'
-import radio from '@ohos.telephony.radio'
-import sim from '@ohos.telephony.sim'
-import sms from '@ohos.telephony.sms'
-import usbManager from '@ohos.usbManager'
-import serialManager from '@ohos.usbManager.serial'
-import util from '@ohos.util'
-import vibrator from '@ohos.vibrator'
-import wallpaper from '@ohos.wallpaper'
-import wifiManager from '@ohos.wifiManager'
-import window from '@ohos.window'
-import floatView from '@ohos.window.floatView'
-import floatingBall from '@ohos.window.floatingBall'
-import zlib from '@ohos.zlib'
+import { camera } from '@kit.CameraKit'
+import { audio } from '@kit.AudioKit'
+import {
+  abilityAccessCtrl,
+  abilityManager,
+  appManager,
+  appRecovery,
+  application,
+  autoStartupManager,
+  childProcessManager,
+  dataUriUtils,
+  hyperSnapManager,
+  quickFixManager,
+  wantAgent,
+  startupManager,
+  uriPermissionManager,
+  bundleManager,
+  defaultAppManager,
+  distributedBundleManager,
+  freeInstall,
+  overlay,
+  shortcutManager
+} from '@kit.AbilityKit'
+import {
+  partnerAgent,
+  ranging,
+  access,
+  connection as bluetoothConnection,
+  socket,
+  nfcController,
+  wifiManager
+} from '@kit.ConnectivityKit'
+import {
+  PiPWindow,
+  performanceMonitor,
+  display,
+  promptAction,
+  screen,
+  window,
+  floatView,
+  floatingBall
+} from '@kit.ArkUI'
+import { accessibility } from '@kit.AccessibilityKit'
+import {
+  osAccount,
+  batteryInfo,
+  batteryStats,
+  brightness,
+  serial,
+  commonEventManager,
+  configPolicy,
+  customConfig,
+  emitter,
+  power,
+  cacheDownload,
+  screenLock,
+  selectionManager,
+  settings,
+  systemCapability,
+  systemDateTime,
+  systemParameterEnhance,
+  usbManager,
+  serialManager,
+  wallpaper,
+  zlib
+} from '@kit.BasicServicesKit'
+import { formHost, formProvider } from '@kit.FormKit'
+import { buffer, fastbuffer, process, taskpool, util } from '@kit.ArkTS'
+import { distributedDataObject, relationalStore, uniformTypeDescriptor } from '@kit.ArkData'
+import { mechanicManager } from '@kit.MechanicKit'
+import { abilityConnectionManager } from '@kit.DistributedServiceKit'
+import { dlpPermission } from '@kit.DataProtectionKit'
+import { adminManager, applicationManager, browser } from '@kit.MDMKit'
+import { geoLocationManager } from '@kit.LocationKit'
+import {
+  hiTraceChain,
+  hiTraceMeter,
+  hichecker,
+  hidebug,
+  hilog,
+  hiAppEvent,
+  hiRetrieval,
+  jsLeakWatcher
+} from '@kit.PerformanceAnalysisKit'
+import { i18n } from '@kit.LocalizationKit'
+import { identifier } from '@kit.AdsKit'
+import { inputMethod } from '@kit.IMEKit'
+import { avSession } from '@kit.AVSessionKit'
+import { drm } from '@kit.DrmKit'
+import { media } from '@kit.MediaKit'
+import { videoProcessingEngine } from '@kit.ImageKit'
+import { metadataBinding } from '@kit.MultimodalAwarenessKit'
+import { inputDevice, pointer, shortKey } from '@kit.InputKit'
+import { connection as netConnection, ethernet, networkSecurity, statistics } from '@kit.NetworkKit'
+import { notificationManager, notificationSubscribe } from '@kit.NotificationKit'
+import {
+  reminderAgentManager,
+  backgroundProcessManager,
+  backgroundTaskManager,
+  workScheduler
+} from '@kit.BackgroundTasksKit'
+import { certificateManagerDialog } from '@kit.DeviceCertificateKit'
+import { huksExternalCrypto } from '@kit.UniversalKeystoreKit'
+import { sensor, vibrator } from '@kit.SensorServiceKit'
+import { call, data, eSIM, radio, sim, sms } from '@kit.TelephonyKit'
 
 /** One row's real implementation: sdk.call's parameters in, its answer string out. */
 export type SdkAdapter = (params: Map<string, string>) => Promise<string>
@@ -195,8 +188,12 @@ function cameraManagerOnce(): camera.CameraManager | null {
   if (cameraManagerInstance !== null) { return cameraManagerInstance }
   let context = AbilityContext.value
   if (context === null) { return null }
-  cameraManagerInstance = camera.getCameraManager(context)
-  return cameraManagerInstance
+  try {
+    cameraManagerInstance = camera.getCameraManager(context)
+    return cameraManagerInstance
+  } catch (e) {
+    throw e as Error
+  }
 }
 
 let audioManagerInstance: audio.AudioManager | null = null
@@ -260,10 +257,14 @@ async function requireAudioPermission(manageConfig: boolean): Promise<void> {
   let context = AbilityContext.value
   if (context === null) { throw new Error('no ability context yet') }
   let permission = manageConfig ? 'ohos.permission.MANAGE_AUDIO_CONFIG' : 'ohos.permission.ACCESS_NOTIFICATION_POLICY'
-  let status = await abilityAccessCtrl.createAtManager().checkAccessToken(context.applicationInfo.accessTokenId,
-    manageConfig ? 'ohos.permission.MANAGE_AUDIO_CONFIG' : 'ohos.permission.ACCESS_NOTIFICATION_POLICY')
-  if (status !== abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
-    throw new Error('permission not granted: ' + permission)
+  try {
+    let status = await abilityAccessCtrl.createAtManager().checkAccessToken(context.applicationInfo.accessTokenId,
+      manageConfig ? 'ohos.permission.MANAGE_AUDIO_CONFIG' : 'ohos.permission.ACCESS_NOTIFICATION_POLICY')
+    if (status !== abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
+      throw new Error('permission not granted: ' + permission)
+    }
+  } catch (e) {
+    throw e as Error
   }
 }
 
@@ -2969,7 +2970,7 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   ['ConnectivityKit.socket.getDeviceId', async (params: Map<string, string>): Promise<string> => {
     if (canIUse('SystemCapability.Communication.Bluetooth.Core')) {
       let clientSocket = paramInt(params, 'clientSocket', 0)
-      let result = socket.getDeviceId(clientSocket)
+      let result: string = socket.getDeviceId(clientSocket)
       return result.toString()
     }
     throw new Error('unsupported capability: SystemCapability.Communication.Bluetooth.Core')
@@ -2977,7 +2978,7 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   ['ConnectivityKit.socket.getL2capPsm', async (params: Map<string, string>): Promise<string> => {
     if (canIUse('SystemCapability.Communication.Bluetooth.Core')) {
       let serverSocket = paramInt(params, 'serverSocket', 0)
-      let result = socket.getL2capPsm(serverSocket)
+      let result: number = socket.getL2capPsm(serverSocket)
       return result.toString()
     }
     throw new Error('unsupported capability: SystemCapability.Communication.Bluetooth.Core')
@@ -2985,7 +2986,7 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   ['ConnectivityKit.socket.getMaxReceiveDataSize', async (params: Map<string, string>): Promise<string> => {
     if (canIUse('SystemCapability.Communication.Bluetooth.Core')) {
       let clientSocket = paramInt(params, 'clientSocket', 0)
-      let result = socket.getMaxReceiveDataSize(clientSocket)
+      let result: number = socket.getMaxReceiveDataSize(clientSocket)
       return result.toString()
     }
     throw new Error('unsupported capability: SystemCapability.Communication.Bluetooth.Core')
@@ -2993,7 +2994,7 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   ['ConnectivityKit.socket.getMaxTransmitDataSize', async (params: Map<string, string>): Promise<string> => {
     if (canIUse('SystemCapability.Communication.Bluetooth.Core')) {
       let clientSocket = paramInt(params, 'clientSocket', 0)
-      let result = socket.getMaxTransmitDataSize(clientSocket)
+      let result: number = socket.getMaxTransmitDataSize(clientSocket)
       return result.toString()
     }
     throw new Error('unsupported capability: SystemCapability.Communication.Bluetooth.Core')
@@ -3001,7 +3002,7 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   ['ConnectivityKit.socket.isConnected', async (params: Map<string, string>): Promise<string> => {
     if (canIUse('SystemCapability.Communication.Bluetooth.Core')) {
       let clientSocket = paramInt(params, 'clientSocket', 0)
-      let result = socket.isConnected(clientSocket)
+      let result: boolean = socket.isConnected(clientSocket)
       return result.toString()
     }
     throw new Error('unsupported capability: SystemCapability.Communication.Bluetooth.Core')
@@ -4724,14 +4725,6 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   ['PerformanceAnalysisKit.hidebug.disableGwpAsanGrayscale', async (params: Map<string, string>): Promise<string> => {
     if (canIUse('SystemCapability.HiviewDFX.HiProfiler.HiDebug')) {
       hidebug.disableGwpAsanGrayscale()
-      return 'ok'
-    }
-    throw new Error('unsupported capability: SystemCapability.HiviewDFX.HiProfiler.HiDebug')
-  }],
-  ['PerformanceAnalysisKit.hidebug.dumpJsHeapData', async (params: Map<string, string>): Promise<string> => {
-    if (canIUse('SystemCapability.HiviewDFX.HiProfiler.HiDebug')) {
-      let filename = paramString(params, 'filename', '')
-      hidebug.dumpJsHeapData(filename)
       return 'ok'
     }
     throw new Error('unsupported capability: SystemCapability.HiviewDFX.HiProfiler.HiDebug')

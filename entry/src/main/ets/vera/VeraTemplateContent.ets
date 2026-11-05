@@ -17,6 +17,7 @@
  * 'deepseek'.
  */
 
+import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
 import { ContentFieldSpec, ListFieldSpec, FragmentSpec, fragments } from './VeraTemplates'
 import { GenerateRequest, engine } from './LlamaEngine'
 import { deepseek } from './DeepSeekEngine'
@@ -382,7 +383,8 @@ export function blockDefaults(kind: string): Map<string, string> {
 
 /** `ask`, when given, is the content model to ask instead of the app's DeepSeek engine (the host harness passes its own). */
 export async function fillSectionsContent(chosenKinds: string[], userPrompt: string, mode: string, searchText: string = '',
-    ask: ContentAsk | null = null): Promise<SectionContentFillResult> {
+    ask: ContentAsk | null = null, cancellation?: OperationCancellation): Promise<SectionContentFillResult> {
+  throwIfCancelled(cancellation)
   let flat: FlatContentField[] = []
   flat.push(new FlatContentField(-1, '__TITLE__', 'title', 'Demo Screen', 'Short title for the whole screen (2-4 words)', 24))
   flat.push(new FlatContentField(-1, '__EYEBROW__', 'eyebrow', '', 'A short line above the title, only when the request itself gives one (a date, a place, a kind of day); otherwise an empty string', 24))
@@ -418,9 +420,12 @@ export async function fillSectionsContent(chosenKinds: string[], userPrompt: str
   for (let f of flat) { asSpecs.push(new ContentFieldSpec(f.token, f.jsonKey, f.fallback, f.hint, f.maxLength, f.numeric)) }
   let prompt = buildContentPrompt(asSpecs, searchText, lists)
   let budget = 220 + 160 * lists.length
+  throwIfCancelled(cancellation)
   let raw: string | null = mode === 'local'
     ? fillContentLocal(prompt, userPrompt, budget)
-    : (ask !== null ? await ask(prompt, userPrompt, budget) : await deepseek.extractTemplateContent(prompt, userPrompt, budget))
+    : (ask !== null ? await ask(prompt, userPrompt, budget) :
+      await deepseek.extractTemplateContent(prompt, userPrompt, budget, 'Text for the blocks', false, cancellation))
+  throwIfCancelled(cancellation)
 
   let parsed: Record<string, Object> = {}
   let ok = false

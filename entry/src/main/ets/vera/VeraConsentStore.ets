@@ -20,8 +20,8 @@
  * asks again.
  */
 
-import fs from '@ohos.file.fs'
-import hilog from '@ohos.hilog'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 
 const DOMAIN = 0x0000
 
@@ -68,13 +68,25 @@ export class ConsentStore {
     if (this.root.length === 0) { return }
     let obj: Record<string, Object> = {}
     this.granted.forEach((_value: boolean, key: string) => { obj[key] = true })
+    let file: fs.File | null = null;
+    let failed = false;
     try {
-      let file = fs.openSync(this.path(),
+      file = fs.openSync(this.path(),
         fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC)
       fs.writeSync(file.fd, JSON.stringify(obj))
-      fs.closeSync(file)
     } catch (e) {
+      failed = true
       hilog.warn(DOMAIN, 'VERA', 'VERA-CONSENT could not be saved: ' + (e as Error).message)
+    } finally {
+      if (file !== null) {
+        try {
+          fs.closeSync(file)
+        } catch (e) {
+          if (!failed) {
+            hilog.warn(DOMAIN, 'VERA', 'VERA-CONSENT could not be saved: ' + (e as Error).message)
+          }
+        }
+      }
     }
   }
 

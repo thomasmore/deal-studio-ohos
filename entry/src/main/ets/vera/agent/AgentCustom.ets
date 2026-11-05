@@ -10,6 +10,7 @@
  * one compiles and does nothing. Every target in what it writes is checked against those found before it is served.
  */
 
+import { OperationCancellation, throwIfCancelled } from '../OperationCancellation'
 import { FragmentSpec, StateFieldSpec } from '../VeraTemplates'
 import { compileVeraSource, CompileError } from '../VeraCompiler'
 import { smokeRun } from '../VeraSmoke'
@@ -316,7 +317,9 @@ function check(source: string, scene: boolean = false): string {
   }
 }
 
-export async function writeSection(request: CustomRequest, language: string, ask: CodeAsk): Promise<CustomResult> {
+export async function writeSection(request: CustomRequest, language: string, ask: CodeAsk,
+    cancellation?: OperationCancellation): Promise<CustomResult> {
+  throwIfCancelled(cancellation)
   let result = new CustomResult()
   let started = Date.now()
   let found = foundTargets(request.phone)
@@ -338,11 +341,14 @@ export async function writeSection(request: CustomRequest, language: string, ask
   let bestMissed: string[] = []
   // The first try and its repairs without thinking, then one more with it: slower, for what the quick tries got wrong.
   for (let attempt = 0; attempt <= REPAIRS + 1; attempt++) {
+    throwIfCancelled(cancellation)
     let think = attempt > REPAIRS
     result.attempts = attempt + 1
     result.thought = think
     let budget = request.whole ? SCREEN_TOKENS : (scene ? SCENE_TOKENS : SECTION_TOKENS)
+    throwIfCancelled(cancellation)
     let reply = await ask(system, user, think ? budget * THINKING_ROOM : budget, think)
+    throwIfCancelled(cancellation)
     if (reply === null) { result.failed = 'no answer for the custom section'; break }
     let cannot = between(reply, 'cannot')
     if (cannot !== null) { result.cannot = cannot; result.failed = 'custom section cannot: ' + cannot; break }
@@ -364,7 +370,9 @@ export async function writeSection(request: CustomRequest, language: string, ask
         let part = new CustomRequest()
         part.prompt = request.prompt
         part.needs = doing
+        throwIfCancelled(cancellation)
         unread = undone(part, await request.verify!(verifyRequest(part, reply)))
+        throwIfCancelled(cancellation)
       }
       let missed: string[] = unread.concat(request.needs.filter((n: string): boolean => declined.has(n)))
       if (unread.length === 0) {
@@ -388,7 +396,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
     }
     user = asked + '\n\nYour section was:\n' + reply + '\n\nIt failed:\n' + problem + '\n\nWrite the whole section again, fixed, in the same form.'
   }
-  // No try did everything, but one works and does part of it: that one is served, and what it misses is reported.
+  throwIfCancelled(cancellation)
   if (result.section === null && result.cannot.length === 0 && best !== null) {
     result.section = best
     result.missed = bestMissed

@@ -23,8 +23,8 @@
  * linear scan is the right call at this corpus size.
  */
 
-import resourceManager from '@ohos.resourceManager'
-import hilog from '@ohos.hilog'
+import { resourceManager } from '@kit.LocalizationKit'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 import { loadRawfileText } from './LlamaEngine'
 import { requestWords, describeParamHint } from './VeraIntentRegistry'
 import { identifierTokens, needWords } from './VeraSdkIndex'

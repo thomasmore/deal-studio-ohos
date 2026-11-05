@@ -8,21 +8,31 @@ import { requestHeadline, changeNote, versionCountText } from '../vera/ProjectTe
 import { projectOperations, ProjectOperationStatus, ProjectShortcutState } from '../vera/ProjectOperations'
 import { common } from '@kit.AbilityKit'
 import { app, PrimaryButton, TonalButton, QuietButton, DangerButton } from '../components/AppStyle'
+import { AppRouteParams, returnToLibrary } from '../vera/AppNavigation'
 
-class RunVersionParams {
-  projectId: string = ''
-  versionId: string = ''
-  vbc2: string = ''
+@CustomDialog
+struct ProjectPanelDialog {
+  controller?: CustomDialogController
+
+  @Builder
+  emptyContent() {}
+
+  @BuilderParam content: () => void = this.emptyContent
+
+  build() {
+    Column() {
+      this.content()
+    }
+    .width('100%')
+  }
 }
 
-class GenerateNavParams {
-  projectId: string = ''
-  baseVersionId: string = ''
-}
-
-@Entry
 @Component
-struct ProjectPage {
+export struct ProjectPage {
+  params: AppRouteParams = new AppRouteParams()
+
+  @Consume('navPathStack') pathStack: NavPathStack
+
   @State project: Project | null = null
   @State versions: Version[] = []
   @State projectId: string = ''
@@ -30,7 +40,7 @@ struct ProjectPage {
   @State shortcutOperation: string = ''
   @State shortcutState: ProjectShortcutState = ProjectShortcutState.Unknown
   private shortcutRefreshGeneration: number = 0
-  private pageVisible: boolean = true
+  private pageVisible: boolean = false
   private returningToIndex: boolean = false
   @State viewedSource: string = ''
   @State viewedVersionNumber: number = 0
@@ -39,29 +49,68 @@ struct ProjectPage {
   // Shown beside the source: the request a version came from is the thing you
   // actually need when deciding whether to refine it or start again.
   @State viewedPrompt: string = ''
-  @State renaming: boolean = false
   @State renameText: string = ''
-  /** The window of pictures, opened by a tap on the app's picture; a tap on one applies it. */
-  @State pickingIcon: boolean = false
+  private activePanel: string = ''
+
+  private sourceController: CustomDialogController = new CustomDialogController({
+    builder: ProjectPanelDialog({ content: this.sourceDialog }),
+    autoCancel: true,
+    isModal: true,
+    alignment: DialogAlignment.Center,
+    customStyle: true,
+    maskColor: '#50000000',
+    cancel: () => { this.clearPanels() }
+  })
+
+  private metricsController: CustomDialogController = new CustomDialogController({
+    builder: ProjectPanelDialog({ content: this.metricsDialog }),
+    autoCancel: true,
+    isModal: true,
+    alignment: DialogAlignment.Center,
+    customStyle: true,
+    maskColor: '#50000000',
+    cancel: () => { this.clearPanels() }
+  })
+
+  private renameController: CustomDialogController = new CustomDialogController({
+    builder: ProjectPanelDialog({ content: this.renameDialog }),
+    autoCancel: true,
+    isModal: true,
+    alignment: DialogAlignment.Center,
+    customStyle: true,
+    maskColor: '#50000000',
+    cancel: () => { this.clearPanels() }
+  })
+
+  private iconController: CustomDialogController = new CustomDialogController({
+    builder: ProjectPanelDialog({ content: this.iconDialog }),
+    autoCancel: true,
+    isModal: true,
+    alignment: DialogAlignment.Center,
+    customStyle: true,
+    maskColor: '#50000000',
+    cancel: () => { this.clearPanels() }
+  })
 
   aboutToAppear(): void {
-    this.pageVisible = true
-    let params = this.getUIContext().getRouter().getParams() as Record<string, string>
-    if (params !== null && params !== undefined) {
-      this.projectId = params['projectId'] || ''
-    }
+    this.projectId = this.params.projectId
   }
 
-  onPageShow(): void {
+  destinationShown(): void {
     this.pageVisible = true
     this.returningToIndex = false
     this.reload()
   }
 
-  onPageHide(): void {
+  destinationHidden(): void {
     this.pageVisible = false
+    this.closePanels()
     this.shortcutRefreshGeneration++
     this.shortcutState = ProjectShortcutState.Unknown
+  }
+
+  aboutToDisappear(): void {
+    this.destinationHidden()
   }
 
   private reload(): void {
@@ -79,9 +128,11 @@ struct ProjectPage {
 
   private returnToIndex(): void {
     if (!this.pageVisible || this.returningToIndex) { return }
+    const top = this.pathStack.size() - 1
+    if (top < 0 || this.pathStack.getParamByIndex(top) !== this.params) { return }
     try {
       this.returningToIndex = true
-      this.getUIContext().getRouter().back({ url: 'pages/Index' })
+      returnToLibrary(this.pathStack)
     } catch (e) {
       this.returningToIndex = false
       console.error('Return to projects failed: ' + (e as Error).message)
@@ -100,6 +151,29 @@ struct ProjectPage {
     this.shortcutState = state
   }
 
+  private clearPanels(): void {
+    this.activePanel = ''
+    this.viewedSource = ''
+    this.viewedPrompt = ''
+    this.viewedVersionNumber = 0
+    this.viewedMetricsVersion = null
+    this.viewedMetricsNumber = 0
+  }
+
+  private closePanels(): void {
+    this.sourceController.close()
+    this.metricsController.close()
+    this.renameController.close()
+    this.iconController.close()
+    this.clearPanels()
+  }
+
+  private handleBack(): boolean {
+    if (this.activePanel.length === 0) { return false }
+    this.closePanels()
+    return true
+  }
+
   private shortcutButtonLabel(): string {
     if (this.shortcutOperation === 'add') { return 'Adding…' }
     if (this.shortcutOperation === 'remove') { return 'Removing…' }
@@ -109,9 +183,18 @@ struct ProjectPage {
   }
 
   build() {
-    // The overlays are siblings of the page, not children of its content: their dimming then covers the title bar too.
-    Stack() {
-    Navigation() {
+    NavDestination() {
+      this.pageContent()
+    }
+    .title(this.project !== null ? this.project!.name : 'Project')
+    .backgroundColor(app.background)
+    .onBackPressed((): boolean => this.handleBack())
+    .onShown(() => { this.destinationShown() })
+    .onHidden(() => { this.destinationHidden() })
+  }
+
+  @LocalBuilder
+  pageContent() {
       Column() {
         if (this.project !== null) {
           Row() {
@@ -122,14 +205,14 @@ struct ProjectPage {
               this.pencilBadge()
             }
             .margin({ right: 16 })
-            .onClick(() => { this.pickingIcon = true })
+            .onClick(() => { this.openIconPicker() })
             Column() {
               Row({ space: 6 }) {
                 Text(this.project!.name).fontSize(22).fontWeight(FontWeight.Bold)
                   .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).flexShrink(1)
                 SymbolGlyph($r('sys.symbol.pencil_tip')).fontSize(16).fontColor([app.inkMuted])
               }
-              .onClick(() => { this.renameText = this.project!.name; this.renaming = true })
+              .onClick(() => { this.openRename() })
               Text(versionCountText(this.versions.length))
                 .fontSize(14).fontColor(app.inkMuted).margin({ top: 4 })
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
@@ -156,6 +239,7 @@ struct ProjectPage {
               .bindMenu([
                 { value: this.shortcutButtonLabel(), action: () => { this.onShortcutMenu() },
                   enabled: this.shortcutMenuEnabled() },
+                { value: 'Rename', action: () => { this.openRename() } },
                 { value: 'Delete project', action: () => { this.askDeleteProject() } }
               ])
           }
@@ -256,29 +340,9 @@ struct ProjectPage {
         }
 
       }.width('100%').height('100%')
-    }
-    .title(this.project !== null ? this.project!.name : 'Project')
-    .titleMode(NavigationTitleMode.Mini)
-    .backgroundColor(app.background)
-
-    if (this.viewedSource.length > 0) {
-      this.sourceOverlay()
-    }
-    if (this.viewedMetricsVersion !== null) {
-      this.metricsOverlay()
-    }
-    if (this.renaming) {
-      this.renameOverlay()
-    }
-    if (this.pickingIcon) {
-      this.iconOverlay()
-    }
-    }
-    .width('100%')
-    .height('100%')
   }
 
-  @Builder
+  @LocalBuilder
   deleteVersionAction(v: Version) {
     Row() {
       Button('Delete')
@@ -361,31 +425,48 @@ struct ProjectPage {
 
   private runVersion(v: Version): void {
     if (v.vbc2.length === 0) { return }
-    let p = new RunVersionParams()
+    let p = new AppRouteParams()
     p.projectId = v.projectId
     p.versionId = v.id
     p.vbc2 = v.vbc2
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/RunnerPage', params: p })
-      .catch((e: Error): void => { console.error('Navigate to runner failed: ' + e.message) })
+    this.pathStack.pushPath({ name: 'runner', param: p })
   }
 
   private openGenerate(baseVersionId: string): void {
-    let p = new GenerateNavParams()
+    let p = new AppRouteParams()
     p.projectId = this.projectId
     p.baseVersionId = baseVersionId
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/GeneratePage', params: p })
-      .catch((e: Error): void => { console.error('Navigate to generation failed: ' + e.message) })
+    this.pathStack.pushPath({ name: 'generate', param: p })
   }
 
   private viewSource(v: Version, versionNumber: number): void {
+    if (!this.pageVisible || this.activePanel.length > 0) { return }
     this.viewedVersionNumber = versionNumber
     this.viewedSource = v.source
     this.viewedPrompt = v.prompt
+    this.activePanel = 'source'
+    this.sourceController.open()
   }
 
   private viewMetrics(v: Version, versionNumber: number): void {
+    if (!this.pageVisible || this.activePanel.length > 0) { return }
     this.viewedMetricsNumber = versionNumber
     this.viewedMetricsVersion = v
+    this.activePanel = 'metrics'
+    this.metricsController.open()
+  }
+
+  private openRename(): void {
+    if (!this.pageVisible || this.project === null || this.activePanel.length > 0) { return }
+    this.renameText = this.project!.name
+    this.activePanel = 'rename'
+    this.renameController.open()
+  }
+
+  private openIconPicker(): void {
+    if (!this.pageVisible || this.project === null || this.activePanel.length > 0) { return }
+    this.activePanel = 'icon'
+    this.iconController.open()
   }
 
   private metricCount(value: number): string {
@@ -397,7 +478,7 @@ struct ProjectPage {
     return value < 1000 ? value.toString() + ' ms' : (value / 1000).toFixed(1) + ' s'
   }
 
-  @Builder
+  @LocalBuilder
   metricCell(label: string, value: string, note: string) {
     Column() {
       Column({ space: 2 }) {
@@ -416,7 +497,7 @@ struct ProjectPage {
     .borderRadius(8)
   }
 
-  @Builder
+  @LocalBuilder
   metricSection(title: string, badge: string, color: string) {
     Column({ space: 6 }) {
       Row({ space: 8 }) {
@@ -434,7 +515,7 @@ struct ProjectPage {
     .padding({ top: 6 })
   }
 
-  @Builder
+  @LocalBuilder
   metricsDashboard(metrics: VersionMetrics) {
     Column({ space: 10 }) {
       Column({ space: 4 }) {
@@ -490,10 +571,9 @@ struct ProjectPage {
     .alignItems(HorizontalAlign.Start)
   }
 
-  @Builder
-  metricsOverlay() {
+  @LocalBuilder
+  metricsDialog() {
     if (this.viewedMetricsVersion !== null) {
-      Column() {
       Column() {
         Row() {
           Text('Version ' + this.viewedMetricsNumber.toString() + ' · Metrics')
@@ -503,7 +583,7 @@ struct ProjectPage {
             .attributeModifier(new QuietButton())
             .height(36)
             .fontSize(13)
-            .onClick(() => { this.viewedMetricsVersion = null; this.viewedMetricsNumber = 0 })
+            .onClick(() => { this.closePanels() })
         }
         .width('100%')
         .margin({ bottom: 10 })
@@ -542,14 +622,6 @@ struct ProjectPage {
       .backgroundColor(app.surface)
       .borderRadius(14)
       .shadow({ radius: 10, color: '#40000000' })
-      // A tap inside the card is the card's, not a tap on the dimming behind it.
-      .onClick(() => {})
-      }
-      .width('100%')
-      .height('100%')
-      .justifyContent(FlexAlign.Center)
-      .backgroundColor('#50000000')
-      .onClick(() => { this.viewedMetricsVersion = null; this.viewedMetricsNumber = 0 })
     }
   }
 
@@ -587,10 +659,8 @@ struct ProjectPage {
     }
   }
 
-  @Builder
-  sourceOverlay() {
-    if (this.viewedSource.length > 0) {
-      Column() {
+  @LocalBuilder
+  sourceDialog() {
       Column() {
         Row() {
           Text('Version ' + this.viewedVersionNumber.toString() + ' \u00B7 Code').fontSize(18).fontWeight(FontWeight.Bold)
@@ -605,7 +675,7 @@ struct ProjectPage {
             .attributeModifier(new QuietButton())
             .height(36)
             .fontSize(13)
-            .onClick(() => { this.viewedSource = ''; this.viewedPrompt = ''; this.viewedVersionNumber = 0 })
+            .onClick(() => { this.closePanels() })
         }
         .width('100%')
         .margin({ bottom: 10 })
@@ -650,19 +720,10 @@ struct ProjectPage {
       .backgroundColor(app.surface)
       .borderRadius(14)
       .shadow({ radius: 10, color: '#40000000' })
-      .onClick(() => {})
-      }
-      .width('100%')
-      .height('100%')
-      .justifyContent(FlexAlign.Center)
-      .backgroundColor('#50000000')
-      .onClick(() => { this.viewedSource = ''; this.viewedPrompt = ''; this.viewedVersionNumber = 0 })
-    }
   }
 
-  @Builder
-  renameOverlay() {
-    Column() {
+  @LocalBuilder
+  renameDialog() {
       Column() {
         Text('Rename').fontSize(20).fontWeight(FontWeight.Bold).margin({ bottom: 16 }).width('100%')
         TextInput({ placeholder: 'Project name', text: this.renameText })
@@ -675,7 +736,7 @@ struct ProjectPage {
           Button('Cancel')
             .attributeModifier(new QuietButton())
             .layoutWeight(1)
-            .onClick(() => { this.renaming = false })
+            .onClick(() => { this.closePanels() })
           Button('Save')
             .attributeModifier(new PrimaryButton())
             .layoutWeight(1)
@@ -690,27 +751,29 @@ struct ProjectPage {
       .backgroundColor(app.surface)
       .borderRadius(16)
       .shadow({ radius: 8, color: '#30000000' })
-      .onClick(() => {})
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor('#50000000')
-    .onClick(() => { this.renaming = false })
   }
 
   /** A picture was chosen: it applies at once and the window closes. */
-  private setIcon(icon: string): void {
+  private async setIcon(icon: string): Promise<void> {
     if (this.project === null) { return }
-    this.pickingIcon = false
+    this.closePanels()
     if (icon === this.project!.icon) { return }
     store.updateProject(this.projectId, this.project!.name, icon)
     this.reload()
     refreshForms()
+
+
+    if (this.project !== null && this.versions.length >= 0) {
+      let context = (): common.UIAbilityContext => this.getUIContext().getHostContext() as common.UIAbilityContext
+      const status = await projectOperations.renameShortcut(context, this.projectId)
+      if (status === ProjectOperationStatus.Failed) {
+        this.showProjectMessage('Renamed, but the shortcut on the home screen may still show the old icon. Remove and re-add it to update.')
+      }
+    }
   }
 
   /** A small pencil on a corner of the picture. */
-  @Builder
+  @LocalBuilder
   pencilBadge() {
     Column() {
       SymbolGlyph($r('sys.symbol.pencil_tip')).fontSize(12).fontColor([app.primaryInk])
@@ -722,34 +785,34 @@ struct ProjectPage {
     .shadow({ radius: 2, color: '#30000000', offsetY: 1 })
   }
 
-  @Builder
-  iconOverlay() {
+  @LocalBuilder
+  iconDialog() {
     Column() {
-      Column() {
-        Text('Picture').fontSize(20).fontWeight(FontWeight.Bold).margin({ bottom: 12 }).width('100%')
-        IconPicker({ selected: this.project !== null ? this.project!.icon : '', onPick: (icon: string): void => { this.setIcon(icon) } })
-      }
-      .width('90%')
-      .padding(24)
-      .backgroundColor(app.surface)
-      .borderRadius(16)
-      .shadow({ radius: 8, color: '#30000000' })
-      .onClick(() => {})
+      Text('Picture').fontSize(20).fontWeight(FontWeight.Bold).margin({ bottom: 12 }).width('100%')
+      IconPicker({ selected: this.project !== null ? this.project!.icon : '', onPick: (icon: string): void => { this.setIcon(icon) } })
     }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor('#50000000')
-    .onClick(() => { this.pickingIcon = false })
+    .width('90%')
+    .padding(24)
+    .backgroundColor(app.surface)
+    .borderRadius(16)
+    .shadow({ radius: 8, color: '#30000000' })
   }
 
-  private doRename(): void {
+  private async doRename(): Promise<void> {
     let name = this.renameText.trim()
     if (name.length === 0 || this.project === null) { return }
     store.updateProject(this.projectId, name, this.project!.icon)
-    this.renaming = false
+    this.closePanels()
     this.reload()
     refreshForms()
+
+    if (this.project !== null && this.versions.length >= 0) {
+      let context = (): common.UIAbilityContext => this.getUIContext().getHostContext() as common.UIAbilityContext
+      const status = await projectOperations.renameShortcut(context, this.projectId)
+      if (status === ProjectOperationStatus.Failed) {
+        this.showProjectMessage('Renamed, but the shortcut on the home screen may still show the old name. Remove and re-add it to update.')
+      }
+    }
   }
 
   /** A shortcut can be added only to something that runs; one that exists can always be removed. */

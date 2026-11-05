@@ -3,12 +3,15 @@ import { versionCountText } from '../vera/ProjectText'
 import { SymbolGlyphModifier } from '@kit.ArkUI'
 import { projectIconResource } from '../vera/ProjectIcons'
 import { app, DangerButton } from '../components/AppStyle'
-import { ProjectNavParams, ProjectRow, RowSource, loadProjectRows, confirmDeleteProject, tileTint } from '../components/ProjectRows'
+import { ProjectRow, RowSource, loadProjectRows, confirmDeleteProject, tileTint } from '../components/ProjectRows'
+import { AppRouteParams } from '../vera/AppNavigation'
 
 /** Every app made so far, one row each. Swipe or long press to delete. */
-@Entry
 @Component
-struct AppsPage {
+export struct AppsPage {
+  params: AppRouteParams = new AppRouteParams()
+  @Consume('navPathStack') pathStack: NavPathStack
+
   @State projects: ProjectRow[] = []
   private source: RowSource = new RowSource()
 
@@ -19,7 +22,7 @@ struct AppsPage {
     this.reload()
   }
 
-  onPageShow(): void {
+  destinationShown(): void {
     this.reload()
   }
 
@@ -29,7 +32,7 @@ struct AppsPage {
   }
 
   build() {
-    Navigation() {
+    NavDestination() {
       List({ space: 12 }) {
         LazyForEach(this.source, (row: ProjectRow) => {
           ListItem() {
@@ -49,8 +52,8 @@ struct AppsPage {
       .scrollBar(BarState.Off)
     }
     .title('My apps (' + this.projects.length.toString() + ')')
-    .titleMode(NavigationTitleMode.Mini)
     .backgroundColor(app.background)
+    .onShown(() => { this.destinationShown() })
   }
 
   /** One project: its icon, what it is (the request it began as), how much work is in it, and when it was last worked on. */
@@ -85,12 +88,11 @@ struct AppsPage {
     .clip(true)
     .shadow({ radius: 2, color: '#10000000', offsetY: 1 })
     .onClick(() => {
-      let nav = new ProjectNavParams()
+      let nav = new AppRouteParams()
       nav.projectId = row.project.id
-      this.getUIContext().getRouter().pushUrl({ url: 'pages/ProjectPage', params: nav })
-        .catch((e: Error): void => { console.error('Navigate to project failed: ' + e.message) })
+      this.pathStack.pushPath({ name: 'project', param: nav })
     })
-    .bindContextMenu(this.rowMenu(row.project.id), ResponseType.LongPress)
+    .bindContextMenu(() => { this.rowMenu(row.project.id) }, ResponseType.LongPress)
   }
 
   @Builder
