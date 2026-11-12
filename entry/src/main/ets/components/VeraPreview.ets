@@ -37,6 +37,7 @@ import { decodeScene, sceneEventValue } from '../vera/VeraScene'
 import { worldBackgroundRgba, isDarkRgba } from '../vera/VeraLook3D'
 import { WorldBox, WorldPick, WorldGesture, playerOf } from './VeraWorld3D'
 import { SimEvent } from '../vera/VeraPhysics'
+import { StageTrace } from '../runtime/trace/StageTrace'
 
 /**
  * The rotation of every spinning shape on screen.
@@ -97,6 +98,7 @@ class FieldInput {
 }
 
 class FieldAction {
+  traceKind: string = 'HANDLER'
   action: string
   payload: RuntimeValue
   generation: number
@@ -329,7 +331,9 @@ export struct VeraPreview {
     // The saved state is taken only when another process -- a home-screen card -- changed it while the app was away. Else
     // the state in memory stays: it may hold what could not be saved, or an answer that arrived around the resume.
     let keys = this.stateKeys()
-    if (keys.length > 0 && store.loadState(keys[0], keys[1], this.stamp()) !== this.diskState) {
+    let changed = keys.length > 0 && store.loadState(keys[0], keys[1], this.stamp()) !== this.diskState
+    StageTrace.emit(this, 'RESUME_STATE_RELOAD', { changed: changed })
+    if (changed) {
       let restored = this.restoreState()
       if (restored !== null) { this.currentState = restored }
     }
@@ -353,6 +357,7 @@ export struct VeraPreview {
     if (!this.refreshes || this.disposed || this.previewOnly || this.vm === null || this.currentState === null) { return }
     try {
       if (this.host !== null) { this.host!.effectsAllowed = true }
+      StageTrace.emit(this, 'EXECUTE', { entry: 'widgetRefresh', kind: 'WIDGET_REFRESH' })
       this.currentState = this.vm!.execute('widgetRefresh', [this.currentState!])
       if (this.host !== null) { this.host!.effectsAllowed = false }
       this.notifyStateSnapshot()
@@ -360,6 +365,7 @@ export struct VeraPreview {
       this.persistState()
       this.drainEffects()
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'WIDGET_REFRESH' })
       if (this.host !== null) {
         this.host!.effectsAllowed = false
         this.host!.pendingEffects = []
@@ -664,6 +670,7 @@ export struct VeraPreview {
       })
       this.darkListener = listener
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'DARK_MODE' })
       this.dark = false
       console.info('VERA-RENDER dark mode unavailable: ' + (e as Error).message)
     }
@@ -701,11 +708,15 @@ export struct VeraPreview {
       this.vm = new VirtualMachine(module, this.host)
       this.refreshes = module.functions.some((fn): boolean => fn.name === 'widgetRefresh')
       this.currentState = this.restoreState()
-      if (this.currentState === null) { this.currentState = this.seeded(this.vm!.execute('init')) }
+      if (this.currentState === null) {
+        StageTrace.emit(this, 'EXECUTE', { entry: 'init', kind: 'INIT' })
+        this.currentState = this.seeded(this.vm!.execute('init'))
+      }
       this.notifyStateSnapshot()
       this.renderView()
       this.runWidgetRefresh()
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'INIT' })
       this.error = 'Init error: ' + (e as Error).message
     }
   }
@@ -946,16 +957,25 @@ export struct VeraPreview {
       // re-enter the VM with a half-applied state.
       // In the background the tick is skipped, not stopped: the time it last fired is kept, so the first tick after
       // resume carries the whole gap, and the app does not write state while a card may be changing it.
-      if (this.ticking || this.appForeground === false) { return }
+      if (this.ticking || this.appForeground === false) {
+        if (!this.ticking) { StageTrace.emit(this, 'TICK_SKIPPED', { tickerId: id, reason: 'BACKGROUND' }) }
+        return
+      }
       let current = this.timerConfigs.get(id)
       if (current === undefined) { return }
       // Do not queue a tick while an IME composition is active: keep its elapsed time for the next deliverable tick.
       for (let edit of this.fieldEdits.values()) {
-        if (edit.composing) { return }
+        if (edit.composing) {
+          StageTrace.emit(this, 'TICK_SKIPPED', { tickerId: id, reason: 'COMPOSING' })
+          return
+        }
       }
       // Fast tickers are frame-like. Let the 400-ms field debounce finish rather than committing on every tick;
       // timerLastFire stays unchanged, so the next delivered tick carries the elapsed time accumulated while typing.
-      if (current.interval < SLOW_TICK_MS && this.fieldEdits.size > 0) { return }
+      if (current.interval < SLOW_TICK_MS && this.fieldEdits.size > 0) {
+        StageTrace.emit(this, 'TICK_SKIPPED', { tickerId: id, reason: 'PENDING_EDIT' })
+        return
+      }
       let last = this.timerLastFire.get(id)
       let now = Date.now()
       let elapsed = last !== undefined ? now - (last as number) : safe
@@ -963,10 +983,12 @@ export struct VeraPreview {
       this.ticking = true
       try {
         let payload = new VeraNumberValue(Math.round(elapsed))
+        StageTrace.emit(this, 'TICK_DELIVERED', { tickerId: id, action: current.action,
+          class: current.interval >= SLOW_TICK_MS ? 'slow' : 'fast' })
         if (current.interval >= SLOW_TICK_MS) {
-          this.dispatchFieldAction(current.action, payload)
+          this.dispatchFieldAction(current.action, payload, true, null, 'TICK')
         } else {
-          this.dispatch(current.action, payload)
+          this.dispatch(current.action, payload, true, 'TICK')
         }
       } finally {
         this.ticking = false
@@ -983,7 +1005,8 @@ export struct VeraPreview {
     this.timerLastFire.delete(id)
   }
 
-  private stopAllTimers(): void {
+  private stopAllTimers(reason: string = 'RELEASE'): void {
+    StageTrace.emit(this, 'TIMERS_STOPPED', { reason: reason })
     this.stopSurfaceLoop()
     for (let id of Array.from(this.timers.keys())) { this.stopTimer(id) }
     if (this.spinTimer >= 0) { clearInterval(this.spinTimer); this.spinTimer = -1 }
@@ -1000,7 +1023,7 @@ export struct VeraPreview {
     // Without this the tickers -- and the VM they drive -- outlive the screen.
     this.disposed = true
     this.invalidateEffects()
-    this.stopAllTimers()
+    this.stopAllTimers('DISAPPEAR')
     // Each world's scene goes once its Component3D has (WorldBox.retire).
     this.retireWorlds()
     // A running surface saves every few seconds, and a world's knocks with the next event; what came since the last save
@@ -1012,6 +1035,7 @@ export struct VeraPreview {
       try {
         this.darkListener!.off('change')
       } catch (e) {
+        StageTrace.emit(this, 'ERROR', { kind: 'DARK_LISTENER' })
         console.info('VERA-RENDER dark listener off failed: ' + (e as Error).message)
       }
       this.darkListener = null
@@ -1041,10 +1065,12 @@ export struct VeraPreview {
       let carried = carryState(fresh, decodeRuntimeValue(JSON.parse(this.seedState) as Object), this.vm!.classShapes())
       if (this.host !== null) { this.host!.effectsAllowed = false }
       // An entry of an old class may lack a field the new code reads: a view that fails on it means starting clean.
+      StageTrace.emit(this, 'EXECUTE', { entry: 'view', kind: 'VIEW' })
       this.vm!.execute('view', [carried])
       console.info('VERA-STATE carried into the refined program')
       return carried
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'STATE_CARRY' })
       console.warn('VERA-STATE could not carry the old state, starting clean: ' + (e as Error).message)
       return fresh
     }
@@ -1059,6 +1085,7 @@ export struct VeraPreview {
     try {
       return decodeRuntimeValue(JSON.parse(encoded) as Object)
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'RESTORE' })
       console.error('VERA-STATE restore failed, starting clean: ' + (e as Error).message)
       return null
     }
@@ -1067,8 +1094,11 @@ export struct VeraPreview {
   private notifyStateSnapshot(): void {
     if (this.currentState === null || this.previewOnly) { return }
     try {
-      this.onStateSnapshot(JSON.stringify(encodeRuntimeValue(this.currentState!)))
+      let encoded = JSON.stringify(encodeRuntimeValue(this.currentState!))
+      StageTrace.snapshot(this, encoded)
+      this.onStateSnapshot(encoded)
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'SNAPSHOT' })
       console.warn('VERA-STATE snapshot unavailable: ' + (e as Error).message)
     }
   }
@@ -1076,20 +1106,24 @@ export struct VeraPreview {
   private persistState(): void {
     let keys = this.stateKeys()
     if (keys.length === 0 || this.currentState === null) { return }
+    let encoded = ''
     try {
-      let encoded = JSON.stringify(encodeRuntimeValue(this.currentState!))
+      encoded = JSON.stringify(encodeRuntimeValue(this.currentState!))
       store.saveState(keys[0], keys[1], this.stamp(), encoded)
       this.diskState = encoded
       this.worldUnsaved = false
       scheduleCardRefresh(keys[0])
+      if (StageTrace.enabled()) { StageTrace.emit(this, 'SAVE', { digest: StageTrace.digest(encoded), result: 'OK' }) }
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'SAVE' })
+      if (StageTrace.enabled()) { StageTrace.emit(this, 'SAVE', { digest: StageTrace.digest(encoded), result: 'ERROR' }) }
       // A program holding something unsaveable should still run; it just will
       // not remember. Saying so beats a silent half-working save.
       console.error('VERA-STATE save failed: ' + (e as Error).message)
     }
   }
 
-  private renderView(paint: boolean = true): void {
+  private renderView(paint: boolean = true, reveal: boolean = false): void {
     if (this.vm === null || this.currentState === null) { return }
     this.lastViewAt = Date.now()
     this.renderingDepth++
@@ -1099,6 +1133,7 @@ export struct VeraPreview {
       // start navigation on every repaint. The host refuses one while this is
       // false; only dispatch lifts it, and only around the handler itself.
       if (this.host !== null) { this.host!.effectsAllowed = false }
+      StageTrace.emit(this, 'EXECUTE', { entry: 'view', kind: 'VIEW' })
       let viewTree = this.vm!.execute('view', [this.currentState!])
       let nodes = decodeVeraUi(viewTree)
       let root = nodes.length > 0 ? nodes[0] : null
@@ -1132,8 +1167,10 @@ export struct VeraPreview {
       this.reconcileMotion()
       this.reconcileBackHandler(root)
       this.reconcileSurfaces(paint)
+      StageTrace.frame(this, root, reveal)
       rendered = true
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'VIEW' })
       this.error = 'View error: ' + (e as Error).message
     } finally {
       this.renderingDepth--
@@ -1401,6 +1438,7 @@ export struct VeraPreview {
       sync.start()
       this.surfaceSync = sync
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'SURFACE_LOOP' })
       console.warn('VERA-SURFACE no display sync, using an interval: ' + (e as Error).message)
       this.surfaceTimer = setInterval(() => { this.surfaceFrame() }, 16)
     }
@@ -1413,6 +1451,7 @@ export struct VeraPreview {
         this.surfaceSync!.stop()
         this.surfaceSync!.off('frame')
       } catch (e) {
+        StageTrace.emit(this, 'ERROR', { kind: 'SURFACE_LOOP_STOP' })
         console.warn('VERA-SURFACE stopping display sync failed: ' + (e as Error).message)
       }
       this.surfaceSync = null
@@ -1426,10 +1465,16 @@ export struct VeraPreview {
    * does, rather than trapping again sixty times a second.
    */
   private surfaceFrame(): void {
-    if (this.disposed || this.pageHidden || this.framing || this.vm === null || this.currentState === null) { return }
+    if (this.disposed || this.pageHidden || this.framing || this.vm === null || this.currentState === null) {
+      if (!this.disposed && this.pageHidden) { StageTrace.emit(this, 'SURFACE_SKIPPED', { reason: 'PAGE_HIDDEN' }) }
+      return
+    }
     // Do not advance the VM while an IME composition is in progress; resume with a bounded elapsed value afterward.
     for (let edit of this.fieldEdits.values()) {
-      if (edit.composing) { return }
+      if (edit.composing) {
+        StageTrace.emit(this, 'SURFACE_SKIPPED', { reason: 'COMPOSING' })
+        return
+      }
     }
     let now = Date.now()
     let elapsed = this.lastFrameAt > 0 ? Math.min(SURFACE_MAX_ELAPSED_MS, Math.max(0, now - this.lastFrameAt)) : 16
@@ -1449,6 +1494,9 @@ export struct VeraPreview {
       return
     }
     this.framing = true
+    let tracing = StageTrace.enabled()
+    let actions: string[] | null = tracing ? [] : null
+    let draws: string[] | null = tracing ? [] : null
     try {
       // Frames run at display cadence and intentionally use the last committed VM state: flushing debounced text here
       // would turn every frame into a field commit. The periodic save below waits until no text draft is pending.
@@ -1457,12 +1505,14 @@ export struct VeraPreview {
       if (this.host !== null) { this.host!.effectsAllowed = true }
       for (let node of this.liveSurfaces) {
         if (node.action.length === 0) { continue }
+        if (actions !== null) { actions!.push(node.action) }
+        StageTrace.emit(this, 'EXECUTE', { entry: node.action, kind: 'FRAME' })
         this.currentState = this.vm!.execute(node.action, [this.currentState!, new VeraNumberValue(elapsed)])
       }
       if (this.host !== null) { this.host!.effectsAllowed = false }
       this.drainEffects()
       this.frameSplit[0] += Date.now() - now
-      this.paintSurfaces()
+      this.paintSurfaces(draws)
       this.tickWorlds(now, elapsed)
       if (now - this.lastViewAt >= SURFACE_VIEW_MS) {
         let viewAt = Date.now()
@@ -1472,12 +1522,18 @@ export struct VeraPreview {
       this.countFrame(now, Date.now() - now)
       // Surface frames are high-frequency and intentionally do not flush debounced text edits. Defer the periodic
       // snapshot/save while a draft is pending; the field commit will persist the resulting state after it is delivered.
+      let save = 'NOT_DUE'
       if (now - this.lastSurfaceSave >= SURFACE_SAVE_MS && this.fieldEdits.size === 0) {
         this.lastSurfaceSave = now
         this.persistState()
         this.notifyStateSnapshot()
+        save = 'DONE'
+      } else if (tracing && now - this.lastSurfaceSave >= SURFACE_SAVE_MS) {
+        save = 'DEFERRED'
       }
+      if (tracing) { StageTrace.emit(this, 'SURFACE_FRAME', { actions: actions!, draws: draws!, save: save }) }
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'FRAME' })
       if (this.host !== null) {
         this.host!.effectsAllowed = false
         // What a frame that trapped half-way asked for is not done, as for a handler that traps.
@@ -1485,7 +1541,7 @@ export struct VeraPreview {
       }
       console.error('VERA-SURFACE frame TRAP err=' + (e as Error).message)
       this.error = 'Frame error: ' + (e as Error).message
-      this.stopAllTimers()
+      this.stopAllTimers('TRAP')
     } finally {
       this.framing = false
     }
@@ -1513,28 +1569,33 @@ export struct VeraPreview {
     this.frameWorst = 0
   }
 
-  private paintSurfaces(): void {
-    for (let node of this.liveSurfaces) { this.paintSurface(node) }
+  private paintSurfaces(draws: string[] | null = null): void {
+    for (let node of this.liveSurfaces) { this.paintSurface(node, draws) }
   }
 
   /** Ask the program what this surface shows now and paint it; nothing until its canvas is ready and has a size. */
-  private paintSurface(node: LiveNode): void {
+  private paintSurface(node: LiveNode, draws: string[] | null = null): void {
     let box = this.surfaces.get(node)
     if (box === undefined || !box.ready || !box.visible || box.width <= 0 || box.height <= 0) { return }
     if (this.vm === null || this.currentState === null || node.label.length === 0) { return }
     try {
       if (this.host !== null) { this.host!.effectsAllowed = false }
       let drawAt = Date.now()
+      if (draws !== null) { draws!.push(node.label) }
+      StageTrace.emit(this, 'EXECUTE', { entry: node.label, kind: 'DRAW' })
       let ops = decodeGfx(this.vm!.execute(node.label, [this.currentState!]))
       let paintAt = Date.now()
       paintGfx(box.ctx, ops, this.t(), box.width, box.height, node.minimum, node.maximum, this.getUIContext().vp2px(1), node.style === 'clear',
         false, this.partPoses(box, ops, paintAt), paintAt)
       this.frameSplit[1] += paintAt - drawAt
       this.frameSplit[2] += Date.now() - paintAt
+      StageTrace.emit(this, 'DRAW', { nodeId: this.liveSurfaces.indexOf(node), result: 'OK' })
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'DRAW' })
+      StageTrace.emit(this, 'DRAW', { nodeId: this.liveSurfaces.indexOf(node), result: 'ERROR' })
       console.error('VERA-SURFACE draw TRAP err=' + (e as Error).message)
       this.error = 'Draw error: ' + (e as Error).message
-      this.stopAllTimers()
+      this.stopAllTimers('TRAP')
     }
   }
 
@@ -2033,8 +2094,10 @@ export struct VeraPreview {
     try {
       // A finger moving is the person's input, as its down and up are.
       if (this.host !== null) { this.host!.effectsAllowed = true }
+      StageTrace.emit(this, 'EXECUTE', { entry: action, kind: 'MOVE' })
       this.currentState = this.vm!.execute(action, [this.currentState!, value])
       if (this.host !== null) { this.host!.effectsAllowed = false }
+      StageTrace.emit(this, 'INPUT_APPLIED', { action: action })
       this.drainEffects()
       // The frame loop paints and refreshes the tree itself; without one, this move is the frame.
       if (this.surfaceSync === null && this.surfaceTimer < 0) {
@@ -2042,13 +2105,14 @@ export struct VeraPreview {
         if (Date.now() - this.lastViewAt >= SURFACE_VIEW_MS) { this.renderView(false) }
       }
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: 'MOVE' })
       if (this.host !== null) {
         this.host!.effectsAllowed = false
         this.host!.pendingEffects = []
       }
       console.error('VERA-SURFACE ' + action + ' TRAP err=' + (e as Error).message)
       this.error = 'Action error: ' + (e as Error).message
-      this.stopAllTimers()
+      this.stopAllTimers('TRAP')
     }
   }
 
@@ -2099,7 +2163,7 @@ export struct VeraPreview {
    * edits before they dispatch.
    */
   private handleStringAction(action: string, value: string): void {
-    this.dispatch(action, new VeraStringValue(value))
+    this.dispatch(action, new VeraStringValue(value), true, 'FIELD')
   }
 
   private handleBoolAction(action: string, value: boolean, node: LiveNode | null = null): void {
@@ -2151,9 +2215,15 @@ export struct VeraPreview {
   }
 
   private fieldActionCurrent(next: FieldAction): boolean {
-    if (next.generation !== this.effectGeneration || this.disposed || this.previewOnly) { return false }
+    if (next.generation !== this.effectGeneration || this.disposed || this.previewOnly) {
+      StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: next.action, reason: 'effectGeneration' })
+      return false
+    }
     for (let i = 0; i < next.dependencies.length; i++) {
-      if (next.dependencies[i].fieldCancellation !== next.dependencyCancellations[i]) { return false }
+      if (next.dependencies[i].fieldCancellation !== next.dependencyCancellations[i]) {
+        StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: next.action, reason: 'fieldCancellation' })
+        return false
+      }
     }
     if (next.node === null) { return true }
     let node = next.node!
@@ -2161,15 +2231,19 @@ export struct VeraPreview {
       let input = next.surfaceInput!
       let inputs = this.surfaceInputs.get(node)
       let box = this.surfaces.get(node)
-      return this.liveRoot !== null && this.isLiveNode(node) && node.kind === 'surface' &&
+      let current = this.liveRoot !== null && this.isLiveNode(node) && node.kind === 'surface' &&
         node.value === next.action && node.fieldGeneration === input.nodeGeneration &&
         input.generation === this.effectGeneration && inputs !== undefined &&
         inputs.get(next.surfaceId) === input && input.ended &&
         box !== undefined && box.width > 0 && box.height > 0
+      if (!current) { StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: next.action, reason: 'nodeState' }) }
+      return current
     }
-    return this.liveRoot !== null && this.isLiveNode(node) &&
+    let current = this.liveRoot !== null && this.isLiveNode(node) &&
       node.kind === next.nodeKind && node.enabled && node.action === next.action &&
       node.fieldGeneration === next.nodeGeneration && this.fieldActionState(node) === next.nodeState
+    if (!current) { StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: next.action, reason: 'nodeState' }) }
+    return current
   }
 
   private releaseSurfaceAction(next: FieldAction): void {
@@ -2211,9 +2285,11 @@ export struct VeraPreview {
   }
 
   private dispatchFieldAction(action: string, payload: RuntimeValue,
-    persist: boolean = true, node: LiveNode | null = null): void {
+    persist: boolean = true, node: LiveNode | null = null, traceKind: string = 'HANDLER'): void {
     if (this.disposed || this.previewOnly) { return }
-    this.enqueueFieldAction(this.captureFieldAction(action, payload, persist, node))
+    let next = this.captureFieldAction(action, payload, persist, node)
+    next.traceKind = traceKind
+    this.enqueueFieldAction(next)
   }
 
   private enqueueFieldAction(next: FieldAction): void {
@@ -2229,10 +2305,12 @@ export struct VeraPreview {
     if (node !== null && node!.kind === 'slider' && last !== undefined && last.node === node &&
         last.action === action && last.generation === next.generation &&
         last.nodeGeneration === next.nodeGeneration && last.nodeState === next.nodeState && !last.persist) {
+      StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: last.action, reason: 'nodeState' })
       this.fieldActions[this.fieldActions.length - 1] = next
     } else {
       this.fieldActions.push(next)
     }
+    StageTrace.emit(this, 'FIELD_ACTION_ENQUEUE', { action: next.action })
     this.resumeFieldActions()
   }
 
@@ -2259,7 +2337,8 @@ export struct VeraPreview {
           if (next.nodeKind === 'world') { this.logWorldDrop(next) }
           continue
         }
-        this.dispatch(next.action, next.payload, next.persist, next.nodeKind === 'world')
+        StageTrace.emit(this, 'FIELD_ACTION_APPLY', { action: next.action })
+        this.dispatch(next.action, next.payload, next.persist, next.nodeKind === 'world', next.traceKind)
       }
     } finally {
       this.resumingFieldActions = false
@@ -2270,7 +2349,7 @@ export struct VeraPreview {
    * The single way a person's input reaches a program: the value is whatever
    * the component produces -- a number, a string or a boolean.
    */
-  private dispatch(action: string, payload: RuntimeValue, persist: boolean = true, skipIfSame: boolean = false): void {
+  private dispatch(action: string, payload: RuntimeValue, persist: boolean = true, skipIfSame: boolean = false, kind: string = 'HANDLER'): void {
     if (this.disposed) { return }
     if (!skipIfSame) { console.info('VERA-CLICK action=' + action + ' rev=' + this.revision.toString()) }
     if (this.vm === null || this.currentState === null || this.previewOnly) { return }
@@ -2279,6 +2358,7 @@ export struct VeraPreview {
       if (this.host !== null) { this.host!.effectsAllowed = true }
       let before = this.currentState!
       let beforeCode = skipIfSame ? stateCode(before) : ''
+      StageTrace.emit(this, 'EXECUTE', { entry: action, kind: kind })
       this.currentState = this.vm!.execute(action, [before, payload])
       if (this.host !== null) { this.host!.effectsAllowed = false }
       // A world's event that left the state as it was (a hit the program does not count, a tap on nothing) changes
@@ -2289,12 +2369,13 @@ export struct VeraPreview {
         this.drainEffects()
         return
       }
+      StageTrace.emit(this, 'INPUT_APPLIED', { action: action })
       this.notifyStateSnapshot()
       console.info('VERA-ACTION ' + action + ' steps=' + this.vm!.stepsExecuted().toString() +
         ' ms=' + (Date.now() - t0).toString())
       // What this tap makes appear -- a card it opens, a banner with its result -- is brought into view.
       armReveal(true)
-      try { this.renderView() } finally { armReveal(false) }
+      try { this.renderView(true, true) } finally { armReveal(false) }
       if (persist) {
         this.persistState()
       } else {
@@ -2303,6 +2384,7 @@ export struct VeraPreview {
       }
       this.drainEffects()
     } catch (e) {
+      StageTrace.emit(this, 'ERROR', { kind: kind })
       if (this.host !== null) {
         this.host!.effectsAllowed = false
         // A handler that trapped half-way may have queued an intent it would
@@ -2314,7 +2396,7 @@ export struct VeraPreview {
         ' ms=' + (Date.now() - t0).toString() + ' err=' + (e as Error).message)
       this.error = 'Action error: ' + (e as Error).message
       // A ticker whose handler traps would otherwise trap again every interval.
-      this.stopAllTimers()
+      this.stopAllTimers('TRAP')
     }
   }
 
@@ -2352,6 +2434,7 @@ export struct VeraPreview {
       console.info('VERA-EFFECT id=' + effect.id.toString() + ' ' + effect.kind + '.' + effect.fn +
         ' -> ' + effect.resultHandler)
       if (this.needsConsent(effect)) {
+        StageTrace.request(this, effect.id, effect.rawTarget, effect.values, effect.resultHandler, effect.rawMode, this.effectGeneration)
         console.info('VERA-CONSENT asking for ' + this.consentTitle(effect))
         this.pending = effect
         return
@@ -2434,7 +2517,7 @@ export struct VeraPreview {
       // Remembered, so the same program asking the same thing again is not a
       // question the person has to answer twice.
       consent.remember(this.stamp(), this.consentKey(effect!))
-      this.runEffect(effect!)
+      this.runEffect(effect!, true)
     }
     this.runQueued()
   }
@@ -2451,14 +2534,16 @@ export struct VeraPreview {
     this.pending = null
     if (effect !== null) {
       console.info('VERA-CONSENT refused ' + this.consentTarget(effect!))
-      this.dispatchFieldAction(effect!.resultHandler, new VeraStringValue('declined by the person'))
+      StageTrace.emit(this, 'EFFECT_RESULT', { id: effect!.id, resultHandler: effect!.resultHandler, generation: this.effectGeneration, outcome: 'DECLINED' })
+      this.dispatchFieldAction(effect!.resultHandler, new VeraStringValue('declined by the person'), true, null, 'EFFECT_RESULT')
     }
     this.runQueued()
   }
 
   /** One effect, whichever host it belongs to, answered through its handler. */
-  private runEffect(effect: HostEffect): void {
+  private runEffect(effect: HostEffect, requestTraced: boolean = false): void {
     if (this.disposed) { return }
+    if (!requestTraced) { StageTrace.request(this, effect.id, effect.rawTarget, effect.values, effect.resultHandler, effect.rawMode, this.effectGeneration) }
     let generation = this.effectGeneration
     let answer: Promise<string>
     if (effect.kind === 'sdk' && effect.rawTarget.indexOf('/') >= 0) {
@@ -2475,11 +2560,21 @@ export struct VeraPreview {
       answer = runSdkAdapter(effect.rawTarget, effect.values)
     }
     answer.then((text: string) => {
-      if (this.disposed || generation !== this.effectGeneration) { return }
-      this.dispatchFieldAction(effect.resultHandler, new VeraStringValue(text))
+      if (this.disposed || generation !== this.effectGeneration) {
+        StageTrace.emit(this, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation, outcome: 'DROPPED_STALE' })
+        return
+      }
+      StageTrace.emit(this, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation,
+        outcome: text.startsWith('declined') ? 'DECLINED' : text.startsWith('error') ? 'ERROR' : 'OK' })
+      this.dispatchFieldAction(effect.resultHandler, new VeraStringValue(text), true, null, 'EFFECT_RESULT')
     }).catch((e: Error) => {
-      if (this.disposed || generation !== this.effectGeneration) { return }
-      this.dispatchFieldAction(effect.resultHandler, new VeraStringValue('error: ' + e.message))
+      if (this.disposed || generation !== this.effectGeneration) {
+        StageTrace.emit(this, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation, outcome: 'DROPPED_STALE' })
+        return
+      }
+      StageTrace.emit(this, 'ERROR', { kind: 'EFFECT_RESULT' })
+      StageTrace.emit(this, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation, outcome: 'ERROR' })
+      this.dispatchFieldAction(effect.resultHandler, new VeraStringValue('error: ' + e.message), true, null, 'EFFECT_RESULT')
     })
   }
 
@@ -2940,7 +3035,10 @@ export struct VeraPreview {
       node.fieldCancellation++
       this.fieldActions = this.fieldActions.filter((next: FieldAction): boolean => {
         let keep = !next.unknownDependencies && next.dependencies.indexOf(node) < 0
-        if (!keep) { this.releaseSurfaceAction(next) }
+        if (!keep) {
+          StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: next.action, reason: 'fieldCancellation' })
+          this.releaseSurfaceAction(next)
+        }
         return keep
       })
       this.fieldActionsNeedResume = this.fieldActions.length > 0
@@ -2953,6 +3051,9 @@ export struct VeraPreview {
     this.fieldInputs.clear()
     this.fieldMenus.clear()
     this.surfaceInputs.clear()
+    for (let next of this.fieldActions) {
+      StageTrace.emit(this, 'FIELD_ACTION_DROP', { action: next.action, reason: 'effectGeneration' })
+    }
     this.fieldActions = []
     this.fieldActionsNeedResume = false
     for (let node of Array.from(this.fieldEdits.keys())) { this.cancelField(node) }

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const ts = process.env.VERA_TYPESCRIPT_PATH ? require(process.env.VERA_TYPESCRIPT_PATH) : require('typescript');
-const { loadVera, sourceRoot } = require('./source-loader');
+const { loadSource, loadVera, sourceRoot } = require('./source-loader');
 const navigation = loadVera('AppNavigation');
 const file = path.join(sourceRoot, 'entryability/EntryAbility.ets');
 const source = fs.readFileSync(file, 'utf8');
@@ -25,7 +25,7 @@ function deferred() {
 }
 function params(values = {}) {
   return { projectId: '', versionId: '', vbc2: '', shortcutMode: '', launchError: '',
-    baseVersionId: '', chatId: '', prompt: '', run: '', fromList: '', makeWidget: '', formId: '', ...values };
+    baseVersionId: '', chatId: '', prompt: '', run: '', fromList: '', makeWidget: '', widgetFresh: '', formId: '', ...values };
 }
 const library = () => ({ name: 'library', param: params() });
 const projectPath = (id = project.id) => ({ name: 'project', param: params({ projectId: id }) });
@@ -49,7 +49,9 @@ function fixture(options = {}) {
   const dependencies = {
     '@kit.AbilityKit': { UIAbility: class {} },
     '@kit.ArkTS': {},
-    '@kit.PerformanceAnalysisKit': { hilog: { info() {}, error(...args) { errors.push(args); } } },
+    '@kit.PerformanceAnalysisKit': { hilog: { info() {}, warn() {}, error(...args) { errors.push(args); } } },
+    '../components/LaunchTrust': loadSource(path.join(sourceRoot, 'components/LaunchTrust.ets')),
+    '../runtime/trace/StageTrace': loadSource(path.join(sourceRoot, 'runtime/trace/StageTrace.ets')),
     '../vera/AppNavigation': navigation,
     '../vera/ProjectStore': { store },
     '../vera/VeraPermissions': {
@@ -251,6 +253,7 @@ function projectModalFixture() {
     activePanel: '', renameText: 'Old draft', renameComposing: false, renameInputController: nativeInput,
     viewedSource: '', viewedPrompt: '', viewedVersionNumber: 0,
     viewedMetricsVersion: null, viewedMetricsNumber: 0, shortcutRefreshGeneration: 0,
+    widgetVbc2: 'fixture-widget-bytecode', widgetSeed: 'fixture-widget-state',
     reload() { events.push(['reload']); },
     pathStack: { pop() { assert.fail('closing a dialog must not pop the page'); } }
   };
@@ -265,13 +268,13 @@ function projectModalFixture() {
     return shortcutStatus;
   } };
   extractMethods(source, ['clearPanels', 'closePanels', 'handleBack', 'viewSource', 'viewMetrics',
-    'openRename', 'openIconPicker', 'setIcon', 'changeRename', 'finishRename', 'submitRename', 'doRename',
+    'openRename', 'openIconPicker', 'previewWidget', 'setIcon', 'changeRename', 'finishRename', 'submitRename', 'doRename',
     'destinationHidden', 'aboutToDisappear'], state, {
     store, refreshForms: refresh, ProjectShortcutState: { Unknown: 'unknown' }, projectOperations,
     ProjectOperationStatus: { Failed: 'failed' }
   });
   const cancellations = [];
-  for (const panel of ['source', 'metrics', 'rename', 'icon']) {
+  for (const panel of ['source', 'metrics', 'rename', 'icon', 'widget']) {
     const controller = source.match(new RegExp('private ' + panel + 'Controller:[\\s\\S]*?new CustomDialogController\\(\\{([\\s\\S]*?)^  \\}\\)', 'm'));
     assert(controller, panel + ' controller must exist');
     assert.match(controller[1], new RegExp('builder: ProjectPanelDialog\\(\\{ content: this\\.' + panel + 'Dialog \\}\\)'));
@@ -319,11 +322,16 @@ async function test(name, run) {
 }
 
 (async () => {
-  await test('Widget card routes to its project', async () => {
+  await test('Widget card runs its project in immersive shortcut mode', async () => {
     const widget = fs.readFileSync(path.join(sourceRoot, 'widget/pages/WidgetCard.ets'), 'utf8');
     assert.match(widget, /'action': 'router'/);
     assert.match(widget, /'abilityName': 'EntryAbility'/);
-    assert.match(widget, /'params':\s*\{\s*'projectId': project\['id'\],\s*'veraRun': '1'\s*\}/);
+    assert.match(widget, /'params':\s*\{\s*'projectId': project\['id'\],\s*'launchMode': 'runLatest'\s*\}/);
+    const f = await ready();
+    const request = await f.launch({ parameters: { projectId: project.id, launchMode: 'runLatest' } });
+    assert.equal(request.kind, 'shortcut');
+    assertCommit(f, f.stage,
+      [isolatedPath({ projectId: project.id, versionId: runnable.id, vbc2: runnable.vbc2 })], true);
   });
   await test('Navigation receives the raw stack without notifying observed state during render', async () => {
     const shell = fs.readFileSync(path.join(sourceRoot, 'pages/AppShell.ets'), 'utf8');
@@ -348,7 +356,7 @@ async function test(name, run) {
     assert.equal(raw.nativeStack, nativeStack);
     assert.equal(notifications, 0);
   });
-  await test('Project Rename, Code, Metrics and Picture use modal dialogs without popping the page', async () => {
+  await test('Project Rename, Code, Metrics, Picture and Widget Preview use modal dialogs without popping the page', async () => {
     const { source, state, events, renameGate, cancellations, setShortcutStatus } = projectModalFixture();
     assert.match(source, /NavDestination\(\)\s*\{\s*this\.pageContent\(\)/);
     assert.match(source, /@CustomDialog\s+struct ProjectPanelDialog/);
@@ -365,7 +373,7 @@ async function test(name, run) {
     assert.match(source, /controller: this\.renameInputController/);
     assert.match(source, /\.enabled\(!this\.renameComposing && this\.renameText\.trim\(\)\.length > 0\)/);
     assert.match(source, /\.onClick\(\(\) => \{ this\.doRename\(\) \}\)/);
-    assert.equal((source.match(/\.onClick\(\(\) => \{ this\.closePanels\(\) \}\)/g) || []).length, 3);
+    assert.equal((source.match(/\.onClick\(\(\) => \{ this\.closePanels\(\) \}\)/g) || []).length, 4);
     const version = { source: 'app source', prompt: 'version request', metrics: null };
     const assertCleared = () => {
       assert.equal(state.activePanel, '');
@@ -380,7 +388,8 @@ async function test(name, run) {
       ['source', () => state.viewSource(version, 3)],
       ['metrics', () => state.viewMetrics(version, 3)],
       ['rename', () => state.openRename()],
-      ['icon', () => state.openIconPicker()]
+      ['icon', () => state.openIconPicker()],
+      ['widget', () => state.previewWidget()]
     ]) {
       for (const dismiss of [() => assert.equal(state.handleBack(), true),
         () => state.closePanels(), ...cancellations, () => state.destinationHidden(),
@@ -414,6 +423,7 @@ async function test(name, run) {
     state.viewMetrics(version, 3);
     state.openRename();
     state.openIconPicker();
+    state.previewWidget();
     assert.deepEqual(events, [], 'hidden destinations must not open dialogs');
     state.pageVisible = true;
     state.viewSource({ source: '', prompt: '', metrics: null }, 1);
@@ -429,7 +439,7 @@ async function test(name, run) {
     let renamed = false;
     const pendingRename = state.doRename().then(() => { renamed = true; });
     assert.deepEqual(events, [['rename', 'project-1', 'New name', 'icon'],
-      ['close', 'source'], ['close', 'metrics'], ['close', 'rename'], ['close', 'icon'],
+      ['close', 'source'], ['close', 'metrics'], ['close', 'rename'], ['close', 'icon'], ['close', 'widget'],
       ['reload'], ['refresh'], ['shortcut', 'project-1']]);
     assertCleared();
     await pause();
@@ -450,14 +460,14 @@ async function test(name, run) {
     state.openIconPicker();
     await state.setIcon('new-icon');
     assert.deepEqual(events, [['open', 'icon', 'icon'], ['close', 'source'], ['close', 'metrics'],
-      ['close', 'rename'], ['close', 'icon'], ['rename', 'project-1', 'Original', 'new-icon'],
+      ['close', 'rename'], ['close', 'icon'], ['close', 'widget'], ['rename', 'project-1', 'Original', 'new-icon'],
       ['reload'], ['refresh'], ['shortcut', 'project-1']]);
     assertCleared();
     events.length = 0;
     state.openIconPicker();
     state.setIcon('icon');
     assert.deepEqual(events, [['open', 'icon', 'icon'], ['close', 'source'], ['close', 'metrics'],
-      ['close', 'rename'], ['close', 'icon']], 'choosing the current icon must close without saving');
+      ['close', 'rename'], ['close', 'icon'], ['close', 'widget']], 'choosing the current icon must close without saving');
     assertCleared();
     state.project = null;
     events.length = 0;
@@ -541,7 +551,7 @@ async function test(name, run) {
   });
   await test('Rename cancellation and dismissal reject late native callbacks and direct saves', async () => {
     for (const dismiss of [f => f.cancel.onClick(), f => f.state.handleBack(),
-      ...[0, 1, 2, 3].map(index => f => f.cancellations[index]()),
+      ...[0, 1, 2, 3, 4].map(index => f => f.cancellations[index]()),
       f => f.state.destinationHidden(), f => f.state.aboutToDisappear()]) {
       const f = projectModalFixture();
       f.state.openRename();

@@ -68,7 +68,9 @@
       },
       { "name": "ohos.permission.EXECUTE_INSIGHT_INTENT" },
       { "name": "ohos.permission.START_INVISIBLE_ABILITY" },
+      { "name": "ohos.permission.START_ABILITIES_FROM_BACKGROUND" },
       { "name": "ohos.permission.ABILITY_BACKGROUND_COMMUNICATION" },
+      { "name": "ohos.permission.KEEP_BACKGROUND_RUNNING" },
       { "name": "ohos.permission.GET_BUNDLE_INFO_PRIVILEGED" },
       { "name": "ohos.permission.STORAGE_MANAGER" },
       { "name": "ohos.permission.GET_WIFI_INFO" },
@@ -78,6 +80,7 @@
       { "name": "ohos.permission.NOTIFICATION_CONTROLLER" },
       { "name": "ohos.permission.GET_NETWORK_INFO" },
       { "name": "ohos.permission.MANAGE_SHORTCUTS" },
+      { "name": "ohos.permission.RUNNING_LOCK" },
       { "name": "ohos.permission.INPUT_MONITORING" }
     ],
     "abilities": [
@@ -89,6 +92,7 @@
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
+        "launchType": "singleton",
         "exported": true,
         "skills": [
           { "entities": ["entity.system.home"], "actions": ["action.system.home"] }

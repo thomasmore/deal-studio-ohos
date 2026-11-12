@@ -13,7 +13,7 @@ const {AgentRequest} = loadVera('agent/VeraAgent')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
-const rawfile = name => fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile', name), 'utf8')
+const rawfile = name => fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile', name), 'utf8').replace(/\r\n/g, '\n')
 const guide = rawfile('vera-surface-skill.txt')
 const worldGuide = rawfile('vera-world-skill.txt')
 const worldBasics = fs.readFileSync(path.join(__dirname, 'examples/world-basics.vera'), 'utf8')
@@ -26,9 +26,8 @@ const example = guide.slice(guide.indexOf('--- EXAMPLE ---') + '--- EXAMPLE ---'
 assert.equal(S.checkSurfaceProgram(example), '', 'the guide\'s example compiles, runs once and plays')
 assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surface-basics.vera'), 'utf8')
   .slice(fs.readFileSync(path.join(__dirname, 'examples/surface-basics.vera'), 'utf8').indexOf('@jsonable')).trim(),
-'the guide carries examples/surface-basics.vera as it is (regenerate the rawfile when the example changes)')
+ 'the guide carries examples/surface-basics.vera as it is (regenerate the rawfile when the example changes)')
 
-// The world guide's example is examples/world-basics.vera byte for byte, and it compiles, runs once and its world plays.
 {
   const open = '--- EXAMPLE ---\n', close = '--- END EXAMPLE ---'
   const worldExample = worldGuide.slice(worldGuide.indexOf(open) + open.length, worldGuide.indexOf(close))

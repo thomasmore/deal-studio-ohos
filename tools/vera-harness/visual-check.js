@@ -7,11 +7,31 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const cp = require('node:child_process')
-const {loadVera, loadSource, sourceRoot} = require('./source-loader')
 async function main() {
+const args=process.argv.slice(2), runtimeFlags=['--capture-runtime-traces','--compare-runtime-traces']
+const runtimeMode=args.some(arg=>runtimeFlags.includes(arg))
+let runtimeOptions
+if(runtimeMode) {
+ assert(args.length===3&&runtimeFlags.includes(args[0])&&args[1]==='--output'&&args[2]&&!args[2].startsWith('--'),
+  'usage: visual-check.js [--capture-runtime-traces|--compare-runtime-traces --output FILE]; cannot combine with --capture-baseline or positional report output')
+ runtimeOptions={mode:args[0]===runtimeFlags[0]?'capture':'compare',output:path.resolve(args[2])}
+} else assert(!args.includes('--output'), '--output requires --capture-runtime-traces or --compare-runtime-traces')
+const {loadVera, loadSource, sourceRoot} = require('./source-loader')
+const {StageTrace} = loadSource(path.join(sourceRoot,'runtime/trace/StageTrace.ets'))
 const C = loadVera('VeraCompiler'), V = loadVera('VeraInterpreter'), U = loadVera('VeraUi')
-const output = path.resolve(process.argv[2] || '/tmp/vera-visual-verification.json')
-const baseline = process.argv.includes('--capture-baseline')
+const output = path.resolve(runtimeMode?'/tmp/vera-visual-verification.json':process.argv[2] || '/tmp/vera-visual-verification.json')
+const baseline = !runtimeMode&&process.argv.includes('--capture-baseline')
+const runtimeScenarios=[], runtimeNames=new Map([
+ ['native fields: rapid input waits 400ms after latest, commits once without keystroke traces','field/debounce-400ms'],
+ ['native fields: actual submit completes composition with "你好" and no final onChange','field/ime-submit-final'],
+ ['native fields: actual blur completes composition with "你好" and no final onChange','field/ime-blur-final'],
+ ['native slider: extracted callback flushes both latest drafts before VM and persists only drag end','slider/pending-drafts-begin-move-end'],
+ ['native timer: slow callback flushes pending user fields','ticker/slow-pending-flush'],
+ ['native timer: slow callback skips composing user fields','ticker/slow-composition-gate'],
+ ['runtime traces: fast ticker preserves pending debounce','ticker/fast-pending-edit'],
+ ['runtime traces: pointer down/move/up after pending edit','surface/pending-edit-down-move-up'],
+ ['runtime traces: stale field dependency cancels queued slider','field/stale-dependency-cancellation']
+])
 const cases = [['counter','change',1,'count',8], ['countdown','start',0,'running',true], ['expense','setBudget',140,'budget',140], ['reading','save',0,'saved',true], ['habit','complete',0,'days',4]]
 const results = [], trees = {}, contrasts = []
 const ts = process.env.VERA_TYPESCRIPT_PATH ? require(process.env.VERA_TYPESCRIPT_PATH) : require('typescript')
@@ -37,8 +57,43 @@ function platformModule(name, mocks, suffix='') {
  },mod,mod.exports)
  return mod.exports
 }
-function test(name, action) { try { action(); results.push({name, result:'PASS'}) } catch(e) { results.push({name, result:'FAIL', error:String(e.stack || e)}) } }
-async function testAsync(name, action) { try { await action(); results.push({name, result:'PASS'}) } catch(e) { results.push({name, result:'FAIL', error:String(e.stack || e)}) } }
+function test(name, action) {
+ if(runtimeMode&&!runtimeNames.has(name))return
+ const records=[]
+ try {
+  if(runtimeMode)StageTrace.configure(true,record=>records.push(record))
+  action()
+  if(runtimeMode) {
+   assert(records.length>0,'empty runtime trace: '+name)
+   runtimeScenarios.push({name:runtimeNames.get(name),segments:[records]})
+  }
+  results.push({name,result:'PASS'})
+ } catch(e) { results.push({name,result:'FAIL',error:String(e.stack||e)}) }
+ finally { if(runtimeMode)StageTrace.configure(false) }
+}
+async function testAsync(name, action) { if(runtimeMode)return;try { await action(); results.push({name, result:'PASS'}) } catch(e) { results.push({name, result:'FAIL', error:String(e.stack || e)}) } }
+function finishRuntimeTraces() {
+ const failures=results.filter(result=>result.result==='FAIL')
+ assert.equal(failures.length,0,failures.map(result=>result.name+': '+result.error).join('\n'))
+ assert.equal(runtimeScenarios.length,runtimeNames.size,'missing runtime trace scenarios')
+ const traces=require('./stage-trace-baseline'), artifact=traces.artifact(runtimeScenarios)
+ artifact.environment='MOCKED_PLATFORM_REAL_VM'
+ for(const scenario of artifact.scenarios)scenario.environment=artifact.environment
+ artifact.limitations=[
+  'Current ETS compiler, VM, UI decoder, live-tree reconciliation, field flushing and StageTrace run on the host; platform APIs and persistence storage are mocked.',
+  'Extracted VeraPreview methods and text/slider callbacks receive synthetic events; no native ArkUI, keyboard/IME integration, geometry, painting, SDK, filesystem persistence, network, model or device validation.',
+  'Timeouts use an injected clock with the real 400-ms debounce; interval callbacks are manually invoked at fixed steps, not device scheduling or concurrency coverage.',
+  'Composition is synthetic preview text completed through extracted submit/blur callbacks; this is not native IME validation.',
+  'Trace timestamps are zeroed by the shared normalizer; elapsed-time and debounce deadlines are asserted by probes, not performance measurements.',
+  'Only named deterministic field, slider, ticker and pointer scenarios are captured; surface frame/draw loops, full lifecycle, effects, navigation and exhaustive dependency branches are not included.',
+  'Current ETS transpilation is not ArkTS typechecking, SDK validation or native layout verification.',
+  'Observed behavior is a baseline, not a correctness oracle; production drift is not repaired by this harness.'
+ ]
+ if(runtimeOptions.mode==='capture')traces.captureFile(runtimeOptions.output,artifact)
+ else traces.compareFile(runtimeOptions.output,artifact)
+ const count=artifact.scenarios.reduce((sum,scenario)=>sum+scenario.segments.reduce((sum,segment)=>sum+segment.length,0),0)
+ console.log(`${runtimeOptions.mode} runtime traces: ${artifact.scenarios.length} scenarios, ${count} records; MOCKED_PLATFORM_REAL_VM; ${runtimeOptions.output}`)
+}
 function vm(bytecode) { return new V.VirtualMachine(V.deserializeVbc2(bytecode), new U.UiHostEnvironment()) }
 function walk(node) { return [node, ...(node.children || []).flatMap(walk)] }
 for (const [name, handler, value, field, expected] of cases) {
@@ -139,7 +194,7 @@ if (!baseline) {
    const names=['watchDarkMode','sparklinePoint','sparklineCommands','sparklineAreaCommands','sparklineGridCommands']
    const body=names.map(n=>declaration(renderer,'  private '+n+'(').replace('  private ','')).join('\n')+'\n'+declaration(renderer,'  aboutToDisappear(')
    const code=ts.transpileModule('class Probe { static SPARKLINE_HEIGHT=200; static SPARKLINE_INSET=16; '+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText
-   const Probe=new Function(code+'; const VeraPreview=Probe; return Probe')(), probe=new Probe(), queries=[], events=[]
+   const Probe=new Function('StageTrace',code+'; const VeraPreview=Probe; return Probe')(StageTrace), probe=new Probe(), queries=[], events=[]
    let change, renders=0, density=1
    const listener={matches:true,on(event,cb){events.push(event);change=cb},off(event){events.push('off:'+event)}}
    probe.getUIContext=()=>({getMediaQuery:()=>({matchMediaSync(query){queries.push(query);return listener}}),vp2px:value=>value*density})
@@ -181,7 +236,7 @@ if (!baseline) {
      platformHook()
      return promise
     }
-    const mocks={UiHostEnvironment:U.UiHostEnvironment,VirtualMachine:Machine,deserializeVbc2:V.deserializeVbc2,VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
+    const mocks={StageTrace,UiHostEnvironment:U.UiHostEnvironment,VirtualMachine:Machine,deserializeVbc2:V.deserializeVbc2,VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
     const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
     probe=new Probe()
     Object.assign(probe,{pending:null,programId:7,retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
@@ -362,7 +417,7 @@ if (!baseline) {
      const L=loadSource(path.join(sourceRoot,'components/VeraLiveTree.ets'))
      let now=10000, probe, nextHandle=0
      const events=[], executions=[], syncs=[], scheduled=new Map()
-     const mocks={...V,UiHostEnvironment:U.UiHostEnvironment,decodeVeraUi:U.decodeVeraUi,toLive:L.toLive,reconcile:L.reconcile,markIconRoom:L.markIconRoom,Date:{now:()=>now},catalogKinds:()=>{events.push(['catalogue',probe.disposed,probe.pageHidden]);return []},console:{info(){},warn(){},error(){}},displaySync:{create(){
+     const mocks={StageTrace,...V,UiHostEnvironment:U.UiHostEnvironment,decodeVeraUi:U.decodeVeraUi,toLive:L.toLive,reconcile:L.reconcile,markIconRoom:L.markIconRoom,Date:{now:()=>now},catalogKinds:()=>{events.push(['catalogue',probe.disposed,probe.pageHidden]);return []},console:{info(){},warn(){},error(){}},displaySync:{create(){
       events.push(['create'])
       if(route==='interval')throw Error('fixture: no displaySync')
       const sync={callback:null,active:false,setExpectedFrameRateRange(range){assert.deepEqual(range,{expected:60,min:30,max:120})},on(event,callback){assert.equal(event,'frame');this.callback=callback},start(){this.active=true;events.push(['start'])},stop(){this.active=false;events.push(['stop'])},off(event){assert.equal(event,'frame');events.push(['off'])}}
@@ -521,7 +576,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
        const sliderSource=renderer.slice(renderer.indexOf("} else if (node.kind === 'slider') {"),renderer.indexOf("} else if (node.kind === 'select') {"))
        const callback='sliderChange(node: LiveNode) { return '+declaration(sliderSource,'.onChange(').slice('.onChange('.length)+' }'
        const fieldSource=renderer.slice(renderer.indexOf("} else if (node.kind === 'field') {"),renderer.indexOf("} else if (node.kind === 'toggle' || node.kind === 'checkbox') {"))
-       const fieldCallbacks=[['nativeSubmit','.onSubmit('],['nativeEditChange','.onEditChange(']].map(([name,prefix])=>name+'(node: LiveNode, generation: number) { return '+declaration(fieldSource,prefix).slice(prefix.length)+' }').join('\n')
+       const fieldCallbacks=[['nativeChange','.onChange('],['nativeSubmit','.onSubmit('],['nativeEditChange','.onEditChange(']].map(([name,prefix])=>name+'(node: LiveNode, generation: number) { return '+declaration(fieldSource,prefix).slice(prefix.length)+' }').join('\n')
        const declarations=['class FieldEdit','class FieldInput','class FieldAction','class SurfaceInput','class TimerConfig'].map(prefix=>declaration(renderer,prefix)).join('\n')
         const capture=declaration(renderer,'  private captureFields:').replace('  private ','')
         const compiled=ts.transpileModule(declarations+'\n'+renderer.match(/^const SURFACE_VIEW_MS:[^\n]+/m)[0]+'\n'+renderer.match(/^const SLOW_TICK_MS:[^\n]+/m)[0]+'\n'+renderer.match(/^const FORM_BOUNDS:[^\n]+/m)[0]+'\nclass Probe { static RENDERED=[]; '+fields+'\n'+capture+'\n'+body+'\n'+callback+'\n'+fieldCallbacks+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
@@ -536,7 +591,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
         constructor() { this.text='';this.reads=0 }
         getText() { this.reads++;return this.text }
        }
-       const mocks={...V,...loadVera('VeraGfx'),...loadVera('VeraStateStamp'),TextInputController,TouchType,SliderChangeMode,scheduleCardRefresh(){},store:{saveState(project,version,stamp,encoded){
+       const mocks={StageTrace,...V,...loadVera('VeraGfx'),...loadVera('VeraStateStamp'),TextInputController,TouchType,SliderChangeMode,scheduleCardRefresh(){},store:{saveState(project,version,stamp,encoded){
         assert.equal(project,'fixture');assert.equal(version,'version');assert.equal(stamp,probe.stamp())
         const state=V.decodeRuntimeValue(JSON.parse(encoded))
         assert.deepEqual(V.encodeRuntimeValue(state),V.encodeRuntimeValue(probe.currentState))
@@ -631,8 +686,54 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
         slide(value,mode='Moving',node=slider){probe.sliderChange(node)(value,SliderChangeMode[mode])},
         touch(phase,touches=[{id:1,x:150,y:50}],node=surface){probe.surfaceTouch(node,{type:TouchType[phase],changedTouches:touches})},
         reconcile(node,overrides){const next=Object.assign(new U.VeraUiNode(),node,overrides);probe.liveGeneration++;L.reconcile(node,next);probe.markLiveNodeGeneration(probe.liveRoot);probe.reconcileFields()},
-        change(node,value,composing=false,generation=node.fieldGeneration){probe.changeField(node,generation,value,composing)},finish(node,generation=node.fieldGeneration){probe.finishField(node,generation)},fire(handle){assert(history.has(handle));history.get(handle).callback()},state(name){return probe.currentState.fields.get(name).value}}
+        change(node,value,composing=false,generation=node.fieldGeneration){if(runtimeMode)probe.nativeChange(node,generation)(value,composing?{value}:undefined);else probe.changeField(node,generation,value,composing)},finish(node,generation=node.fieldGeneration){probe.finishField(node,generation)},fire(handle){assert(history.has(handle));history.get(handle).callback()},state(name){return probe.currentState.fields.get(name).value}}
      }
+      if(runtimeMode) {
+       test('runtime traces: fast ticker preserves pending debounce', () => {
+        const f=fieldProbe(true), {probe}=f
+        probe.startTimer('fixture-fast',{interval:16,action:'tick'})
+        const callback=f.intervals.get(probe.timers.get('fixture-fast')).callback
+        f.change(f.first,'pending');const timer=probe.fieldEdits.get(f.first).timer
+        f.advance(16);callback()
+        assert.deepEqual(f.calls,[]);assert.equal(probe.timerLastFire.get('fixture-fast'),0)
+        assert.equal(probe.fieldEdits.get(f.first).timer,timer);assert.equal(f.scheduled.get(timer).at,400)
+        f.advance(383);callback();assert.deepEqual(f.calls,[])
+        f.advance(1);assert.deepEqual(f.calls,[{action:'setFirst',value:'pending',at:400}])
+        callback()
+        assert.deepEqual(f.calls,[{action:'setFirst',value:'pending',at:400},{action:'tick',value:400,at:400}])
+        assert.equal(f.state('saved'),'pending/other');assert.equal(f.saves.length,2)
+        probe.stopTimer('fixture-fast');f.fire(timer);f.advance(400)
+        assert.equal(f.calls.length,2);assert.equal(probe.fieldEdits.size,0);assert.equal(probe.error,'')
+       })
+       test('runtime traces: pointer down/move/up after pending edit', () => {
+        const f=fieldProbe(true), {probe}=f
+        f.change(f.first,'pending');const timer=probe.fieldEdits.get(f.first).timer
+        f.advance(17);f.touch('Down');f.touch('Move',[{id:1,x:280,y:180}]);f.touch('Up')
+        assert.deepEqual(f.calls.map(call=>call.action),['setFirst','pointer','pointer','pointer'])
+        assert.equal(f.state('log'),'down1;move1;up1;');assert.equal(f.state('saved'),'pending/other')
+        assert.deepEqual(f.saves.map(state=>state.phase),['','down','up'])
+        assert.equal(probe.surfaceInputs.size,0);assert.equal(probe.fieldEdits.size,0)
+        f.fire(timer);f.advance(1000);assert.equal(f.calls.length,4);assert.equal(f.saves.length,3);assert.equal(probe.error,'')
+       })
+       test('runtime traces: stale field dependency cancels queued slider', () => {
+        const f=fieldProbe(true), {probe,first}=f, native=f.native(), generation=first.fieldGeneration
+        f.change(first,'old');const timer=probe.fieldEdits.get(first).timer
+        f.change(first,'composition',true);f.slide(10,'Begin');f.slide(30,'End')
+        assert.deepEqual(f.calls,[]);assert.equal(probe.fieldActions.length,1)
+        const queued=probe.fieldActions[0], cancellation=first.fieldCancellation
+        assert(queued.dependencies.includes(first))
+        probe.currentState.fields.set('first',new V.VeraStringValue('external'));probe.renderView()
+        assert(first.fieldCancellation>cancellation);assert(first.fieldGeneration>generation)
+        assert.equal(probe.fieldEdits.size,0);assert.deepEqual(probe.fieldActions,[])
+        probe.enqueueFieldAction(queued)
+        native.submit('stale');native.blur('stale');f.fire(timer);probe.resumeFieldActions();f.advance(400)
+        assert.deepEqual(f.calls,[]);assert.deepEqual(f.saves,[]);assert.equal(native.controller.reads,0)
+        f.change(first,'fresh');f.advance(400)
+        assert.deepEqual(f.calls,[{action:'setFirst',value:'fresh',at:800}])
+        assert.equal(f.state('position'),0);assert.equal(f.state('saved'),'');assert.equal(f.saves.length,1)
+        assert.deepEqual(probe.fieldActions,[]);assert.equal(probe.error,'')
+       })
+      }
        function generateFieldHost(controller,structural=false) {
         const source=fs.readFileSync(path.join(sourceRoot,'pages/GeneratePage.ets'),'utf8')
         const methods=['doRefine','setFullscreen','previewSnapshot','startNew','restoreBase'].map(name=>declaration(source,'  private '+name+'(').replace('  private ','')).join('\n')
@@ -1305,6 +1406,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
       assert.equal(probe.fieldEdits.size,0);assert.equal(f.scheduled.size,0);assert.equal(first.fieldGeneration,generation);assert.equal(probe.error,'')
       f.advance(1000);assert.equal(f.calls.length,1)
      })
+      if(runtimeMode) { finishRuntimeTraces();return }
      test('native fields: rescheduled and replaced edits reject captured stale one-shot callbacks', () => {
       const f=fieldProbe(), {probe,first}=f
       f.change(first,'old');const old=probe.fieldEdits.get(first).timer
@@ -1833,7 +1935,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
      return handle
     }
     function cancel(handle) { stops.push(handle);scheduled.delete(handle) }
-    const Probe=new Function('setInterval','clearInterval','Date','VeraNumberValue',compiled.outputText+'; return Probe')(schedule,cancel,{now:()=>now},V.VeraNumberValue)
+    const Probe=new Function('StageTrace','setInterval','clearInterval','Date','VeraNumberValue',compiled.outputText+'; return Probe')(StageTrace,schedule,cancel,{now:()=>now},V.VeraNumberValue)
     const probe=new Probe()
     Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
     function advance(ms) {

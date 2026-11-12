@@ -1,5 +1,15 @@
 # Changelog
 
+## Worker Thread backend: Stage 1
+
+### Step 1
+
+- Establishes baselines before runtime extraction: temporary, opt-in `StageTrace` instrumentation records the existing preview's VM execution, input, snapshots, frames, saves, effects, field queues, tickers, surfaces and lifecycle decisions. Tracing is off by default, enabled only by trusted native launch parameters; state, tree and effect payloads are represented by digests.
+- Deterministic headless capture/compare (`runtime-baseline.js`) uses fixed time and seeded randomness for state restoration, decoded UI trees, GfxOps, representative handlers and queued effects. Coverage now includes retained documentation examples, ten-tap and ten-tick sequences, text/slider/toggle inputs and selected bytecode from an existing local export. The captured corpus has 49 cases: 48 successful and one recorded compile failure in the stale `docs/examples/shanghai-layover.vera`; the failure remains an explicit coverage gap.
+- Comparable full-sequence traces cover 16 mocked orchestration scenarios (`stage-trace-check.js`) and 9 real-VM input scenarios with 191 events (`visual-check.js`), including debounce, synthetic IME completion, slider drafts, ticker gates, surface gestures and stale dependency cancellation. The latter execute the current compiler, VM, UI decoder and reconciliation through extracted renderer methods and callbacks, with platform APIs and storage mocked; neither artifact establishes native orchestration equivalence.
+- Added 13 host timing workloads (`runtime-performance.js`), diagnostic only, and an external private artifact package (`offline-baseline.js`) with source provenance, SHA-256 integrity, coverage gaps and read-only comparison. Capture and comparison passed with the selected local corpus, as did the tooling self-tests, eight relevant VM/renderer regression suites, JavaScript syntax checks and `git diff --check`. This baseline run did not perform ArkTS/SDK validation.
+- Execution remains on the UI thread; no worker or actor extraction yet. Coverage is explicitly incomplete: demo prompts are inventoried, not generated or mapped to executable fixtures, and selected local bytecode does not prove a complete device catalogue. Native orchestration, lifecycle/IME/consent checks, surface work timings and tap-to-render latency remain pending on a device; host timings do not establish the device regression budget.
+
 ## The moving part, learnt from the app's own animation
 
 - Make widget runs the app's own frames (as they are, else after a touch or a button), compares its drawing frame by frame, and finds the shapes that turn and the point they turn about (`VeraMovingPart`).

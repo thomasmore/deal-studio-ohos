@@ -3344,7 +3344,7 @@ host.worldGuide = this.worldGuide
           onStateSnapshot: this.previewSnapshot(this.previewController),
           // The two round buttons lie over the program's corner: on the way down they would cover its rows (a stop's
           // Navigate button, measured on Istanbul layover), so they step aside and come back on the way up.
-          onReadingDown: (down: boolean): void => { animateTo({ duration: 180 }, () => { this.cornerHidden = down }) } })
+          onReadingDown: (down: boolean): void => { this.getUIContext().animateTo({ duration: 180 }, () => { this.cornerHidden = down }) } })
           .width('100%')
           .height('100%')
         Row({ space: 8 }) {

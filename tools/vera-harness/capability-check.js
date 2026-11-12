@@ -82,21 +82,25 @@ async function test(name,fn){try{const observed=await fn();checks.push({name,sta
    const start=preview.indexOf('private dispatch('), end=preview.indexOf('\n  private ',start+1), dispatch=preview.slice(start,end)
    assert(dispatch.includes('this.notifyStateSnapshot()'));const load=preview.slice(preview.indexOf('private load()'),preview.indexOf('private reconcileTimers('));assert(load.includes('this.notifyStateSnapshot()'))
    // Execute the renderer lifecycle around an actual compiled widget and VM.
-   const {loadVera}=require('./source-loader'), C=loadVera('VeraCompiler'), V=loadVera('VeraInterpreter'), U=loadVera('VeraUi')
+   const {loadVera,loadSource,sourceRoot}=require('./source-loader'), C=loadVera('VeraCompiler'), V=loadVera('VeraInterpreter'), U=loadVera('VeraUi')
+   const {StageTrace}=loadSource(path.join(sourceRoot,'runtime/trace/StageTrace.ets'))
    function method(name){
-     const start=preview.search(new RegExp('^  (?:private )?(?:async )?'+name+'\\(', 'm'));assert(start>=0)
+     const start=preview.search(new RegExp('^  (?:private )?(?:async )?'+name+'\\(', 'm'));assert(start>=0,name)
      const scan=ts.createScanner(ts.ScriptTarget.Latest,true,ts.LanguageVariant.Standard,preview.slice(start));let depth=0,opened=false
      while(scan.scan()!==ts.SyntaxKind.EndOfFileToken){if(scan.getToken()===ts.SyntaxKind.OpenBraceToken){depth++;opened=true}if(scan.getToken()===ts.SyntaxKind.CloseBraceToken && --depth===0 && opened)return preview.slice(start,start+scan.getTextPos())}
      throw Error('Unclosed renderer method '+name)
    }
-   const methods=['load','dispatch','stateKeys','stamp','seeded','restoreState','persistState','notifyStateSnapshot','onResume','onForegroundChanged'].map(method).join('\n')
+   const methods=['load','dispatch','stateKeys','stamp','seeded','restoreState','persistState','notifyStateSnapshot','onResume','runWidgetRefresh','startTimer','stopTimer','stopAllTimers','aboutToDisappear'].map(method).join('\n')
    const code=ts.transpileModule('class Controller { '+methods+' } module.exports=Controller;', {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText
    const values=new Map(), store={saveState(p,v,stamp,encoded){values.set(p+'/'+v,{stamp,encoded})},loadState(p,v,stamp){const value=values.get(p+'/'+v);return value&&value.stamp===stamp?value.encoded:''}}
-   const globals={store,armReveal:()=>{},carryState:loadVera('VeraStateCarry').carryState,veraStateStamp:loadVera('VeraStateStamp').veraStateStamp,scheduleFormRefresh:()=>{},UiHostEnvironment:U.UiHostEnvironment,deserializeVbc2:V.deserializeVbc2,VirtualMachine:V.VirtualMachine,encodeRuntimeValue:V.encodeRuntimeValue,decodeRuntimeValue:V.decodeRuntimeValue}
+   let tick
+   const globals={StageTrace,store,setInterval:fn=>{tick=fn;return 1},clearInterval:()=>{},SLOW_TICK_MS:500,VeraNumberValue:V.VeraNumberValue,armReveal:()=>{},carryState:loadVera('VeraStateCarry').carryState,veraStateStamp:loadVera('VeraStateStamp').veraStateStamp,scheduleCardRefresh:()=>{},UiHostEnvironment:U.UiHostEnvironment,deserializeVbc2:V.deserializeVbc2,VirtualMachine:V.VirtualMachine,encodeRuntimeValue:V.encodeRuntimeValue,decodeRuntimeValue:V.decodeRuntimeValue}
    const mod={exports:{}};new Function('module',...Object.keys(globals),code)(mod,...Object.values(globals))
    const controller=new mod.exports(), snapshots=[], trees=[]
    controller.vbc2=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
-   controller.persistKey='chat-fixture/1';controller.seedState='';controller.revision=0;controller.stopAllTimers=()=>{};controller.drainEffects=()=>{}
+   controller.persistKey='chat-fixture/1';controller.seedState='';controller.revision=0;controller.drainEffects=()=>{}
+   controller.invalidateEffects=()=>{};controller.flushFields=()=>{};controller.controller=null;controller.darkListener=null;controller.liveSurfaces=[]
+   controller.timers=new Map();controller.motionTriggers=new Map();controller.poseAnims=new Map();controller.sceneFrames=new Map();controller.stopSurfaceLoop=()=>{}
    controller.onStateSnapshot=encoded=>snapshots.push(JSON.parse(encoded))
    controller.renderView=()=>{controller.host.effectsAllowed=false;trees.push(U.decodeVeraUi(controller.vm.execute('view',[controller.currentState])))}
    controller.load();assert.equal(controller.error,'');assert.equal(V.decodeRuntimeValue(snapshots.at(-1)).fields.get('count').value,7)
@@ -118,9 +122,13 @@ async function test(name,fn){try{const observed=await fn();checks.push({name,sta
    controller.onResume();assert.equal(controller.vm,vmBefore)
    assert.equal(V.decodeRuntimeValue(JSON.parse(values.get('chat-fixture/1').encoded)).fields.get('count').value,13)
    assert.equal(controller.currentState.fields.get('count').value,13)
-   let stopped=0;controller.stopAllTimers=()=>stopped++;controller.appForeground=false
-   controller.onForegroundChanged();assert.equal(stopped,1)
-   return {sharedInitialization:true,initialAndActionSnapshots:true,resumeExistingRunner:true,backgroundTimersStopped:true,snapshots,decodedTrees:trees,savedKeys:[...values.keys()]}
+   controller.timerConfigs=new Map();controller.timerLastFire=new Map();controller.fieldEdits=new Map()
+   controller.startTimer('fixture',{interval:100,action:'change'});controller.appForeground=false
+   const stateBefore=controller.currentState, snapshotsBefore=snapshots.length, lastFire=controller.timerLastFire.get('fixture')
+   tick();assert.equal(controller.currentState,stateBefore);assert.equal(snapshots.length,snapshotsBefore);assert.equal(controller.timerLastFire.get('fixture'),lastFire)
+   let stopped=0;controller.stopSurfaceLoop=()=>stopped++
+   controller.aboutToDisappear();assert.equal(stopped,1);assert.equal(controller.timers.size,0);assert.equal(controller.timerConfigs.size,0);assert.equal(controller.timerLastFire.size,0)
+   return {sharedInitialization:true,initialAndActionSnapshots:true,resumeExistingRunner:true,backgroundTicksSkipped:true,disappearTimersStopped:true,snapshots,decodedTrees:trees,savedKeys:[...values.keys()]}
  })
  const hashes={};for(const file of ['entry/src/main/ets/vera/VeraCapabilities.ets','entry/src/main/ets/vera/VeraSdkIndex.ets','entry/src/main/ets/vera/VeraIntentRegistry.ets','entry/src/main/ets/vera/VeraIntentIndex.ets','entry/src/main/ets/pages/GeneratePage.ets','entry/src/main/ets/components/VeraPreview.ets','tools/vera-harness/capability-check.js'])hashes[file]=crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')
  const report={source_sha256:hashes,expected:'All capability and renderer lifecycle workflows PASS; current values are emitted without migrating state.',observed:checks.every(c=>c.status==='PASS')?'PASS':'FAIL',revision:cp.execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),command:process.argv.join(' '),inputs:'mocked native registry, SDK rawfile, download, embedding boundaries; 10000ms timeout accelerated to 20ms',checks}

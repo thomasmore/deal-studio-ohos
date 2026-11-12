@@ -149,7 +149,7 @@ export struct CardView {
   }
   private paintPicture(node: CardNode): void {
     paintGfx(this.contextOf(node), decodeGfxOps(node.ops), resolveTheme(this.preset, this.primary, false),
-      this.pictureW(node), this.pictureH(node), node.w, node.h, vp2px(1), pictureBare(node.style), pictureCovers(node.style))
+      this.pictureW(node), this.pictureH(node), node.w, node.h, this.getUIContext().vp2px(1), pictureBare(node.style), pictureCovers(node.style))
   }
   private pictureAt(node: CardNode, event: ClickEvent): number[] {
     return gfxToSurface(gfxFit(this.pictureW(node), this.pictureH(node), node.w, node.h, pictureCovers(node.style)), event.x, event.y)

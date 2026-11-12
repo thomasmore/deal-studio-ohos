@@ -108,6 +108,8 @@ function writeStateJson(path: string, content: string): void {
   try {
     writeJson(temp, content)
     fs.renameSync(temp, path)
+  } catch (e) {
+    throw e as Error
   } finally {
     try { fs.unlinkSync(temp) } catch (_e) {}
   }

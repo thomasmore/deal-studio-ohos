@@ -424,7 +424,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 {
   assert.match(widgetRefinementPrompt(), /STYLES\. A text style is drawn as the app draws it/)
   assert.match(widgetRefinementPrompt(), /eyebrow \(a small spaced label/)
-  const styles = fs.readFileSync(path.join(__dirname, 'examples/widget-styles.vera'), 'utf8')
+  const styles = fs.readFileSync(path.join(__dirname, 'examples/widget-styles.vera'), 'utf8').replace(/\r\n/g, '\n')
   const at = styles.indexOf('function widget(')
   const lines = n => Array.from({length: n}, (_, i) => 'ui.Text("display", "big ' + i + '")').join(', ')
   const tall = styles.substring(0, at) + styles.substring(at).replace('ui.Column("accent", [\n        ui.Text("caption", "3 of 5 done")\n      ])', lines(3))
