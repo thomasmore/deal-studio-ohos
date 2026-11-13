@@ -74,6 +74,58 @@ assert.match(card, /handler: action/, 'the card posts the handler a button or sh
 assert.match(card, /handler: handler, x: x, y: y/, 'and the point a picture reports')
 assert.match(card, /frameKey: this.token \+ this.seq/, 'the nodes are made again for every frame: the token and seq are in their key')
 assert.match(view, /node.key \+ this.frameKey/)
+{
+  const ts = require(process.env.VERA_TYPESCRIPT_PATH || 'typescript')
+  const model = loadSource(path.join(sourceRoot, 'widget/CardModel.ets'))
+  const { paintGfx, decodeGfxOps, encodeGfxOps, GfxOp } = loadVera('GfxPaint')
+  const { resolveTheme } = loadVera('VeraTheme')
+  const { createRecorder } = require('./gfx-svg')
+  const start = view.indexOf('  private contexts:')
+  const end = view.indexOf('  private pictureAt(', start)
+  assert(start >= 0 && end > start)
+  const compiled = ts.transpileModule('class PictureProbe {\n' + view.slice(start, end) + '\n}', {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 }, reportDiagnostics: true
+  })
+  assert.deepEqual((compiled.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error), [])
+  const ready = [...view.matchAll(/\.onReady\(\(\) => \{ (this\.paintPicture\(node\)) \}\)/g)]
+  assert.equal(ready.length, 2, 'plain and interactive pictures both paint on Canvas readiness')
+  const sliceReady = [...view.matchAll(/\.onReady\(\(\) => \{ (this\.paintSlice\(node, k\)) \}\)/g)]
+  assert.equal(sliceReady.length, 1, 'drift slices paint on Canvas readiness')
+  for (const [density, uiContext] of [1, 3].flatMap(density =>
+    ['absent', 'undefined', 'throwing'].map(uiContext => [density, uiContext]))) {
+    const recorders = [], scales = []
+    const dependencies = {
+      ...model, PICTURE_WIDTH: model.cardSize(2).pictureMax, resolveTheme, decodeGfxOps,
+      contexts: count => Array.from({ length: count }, () => {
+        const recorder = createRecorder(100, 100)
+        recorders.push(recorder)
+        return recorder.ctx
+      }),
+      vp2px: value => value * density,
+      paintGfx: (...args) => { scales.push(args[7]); paintGfx(...args) }
+    }
+    const PictureProbe = new Function(...Object.keys(dependencies), compiled.outputText + '\nreturn PictureProbe;')(...Object.values(dependencies))
+    const probe = new PictureProbe()
+    Object.assign(probe, { preset: 'clean', primary: '', dimension: 2, fill: false })
+    if (uiContext === 'undefined') { probe.getUIContext = () => undefined }
+    if (uiContext === 'throwing') { probe.getUIContext = () => { throw Error('component UI context unavailable in form host') } }
+    const shape = new GfxOp()
+    Object.assign(shape, { kind: 'rect', x: 10, y: 10, w: 60, h: 40, color: '#ff0000' })
+    const node = new model.CardNode()
+    Object.assign(node, { kind: 'surface', w: 100, h: 100, size: 100, pic: 0, ops: encodeGfxOps([shape]) })
+    for (const [index, callback] of ready.entries()) {
+      if (index === 1) { node.pointer = 'touch' }
+      new Function('node', callback[1]).call(probe, node)
+      assert.match(recorders[0].svg(), /fill="#ff0000"/, 'the card Canvas paints without a component UI context')
+    }
+    Object.assign(node, { style: 'left', value: 2 })
+    for (const k of probe.sliceList(node)) {
+      new Function('node', 'k', sliceReady[0][1]).call(probe, node, k)
+      assert.match(recorders[probe.contexts.length + k].svg(), /fill="#ff0000"/, 'each drift slice paints without a component UI context')
+    }
+    assert.deepEqual(scales, Array(6).fill(density), 'plain, interactive and drift picture paths use the form density conversion')
+  }
+}
 // The token does not grow with the app's data: a log of 400 entries still fits the card, and a different log is a different token.
 {
   const log = 'import * as ui from "std/ui"\n@jsonable class Entry { note: string; amount: number; }\n' +

@@ -19,7 +19,7 @@ if(runtimeMode) {
 const {loadVera, loadSource, sourceRoot} = require('./source-loader')
 const {StageTrace} = loadSource(path.join(sourceRoot,'runtime/trace/StageTrace.ets'))
 const C = loadVera('VeraCompiler'), V = loadVera('VeraInterpreter'), U = loadVera('VeraUi')
-const output = path.resolve(runtimeMode?'/tmp/vera-visual-verification.json':process.argv[2] || '/tmp/vera-visual-verification.json')
+const output = path.resolve(runtimeMode?'/tmp/opencode/vera-visual-verification.json':process.argv[2] || '/tmp/opencode/vera-visual-verification.json')
 const baseline = !runtimeMode&&process.argv.includes('--capture-baseline')
 const runtimeScenarios=[], runtimeNames=new Map([
  ['native fields: rapid input waits 400ms after latest, commits once without keystroke traces','field/debounce-400ms'],
@@ -44,6 +44,42 @@ function declaration(source, prefix) {
   if(scanner.getToken()===ts.SyntaxKind.CloseBraceToken&&--depth===0)return source.slice(start,start+scanner.getTextPos())
  }
  throw Error(prefix)
+}
+function actorModule(mocks={}, observe=()=>{}) {
+ const cache=new Map()
+ class Machine extends V.VirtualMachine {
+  execute(action,args=[]) {
+   const result=super.execute(action,args)
+   observe(action,args,result)
+   return result
+  }
+ }
+ function load(file) {
+  file=path.resolve(file)
+  if(cache.has(file))return cache.get(file).exports
+  const compiled=ts.transpileModule(fs.readFileSync(file,'utf8'),{fileName:file.replace(/\.ets$/,'.ts'),compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
+  assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,file+' syntax')
+  const mod={exports:{}}
+  cache.set(file,mod)
+  new Function('require','module','exports','Date','console',compiled.outputText)(name=>{
+   if(Object.hasOwn(mocks,name))return mocks[name]
+   assert(name.startsWith('.'),'Unexpected actor dependency: '+name)
+   const dependency=path.resolve(path.dirname(file),name+'.ets')
+   if(dependency===path.join(sourceRoot,'vera/ProjectStore.ets'))return {store:mocks.store||{loadState:()=>'',saveState(){}}}
+   if(dependency===path.join(sourceRoot,'vera/VeraInterpreter.ets'))return {...V,VirtualMachine:Machine}
+   if(dependency===path.join(sourceRoot,'vera/VeraUi.ets'))return U
+   if(dependency.startsWith(path.join(sourceRoot,'vera')+path.sep))return loadSource(dependency)
+   if(dependency===path.join(sourceRoot,'runtime/trace/StageTrace.ets'))return {StageTrace}
+   return load(dependency)
+  },mod,mod.exports,mocks.Date||Date,mocks.console||{info(){},warn(){},error(){}})
+  return mod.exports
+ }
+ const {AppActor}=load(path.join(sourceRoot,'runtime/AppActor.ets'))
+ return {AppActor:class extends AppActor {
+  constructor(callbacks,owner) {
+   super({...callbacks,snapshot(encoded){if(mocks.snapshot)mocks.snapshot(encoded);callbacks.snapshot(encoded)}},owner)
+  }
+ }}
 }
 function platformModule(name, mocks, suffix='') {
  const source=fs.readFileSync(path.join(sourceRoot,'vera',name+'.ets'),'utf8')+suffix
@@ -198,7 +234,7 @@ if (!baseline) {
    let change, renders=0, density=1
    const listener={matches:true,on(event,cb){events.push(event);change=cb},off(event){events.push('off:'+event)}}
    probe.getUIContext=()=>({getMediaQuery:()=>({matchMediaSync(query){queries.push(query);return listener}}),vp2px:value=>value*density})
-    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.retireWorlds=()=>{};probe.invalidateEffects=()=>{};probe.flushFields=()=>{};probe.controller=null;probe.dark=false;probe.disposed=false;probe.liveSurfaces=[]
+    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.retireWorlds=()=>{};probe.invalidateEffects=()=>{};probe.flushFields=()=>{};probe.controller=null;probe.actor=null;probe.traceOwner={};probe.dark=false;probe.disposed=false;probe.liveSurfaces=[]
    probe.watchDarkMode();assert.deepEqual(queries,['(dark-mode: true)']);assert.equal(probe.dark,true);assert.equal(probe.darkListener,listener)
    change({matches:true});assert.equal(renders,0);change({matches:false});assert.equal(renders,1);assert.equal(probe.dark,false)
    for(density of [1,2,3.5]) {
@@ -214,21 +250,18 @@ if (!baseline) {
   })
    function effectProbe() {
     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-    const fields=['effectGeneration','liveGeneration','disposed','heldEffects','vm','host','currentState','refreshes'].map(name=>{
+    const fields=['effectGeneration','liveGeneration','disposed','heldEffects','actor','traceOwner'].map(name=>{
      const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
      return field[0].replace('  private ','')
     }).join('\n')
-    const names=['invalidateEffects','load','runWidgetRefresh','dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']
+    const names=['actorOptions','createActor','invalidateEffects','load','dispatch','acceptEffects','runQueued','allowPending','refusePending','runEffect','notifyStateSnapshot','persistState']
     const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
     const compiled=ts.transpileModule('class Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'effect probe syntax')
     const platform=[], events=[], executions=[], delivered=[]
     let probe, platformHook=()=>{}
-    class Machine {
-     constructor(module,host) { this.module=module;this.host=host }
-     execute(action,args=[]) { executions.push({action,args});return action==='init'?new V.VeraNumberValue(0):args[0] }
-     stepsExecuted() { return 1 }
-    }
+     const {AppActor}=actorModule({},(action,args)=>executions.push({action,args}))
+
     function call(kind,...args) {
      let resolve, reject
      const promise=new Promise((ok,fail)=>{resolve=ok;reject=fail})
@@ -236,11 +269,16 @@ if (!baseline) {
      platformHook()
      return promise
     }
-    const mocks={StageTrace,UiHostEnvironment:U.UiHostEnvironment,VirtualMachine:Machine,deserializeVbc2:V.deserializeVbc2,VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
+    const mocks={StageTrace,AppActor,scheduleCardRefresh:project=>events.push(['persist',project]),VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
     const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
     probe=new Probe()
-    Object.assign(probe,{pending:null,programId:7,retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
-    const bytecode=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
+    Object.assign(probe,{pending:null,programId:7,retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],persistKey:'fixture/version',seedState:'',stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},onStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
+    const bytecode=C.compileVeraSource(`
+@jsonable class AppState { count: number; }
+function init(): AppState { return {count: 0}; }
+function tap(state: AppState, value: number): AppState { return {count: state.count + value}; }
+function view(state: AppState): ui.View { return ui.Text("body", ui.numberToString(state.count)); }
+`).vbc2
     function load() { probe.vbc2=bytecode;probe.load() }
     function observeDispatch() { probe.dispatch=(action,value)=>{assert(value instanceof V.VeraStringValue);delivered.push([action,value.value])} }
     return {probe,platform,events,executions,delivered,bytecode,load,observeDispatch,onPlatform(action){platformHook=action}}
@@ -310,21 +348,24 @@ if (!baseline) {
    for(const mode of ['normal','empty','malformed','preview']) test('renderer effects: '+mode+' load invalidates queues and preserves UI identity rules', () => {
     const f=effectProbe(), {probe}=f
     f.load()
-    const oldHost=probe.host, oldVm=probe.vm, oldState=probe.currentState, root={fixture:true}, generation=probe.effectGeneration, programId=probe.programId
-    oldHost.pendingEffects=[hostEffect(1)];probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
-    probe.liveRoot=root;probe.hasRoot=true;probe.previewOnly=mode==='preview'
-    probe.vbc2=mode==='empty'?'':mode==='malformed'?'not valid bytecode':f.bytecode
-    probe.stopAllTimers=()=>{
-     assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert.deepEqual(oldHost.pendingEffects,[])
-     assert.equal(probe.vm,oldVm);assert.equal(probe.currentState,oldState)
-    }
-    probe.load()
-    assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(oldHost.pendingEffects,[]);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null)
-    assert.equal(probe.programId,programId+(mode==='preview'?0:1));assert.equal(probe.liveRoot,mode==='preview'?root:null);assert.equal(probe.hasRoot,mode==='preview')
-    assert.notEqual(probe.host,oldHost)
-    if(mode==='empty') { assert.equal(probe.host,null);assert.equal(probe.vm,null);assert.equal(probe.currentState,null);assert.equal(probe.error,'') }
-    else if(mode==='malformed') { assert.equal(probe.vm,null);assert.equal(probe.currentState,null);assert.match(probe.error,/^Init error: /) }
-    else { assert(probe.host instanceof U.UiHostEnvironment);assert.notEqual(probe.vm,oldVm);assert.equal(probe.error,'') }
+     const actor=probe.actor, state=actor.snapshot(), root={fixture:true}, generation=probe.effectGeneration, programId=probe.programId
+     probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+     let cleared=0
+     const clear=actor.clearEffects.bind(actor)
+     actor.clearEffects=()=>{cleared++;clear()}
+     probe.liveRoot=root;probe.hasRoot=true;probe.previewOnly=mode==='preview'
+     probe.vbc2=mode==='empty'?'':mode==='malformed'?'not valid bytecode':f.bytecode
+     probe.stopAllTimers=()=>{
+      assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert(cleared>0)
+      assert.equal(probe.actor,actor);assert.equal(actor.snapshot(),state)
+     }
+     probe.load()
+     assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null)
+     assert.equal(probe.programId,programId+(mode==='preview'?0:1));assert.equal(probe.liveRoot,mode==='preview'?root:null);assert.equal(probe.hasRoot,mode==='preview')
+     assert.equal(probe.actor,actor)
+     if(mode==='empty') { assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'');assert.equal(probe.error,'') }
+     else if(mode==='malformed') { assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'');assert.match(probe.error,/^Init error: /) }
+     else { assert.equal(actor.ready(),true);assert.equal(probe.error,'');assert.equal(actor.snapshot(),mode==='preview'?'':state) }
    })
    for(const mode of ['empty','malformed','preview']) for(const rejected of [false,true]) await testAsync(`renderer effects: ${mode} load rejects late ${rejected?'errors':'answers'}`, async () => {
     const f=effectProbe();f.load();f.observeDispatch()
@@ -343,46 +384,51 @@ if (!baseline) {
     for(let generation=1;generation<=2;generation++) {
      probe.heldEffects=[hostEffect()];probe.pending=hostEffect()
      probe.invalidateEffects()
-     assert.equal(probe.effectGeneration,generation);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert.equal(probe.host,null);assert.equal(probe.programId,programId)
+     assert.equal(probe.effectGeneration,generation);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert.equal(probe.actor,null);assert.equal(probe.programId,programId)
     }
    })
    test('renderer effects: disappear invalidates before timer and listener cleanup', () => {
     const f=effectProbe(), {probe,events}=f
     f.load();events.length=0
-    const host=probe.host, generation=probe.effectGeneration, programId=probe.programId
-    host.pendingEffects=[hostEffect()];probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+     const actor=probe.actor, generation=probe.effectGeneration, programId=probe.programId
+     let cleared=false
+     const clear=actor.clearEffects.bind(actor)
+     actor.clearEffects=()=>{cleared=true;clear()}
+     probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+
     probe.darkListener={off:event=>events.push(['darkOff',event])};probe.liveSurfaces=[{}]
     probe.stopAllTimers=()=>{
-     assert.equal(probe.disposed,true);assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(host.pendingEffects,[]);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);events.push(['stop'])
+     assert.equal(probe.disposed,true);assert.equal(probe.effectGeneration,generation+1);assert.equal(cleared,true);assert.equal(actor.ready(),true);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);events.push(['stop'])
     }
     probe.aboutToDisappear()
     assert.equal(probe.programId,programId);assert.equal(probe.darkListener,null)
-    assert.deepEqual(events,[['stop'],['persist'],['darkOff','change']])
+     assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'')
+     assert.deepEqual(events,[['stop'],['persist','fixture'],['darkOff','change']])
    })
-   for(const method of ['dispatch','drainEffects','runQueued','allowPending','refusePending','runEffect']) test('renderer effects: disposed '+method+' does no work', () => {
+   for(const method of ['dispatch','acceptEffects','runQueued','allowPending','refusePending','runEffect']) test('renderer effects: disposed '+method+' does no work', () => {
     const f=effectProbe(), {probe,events,executions,platform}=f
-    f.load();probe.aboutToDisappear();events.length=0;executions.length=0
-    const effect=hostEffect(), held=[hostEffect(2)], queued=[hostEffect(3)], state=probe.currentState, generation=probe.effectGeneration
-    probe.pending=effect;probe.heldEffects=held;probe.host.pendingEffects=queued
-    if(method==='dispatch')probe.dispatch('tap',new V.VeraNumberValue(1));else if(method==='runEffect')probe.runEffect(effect);else probe[method]()
-    assert.deepEqual(executions,[]);assert.deepEqual(platform,[]);assert.deepEqual(events,[])
-    assert.equal(probe.currentState,state);assert.equal(probe.pending,effect);assert.equal(probe.heldEffects,held);assert.deepEqual(held,[hostEffect(2)]);assert.equal(probe.host.pendingEffects,queued);assert.deepEqual(queued,[hostEffect(3)]);assert.equal(probe.effectGeneration,generation)
+    f.load();const actor=probe.actor;probe.aboutToDisappear();events.length=0;executions.length=0
+     const effect=hostEffect(), held=[hostEffect(2)], queued=[hostEffect(3)], generation=probe.effectGeneration
+     probe.pending=effect;probe.heldEffects=held
+     if(method==='dispatch')probe.dispatch('tap',new V.VeraNumberValue(1));else if(method==='runEffect')probe.runEffect(effect);else if(method==='acceptEffects')probe.acceptEffects(queued);else probe[method]()
+     assert.deepEqual(executions,[]);assert.deepEqual(platform,[]);assert.deepEqual(events,[])
+     assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'');assert.equal(probe.pending,effect);assert.equal(probe.heldEffects,held);assert.deepEqual(held,[hostEffect(2)]);assert.deepEqual(queued,[hostEffect(3)]);assert.equal(probe.effectGeneration,generation)
    })
-   test('renderer effects: active dispatch executes stub VM and commits state', () => {
+   test('renderer effects: active dispatch executes real actor VM and commits state', () => {
     const f=effectProbe(), {probe,executions,events}=f
     f.load();executions.length=0;events.length=0
-    const state=probe.currentState, payload=new V.VeraNumberValue(1)
-    probe.dispatch('tap',payload)
-    assert.deepEqual(executions,[{action:'tap',args:[state,payload]}]);assert.equal(probe.host.effectsAllowed,false)
-    assert.deepEqual(events,[['snapshot'],['reveal',true],['render'],['reveal',false],['persist']]);assert.equal(probe.error,'')
+     const state=V.decodeRuntimeValue(JSON.parse(probe.actor.snapshot())), payload=new V.VeraNumberValue(1)
+     probe.dispatch('tap',payload)
+     assert.deepEqual(executions,[{action:'tap',args:[state,payload]}])
+     assert.equal(V.decodeRuntimeValue(JSON.parse(probe.actor.snapshot())).fields.get('count').value,1)
+     assert.deepEqual(events,[['snapshot'],['reveal',true],['render'],['reveal',false],['persist','fixture']]);assert.equal(probe.error,'')
    })
    await testAsync('renderer effects: active queues drain, allow and refuse without losing replies', async () => {
     const f=effectProbe(), {probe,platform,delivered,events}=f
     f.load();f.observeDispatch()
     const first=hostEffect(1), allowed={...hostEffect(2),ask:true}, refused={...hostEffect(3),ask:true}, last=hostEffect(4)
-    probe.host.pendingEffects=[first,allowed,refused,last]
-    probe.drainEffects()
-    assert.deepEqual(probe.host.pendingEffects,[]);assert.equal(platform.length,1);assert.equal(probe.pending,allowed);assert.deepEqual(probe.heldEffects,[refused,last])
+    probe.acceptEffects([first,allowed,refused,last])
+     assert.equal(platform.length,1);assert.equal(probe.pending,allowed);assert.deepEqual(probe.heldEffects,[refused,last])
     probe.allowPending()
     assert.equal(platform.length,2);assert.equal(probe.pending,refused);assert.deepEqual(probe.heldEffects,[last]);assert.equal(events.filter(event=>event[0]==='remember').length,1)
     probe.refusePending()
@@ -397,19 +443,19 @@ if (!baseline) {
     probe.load=function() { events.push(['load',this.disposed]);assert.equal(this.disposed,false);return load.call(this) }
     probe.aboutToAppear()
     assert.deepEqual(events.slice(0,3),[['catalogue',false],['dark',false],['load',false]])
-    assert.equal(probe.disposed,false);assert.equal(probe.effectGeneration,generation+1);assert(probe.vm);assert(probe.host)
+    assert.equal(probe.disposed,false);assert.equal(probe.effectGeneration,generation+1);assert.equal(probe.actor.ready(),true)
    })
     function surfaceProbe(route='displaySync') {
      const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-     const names=['disposed','effectGeneration','liveGeneration','heldEffects','vm','host','currentState','pageHidden','fieldEdits','surfaces','textTimers','liveSurfaces','surfaceSync','surfaceTimer','lastFrameAt','lastViewAt','lastSurfaceSave','framing','frameCount','frameWork','frameWorst','frameSplit','frameReportAt']
+     const names=['disposed','effectGeneration','liveGeneration','heldEffects','actor','traceOwner','pageHidden','fieldEdits','surfaces','textTimers','liveSurfaces','surfaceSync','surfaceTimer','lastFrameAt','framing','frameCount','frameWork','frameWorst','frameSplit','frameReportAt']
      const fields=names.map(name=>{
       const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
       return field[0].replace('  private ','')
      }).join('\n')
-     const constants=['SURFACE_VIEW_MS','SURFACE_SAVE_MS','SURFACE_MAX_ELAPSED_MS'].map(name=>{
+     const constants=['SURFACE_MAX_ELAPSED_MS'].map(name=>{
       const value=renderer.match(new RegExp('^const '+name+':[^\\n]+','m'));assert(value,name);return value[0]
      }).join('\n')
-     const methods=['invalidateEffects','load','runWidgetRefresh','renderView','markLiveNodeGeneration','onDestinationHidden','reconcileSurfaces','collectKind','startSurfaceLoop','stopSurfaceLoop','surfaceFrame'].map(name=>declaration(renderer,'  private '+name+'(').replace('  private ',''))
+     const methods=['actorOptions','createActor','invalidateEffects','load','renderView','markLiveNodeGeneration','onDestinationHidden','reconcileSurfaces','collectKind','startSurfaceLoop','stopSurfaceLoop','surfaceFrame'].map(name=>declaration(renderer,'  private '+name+'(').replace('  private ',''))
      const body=methods.concat(['aboutToAppear','aboutToDisappear','onProgramChanged','onPreviewOnlyChanged'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
      const compiled=ts.transpileModule(constants+'\nclass Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
      assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'surface probe syntax')
@@ -417,7 +463,8 @@ if (!baseline) {
      const L=loadSource(path.join(sourceRoot,'components/VeraLiveTree.ets'))
      let now=10000, probe, nextHandle=0
      const events=[], executions=[], syncs=[], scheduled=new Map()
-     const mocks={StageTrace,...V,UiHostEnvironment:U.UiHostEnvironment,decodeVeraUi:U.decodeVeraUi,toLive:L.toLive,reconcile:L.reconcile,markIconRoom:L.markIconRoom,Date:{now:()=>now},catalogKinds:()=>{events.push(['catalogue',probe.disposed,probe.pageHidden]);return []},console:{info(){},warn(){},error(){}},displaySync:{create(){
+     const {AppActor}=actorModule({Date:{now:()=>now}},(action,args)=>{if(action!=='init'&&action!=='view')executions.push({action,args})})
+      const mocks={StageTrace,AppActor,armReveal:L.armReveal,scheduleCardRefresh(){},...V,toLive:L.toLive,reconcile:L.reconcile,markIconRoom:L.markIconRoom,Date:{now:()=>now},catalogKinds:()=>{events.push(['catalogue',probe.disposed,probe.pageHidden]);return []},console:{info(){},warn(){},error(){}},displaySync:{create(){
       events.push(['create'])
       if(route==='interval')throw Error('fixture: no displaySync')
       const sync={callback:null,active:false,setExpectedFrameRateRange(range){assert.deepEqual(range,{expected:60,min:30,max:120})},on(event,callback){assert.equal(event,'frame');this.callback=callback},start(){this.active=true;events.push(['start'])},stop(){this.active=false;events.push(['stop'])},off(event){assert.equal(event,'frame');events.push(['off'])}}
@@ -426,7 +473,7 @@ if (!baseline) {
      const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
      probe=new Probe()
      Object.assign(probe,{destinationHidden:false,previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',darkListener:null,pending:null,
-      stopAllTimers(){events.push(['cleanup',this.disposed,this.pageHidden]);this.stopSurfaceLoop()},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){events.push(['dark',this.disposed,this.pageHidden])},restoreState(){return null},seeded:value=>value,notifyStateSnapshot(){events.push(['snapshot'])},persistState(){events.push(['persist'])},paintSurfaces(){events.push(['paint'])},drainEffects(){events.push(['drain'])},countFrame(){events.push(['count'])},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},reconcileBackHandler(){},cancelFields(){},reconcileFields(){},scheduleFieldActions(){},renderingDepth:0,flushFields(){},controller:null})
+      persistKey:'',seedState:'',stamp:()=>probe.vbc2,stopAllTimers(){events.push(['cleanup',this.disposed,this.pageHidden]);this.stopSurfaceLoop()},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){events.push(['dark',this.disposed,this.pageHidden])},onStateSnapshot(){events.push(['snapshot'])},notifyStateSnapshot(){this.actor?.notifyStateSnapshot()},persistState(){events.push(['persist']);this.actor?.persistState()},paintSurfaces(){events.push(['paint'])},acceptEffects(){events.push(['drain'])},countFrame(){events.push(['count'])},stopPartsTimer(){},advanceParts(){},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},reconcileBackHandler(){},cancelFields(){},reconcileFields(){},scheduleFieldActions(){},renderingDepth:0,flushFields(){},controller:null})
      probe.vbc2=C.compileVeraSource(`
 @jsonable class AppState { n: number; }
 function init(): AppState { return {n: 0}; }
@@ -437,16 +484,14 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
      const load=probe.load
      probe.load=function() {
       events.push(['load',this.disposed,this.pageHidden]);load.call(this)
-      assert.equal(this.error,'');assert(this.vm instanceof V.VirtualMachine)
-      const execute=this.vm.execute.bind(this.vm)
-      this.vm.execute=(action,args)=>{executions.push({action,args});return execute(action,args)}
+       assert.equal(this.error,'');assert(this.actor instanceof AppActor);assert.equal(this.actor.ready(),true)
      }
      function callback() { return route==='interval'?scheduled.get(probe.surfaceTimer):probe.surfaceSync?.callback }
      return {probe,events,executions,syncs,scheduled,callback,elapse(ms){now+=ms},active(){return syncs.filter(sync=>sync.active).length+scheduled.size},transition(hidden){probe.destinationHidden=hidden;probe.onDestinationHidden()}}
     }
     function surfaceSnapshot(f) {
      const p=f.probe
-     return {state:p.currentState,lastFrameAt:p.lastFrameAt,lastViewAt:p.lastViewAt,lastSurfaceSave:p.lastSurfaceSave,framing:p.framing,frameSplit:[...p.frameSplit],effectsAllowed:p.host.effectsAllowed,pending:[...p.host.pendingEffects],events:[...f.events],executions:[...f.executions]}
+     return {state:p.actor?.snapshot()||'',ready:p.actor?.ready()||false,lastFrameAt:p.lastFrameAt,framing:p.framing,frameSplit:[...p.frameSplit],events:[...f.events],executions:[...f.executions]}
     }
     for(const route of ['displaySync','interval']) {
      test(`destination surfaces/${route}: initially hidden gate precedes watchers and real load`, () => {
@@ -492,7 +537,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
       assert.equal(events.filter(event=>event[0]==='stop').length,3)
       if(route==='displaySync')assert.equal(events.filter(event=>event[0]==='off').length,3)
       f.callback()();assert.equal(f.executions.filter(call=>call.action==='tick').at(-1).args[1].value,16);assert.equal(probe.error,'')
-      assert.equal(probe.currentState.fields.get('n').value,175)
+      assert.equal(V.decodeRuntimeValue(JSON.parse(probe.actor.snapshot())).fields.get('n').value,175)
       probe.aboutToDisappear();assert.equal(f.active(),0)
      })
      for(const gate of ['hidden','disposed']) test(`destination surfaces/${route}: late frame does no work while ${gate}`, () => {
@@ -567,19 +612,19 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
        }
        function fieldProbe(sync=false,controller=null) {
       const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-       const fields=['fieldEdits','fieldInputs','fieldActions','fieldMenus','surfaceInputs','resumingFieldActions','fieldActionsNeedResume','renderingDepth','liveGeneration','disposed','effectGeneration','heldEffects','vm','host','currentState','surfaces','surfaceSync','surfaceTimer','lastViewAt','timers','timerConfigs','timerLastFire','ticking','backHandlerAction'].map(name=>{
+       const fields=['fieldEdits','fieldInputs','fieldActions','fieldMenus','surfaceInputs','resumingFieldActions','fieldActionsNeedResume','renderingDepth','liveGeneration','disposed','effectGeneration','heldEffects','actor','traceOwner','surfaces','surfaceSync','surfaceTimer','timers','timerConfigs','timerLastFire','ticking','backHandlerAction'].map(name=>{
         const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+(?:\\n    [^\\n]+)*','m'));assert(field,name)
         return field[0].replace('  private ','')
        }).join('\n')
-       const names=['fieldCurrent','markLiveNodeGeneration','isLiveNode','recordFieldInput','refreshFieldIssue','refreshFieldIssues','textFieldIssue','cancelField','cancelFields','fieldController','endFieldEditing','reconcileFields','changeField','commitField','flushFields','flushUserFields','finishField','invalidateEffects','load','renderView','handleAction','handleBoolAction','handleStringAction','fieldFormOf','pathTo','hasField','collectFieldDependencies','fieldActionState','fieldActionCurrent','releaseSurfaceAction','scheduleFieldActions','captureFieldAction','enqueueFieldAction','dispatchFieldAction','resumeFieldActions','dispatch','surfaceTouch','surfaceMove','stateKeys','stamp','persistState','notifyStateSnapshot','reconcileBackHandler','findBackHandlerAction','startTimer','stopTimer','runEffect']
-       const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear','onBackPressSignal'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
+       const names=['fieldCurrent','markLiveNodeGeneration','isLiveNode','recordFieldInput','refreshFieldIssue','refreshFieldIssues','textFieldIssue','cancelField','cancelFields','fieldController','endFieldEditing','reconcileFields','changeField','commitField','flushFields','flushUserFields','finishField','actorOptions','createActor','invalidateEffects','load','renderView','handleAction','handleBoolAction','handleStringAction','fieldFormOf','pathTo','hasField','collectFieldDependencies','fieldActionState','fieldActionCurrent','releaseSurfaceAction','scheduleFieldActions','captureFieldAction','enqueueFieldAction','dispatchFieldAction','resumeFieldActions','dispatch','surfaceTouch','surfaceMove','stamp','persistState','notifyStateSnapshot','reconcileBackHandler','findBackHandlerAction','startTimer','stopTimer','runEffect']
+       const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear','onBackPressSignal','onResume','onPreviewOnlyChanged'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
        const sliderSource=renderer.slice(renderer.indexOf("} else if (node.kind === 'slider') {"),renderer.indexOf("} else if (node.kind === 'select') {"))
        const callback='sliderChange(node: LiveNode) { return '+declaration(sliderSource,'.onChange(').slice('.onChange('.length)+' }'
        const fieldSource=renderer.slice(renderer.indexOf("} else if (node.kind === 'field') {"),renderer.indexOf("} else if (node.kind === 'toggle' || node.kind === 'checkbox') {"))
        const fieldCallbacks=[['nativeChange','.onChange('],['nativeSubmit','.onSubmit('],['nativeEditChange','.onEditChange(']].map(([name,prefix])=>name+'(node: LiveNode, generation: number) { return '+declaration(fieldSource,prefix).slice(prefix.length)+' }').join('\n')
        const declarations=['class FieldEdit','class FieldInput','class FieldAction','class SurfaceInput','class TimerConfig'].map(prefix=>declaration(renderer,prefix)).join('\n')
         const capture=declaration(renderer,'  private captureFields:').replace('  private ','')
-        const compiled=ts.transpileModule(declarations+'\n'+renderer.match(/^const SURFACE_VIEW_MS:[^\n]+/m)[0]+'\n'+renderer.match(/^const SLOW_TICK_MS:[^\n]+/m)[0]+'\n'+renderer.match(/^const FORM_BOUNDS:[^\n]+/m)[0]+'\nclass Probe { static RENDERED=[]; '+fields+'\n'+capture+'\n'+body+'\n'+callback+'\n'+fieldCallbacks+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
+        const compiled=ts.transpileModule(declarations+'\n'+renderer.match(/^const SLOW_TICK_MS:[^\n]+/m)[0]+'\n'+renderer.match(/^const FORM_BOUNDS:[^\n]+/m)[0]+'\nclass Probe { static RENDERED=[]; '+fields+'\n'+capture+'\n'+body+'\n'+callback+'\n'+fieldCallbacks+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
       assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'field probe syntax')
       global.ObservedV2=c=>c;global.Trace=()=>{}
       const L=loadSource(path.join(sourceRoot,'components/VeraLiveTree.ets'))
@@ -591,12 +636,18 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
         constructor() { this.text='';this.reads=0 }
         getText() { this.reads++;return this.text }
        }
-       const mocks={StageTrace,...V,...loadVera('VeraGfx'),...loadVera('VeraStateStamp'),TextInputController,TouchType,SliderChangeMode,scheduleCardRefresh(){},store:{saveState(project,version,stamp,encoded){
-        assert.equal(project,'fixture');assert.equal(version,'version');assert.equal(stamp,probe.stamp())
-        const state=V.decodeRuntimeValue(JSON.parse(encoded))
-        assert.deepEqual(V.encodeRuntimeValue(state),V.encodeRuntimeValue(probe.currentState))
-        saves.push(Object.fromEntries([...state.fields].map(([key,value])=>[key,value.value])))
-       }},runRawIntent:platform,runSdkAdapter:platform,UiHostEnvironment:U.UiHostEnvironment,decodeVeraUi:U.decodeVeraUi,toLive:L.toLive,reconcile:L.reconcile,markIconRoom:L.markIconRoom,armReveal:L.armReveal,catalogKinds:()=>[],Date:{now:()=>now},console:{info(){},warn(){},error(){}},setInterval(callback,interval){
+        let persisted='', observed=''
+        const store={loadState:()=>persisted,saveState(project,version,stamp,encoded){
+         assert.equal(project,'fixture');assert.equal(version,'version');assert.equal(stamp,probe.stamp())
+         const state=V.decodeRuntimeValue(JSON.parse(encoded))
+         assert.equal(encoded,probe.actor.snapshot())
+         persisted=encoded
+         saves.push(Object.fromEntries([...state.fields].map(([key,value])=>[key,value.value])))
+        }}
+        const {AppActor}=actorModule({store,Date:{now:()=>now},snapshot:encoded=>{observed=encoded}},(action,args=[])=>{
+         if(action!=='view'&&action!=='init'&&!action.startsWith('fixture'))calls.push({action,value:args[1] instanceof V.VeraObjectValue?args[1].fields:args[1].value,at:now})
+        })
+        const mocks={StageTrace,AppActor,...V,...loadVera('VeraGfx'),...loadVera('VeraStateStamp'),TextInputController,TouchType,SliderChangeMode,scheduleCardRefresh(){},runRawIntent:platform,runSdkAdapter:platform,toLive:L.toLive,reconcile:L.reconcile,markIconRoom:L.markIconRoom,armReveal:L.armReveal,catalogKinds:()=>[],Date:{now:()=>now},console:{info(){},warn(){},error(){}},setInterval(callback,interval){
         const handle=++nextHandle;intervals.set(handle,{callback,interval});return handle
        },clearInterval(handle){intervals.delete(handle)},setTimeout(callback,delay){
        assert.equal(delay,400)
@@ -604,19 +655,43 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
        scheduled.set(handle,timer);history.set(handle,timer);return handle
       },clearTimeout(handle){scheduled.delete(handle)}}
       const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks)), probe=new Probe()
-       Object.assign(probe,{previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',pending:null,darkListener:null,liveSurfaces:[],destinationHidden:false,pageHidden:false,persistKey:'fixture/version',controller,
+       Object.assign(probe,{previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',pending:null,darkListener:null,liveSurfaces:[],destinationHidden:false,pageHidden:false,persistKey:'fixture/version',seedState:'',controller,
          onStateSnapshot(encoded){snapshots.push(encoded)},
-        stopAllTimers(){for(const id of [...this.timers.keys()])this.stopTimer(id)},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){},restoreState(){return null},seeded:value=>value,runWidgetRefresh(){},drainEffects(){},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},onBackHandlerChanged(){},reconcileSurfaces(){},paintSurfaces(){}})
-      if(!fieldBytecode)fieldBytecode=C.compileVeraSource(`
+        stopAllTimers(){for(const id of [...this.timers.keys()])this.stopTimer(id)},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){},acceptEffects(){},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},onBackHandlerChanged(){},reconcileSurfaces(){},paintSurfaces(){},paintSurface(){}})
+       const frameProps={kind:'field',style:'default',label:'',action:'',keyboardType:'',required:false,requiredMessage:'',minLength:0,minLengthMessage:'',maxLength:-1,maxLengthMessage:'',pattern:'',patternMessage:'',email:false,emailMessage:'',enabled:true}
+       const frameView=`class FixtureField { type: string; value: string; text: string; ${Object.entries(frameProps).filter(([key])=>key!=='kind').map(([key,value])=>key+': '+typeof value+';').join(' ')} }
+class FixtureRoot { type: string; style: string; children: FixtureField[]; }
+function fixtureView(state: AppState): FixtureRoot {
+ let fields: FixtureField[] = []; let descriptor: string = state.note;
+ if (strings.split(descriptor, "\\t")[0] !== "fixtureFrame") {
+  descriptor = ${JSON.stringify(['fixtureFrame',...['setFirst','setSecond'].flatMap((action,index)=>Object.values({...frameProps,label:index===0?'First':'Second',action}))].join('\t'))};
+ }
+ let parts: string[] = strings.split(descriptor, "\\t"); let i: number = 1;
+ while (i < parts.length()) {
+  let value: string = state.first; if (i > 1) { value = state.second; }
+  let action: string = parts[i + 3]; if (state.note === "normalize" && i === 1) { action = "normalize"; }
+  fields.push({text: "", type: parts[i], style: parts[i + 1], label: parts[i + 2], value: value, action: action, keyboardType: parts[i + 4], required: parts[i + 5] === "true", requiredMessage: parts[i + 6], minLength: strings.toNumber(parts[i + 7], 0), minLengthMessage: parts[i + 8], maxLength: strings.toNumber(parts[i + 9], -1), maxLengthMessage: parts[i + 10], pattern: parts[i + 11], patternMessage: parts[i + 12], email: parts[i + 13] === "true", emailMessage: parts[i + 14], enabled: parts[i + 15] === "true"});
+  i = i + ${Object.keys(frameProps).length};
+ }
+ if (state.note !== descriptor) {
+  fields.push({type: "text", style: "body", text: state.note, value: "", ${Object.entries(frameProps).filter(([key])=>key!=='kind'&&key!=='style').map(([key,value])=>key+': '+JSON.stringify(value)).join(', ')}});
+ }
+ return {type: "column", style: "default", children: fields};
+}`
+       if(!fieldBytecode)fieldBytecode=C.compileVeraSource(`
 import * as ui from "std/ui"
+import * as strings from "std/strings"
 @jsonable class AppState { first: string; second: string; note: string; saved: string; }
+function fixtureNote(state: AppState, value: string): AppState { return {first: state.first, second: state.second, note: value, saved: state.saved}; }
 function init(): AppState { return {first: "base", second: "other", note: "initial", saved: ""}; }
+function fixtureFirst(state: AppState, value: string): AppState { return {first: value, second: state.second, note: state.note, saved: state.saved}; }
 function setFirst(state: AppState, value: string): AppState { return {first: value, second: state.second, note: state.note, saved: state.saved}; }
 function setSecond(state: AppState, value: string): AppState { return {first: state.first, second: value, note: state.note, saved: state.saved}; }
 function normalize(state: AppState, value: string): AppState { return {first: "normalized", second: state.second, note: state.note, saved: state.saved}; }
 function save(state: AppState, value: number): AppState { return {first: state.first, second: state.second, note: state.note, saved: state.first + "/" + state.second}; }
 function toggle(state: AppState, value: boolean): AppState { return {first: state.first, second: state.second, note: state.note, saved: state.first + "/" + state.second}; }
-function view(state: AppState): ui.View { let action: string = "setFirst"; if (state.note === "normalize") { action = "normalize"; } return ui.Column("default", [ui.TextField("default", "First", state.first, action), ui.TextField("default", "Second", state.second, "setSecond"), ui.Text("body", state.note)]); }
+${frameView}
+function view(state: AppState): FixtureRoot { return fixtureView(state); }
 `).vbc2
        if(sync&&!syncBytecode) {
         const shape={first:'string',second:'string',note:'string',saved:'string',position:'number',log:'string',x:'number',y:'number',id:'number',phase:'string'}
@@ -627,6 +702,7 @@ import * as ui from "std/ui"
 import * as gfx from "std/gfx"
 @jsonable class AppState { ${Object.entries(shape).map(([key,type])=>key+': '+type+';').join(' ')} }
 function init(): AppState { return {first: "base", second: "other", note: "initial", saved: "", position: 0, log: "", x: 0, y: 0, id: 0, phase: ""}; }
+${handler('fixtureFirst','string',{first:'value'})}
 ${handler('setFirst','string',{first:'value'})}
 ${handler('setSecond','string',{second:'value'})}
 ${handler('slide','number',{position:'value',saved:'state.first + "/" + state.second',log:'state.log + "s" + ui.numberToString(value) + ";"'})}
@@ -643,12 +719,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        probe.vbc2=sync?syncBytecode:fieldBytecode
        const load=probe.load
       probe.load=function() {
-       load.call(this);assert.equal(this.error,'');assert(this.vm instanceof V.VirtualMachine)
-       const execute=this.vm.execute.bind(this.vm)
-       this.vm.execute=(action,args=[])=>{
-         if(action!=='view'&&action!=='init')calls.push({action,value:args[1] instanceof V.VeraObjectValue?args[1].fields:args[1].value,at:now})
-        return execute(action,args)
-       }
+        load.call(this);assert.equal(this.error,'');assert(this.actor instanceof AppActor);assert.equal(this.actor.ready(),true)
       }
        probe.aboutToAppear()
        snapshots.length=0
@@ -668,25 +739,29 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        now=end
       }
        function frame(overrides=[{},{}]) {
-        const children=overrides.map((override,index)=>Object.assign(new U.VeraUiNode(),{kind:'field',value:index===0?'base':'other',action:index===0?'setFirst':'setSecond',enabled:true},override))
-        probe.liveGeneration++
-        L.reconcile(probe.liveRoot,Object.assign(new U.VeraUiNode(),{kind:'column',children}))
-        probe.markLiveNodeGeneration(probe.liveRoot)
-        probe.reconcileFields()
-
+         const parts=['fixtureFrame',...overrides.flatMap((override,index)=>Object.values({...frameProps,action:index===0?'setFirst':'setSecond',...override}))]
+         inject('fixtureNote',parts.join('\t'))
       }
        function native(node=first,generation=node.fieldGeneration) {
         const controller=probe.fieldController(node,generation), submit=probe.nativeSubmit(node,generation), edit=probe.nativeEditChange(node,generation)
         return {controller,submit(text){submit(0,{text})},edit,blur(text){controller.text=text;edit(false)}}
        }
-       const slider=probe.liveRoot.children[3], otherSlider=probe.liveRoot.children[4], surface=probe.liveRoot.children[5]
+          function inject(action,value) {
+           probe.actor.move(action,new V.VeraStringValue(value))
+           probe.renderView()
+           assert.equal(probe.error,'')
+          }
+         function external(overrides) {
+          for(const [key,value] of Object.entries(overrides))inject(key==='note'?'fixtureNote':'fixtureFirst',value)
+         }
+        const slider=probe.liveRoot.children[3], otherSlider=probe.liveRoot.children[4], surface=probe.liveRoot.children[5]
        if(sync)probe.surfaces.set(surface,{width:400,height:200})
-       return {probe,first,second,slider,otherSlider,surface,scheduled,history,intervals,replies,calls,writes,saves,snapshots,advance,frame,native,
+       return {probe,first,second,slider,otherSlider,surface,scheduled,history,intervals,replies,calls,writes,saves,snapshots,advance,frame,native,external,setPersistence(key){probe.persistKey=key;probe.actor.promote(probe.actorOptions());snapshots.length=0},
          remove(node){probe.liveGeneration++;probe.liveRoot.children=probe.liveRoot.children.filter(child=>child!==node);probe.markLiveNodeGeneration(probe.liveRoot)},
         slide(value,mode='Moving',node=slider){probe.sliderChange(node)(value,SliderChangeMode[mode])},
         touch(phase,touches=[{id:1,x:150,y:50}],node=surface){probe.surfaceTouch(node,{type:TouchType[phase],changedTouches:touches})},
         reconcile(node,overrides){const next=Object.assign(new U.VeraUiNode(),node,overrides);probe.liveGeneration++;L.reconcile(node,next);probe.markLiveNodeGeneration(probe.liveRoot);probe.reconcileFields()},
-        change(node,value,composing=false,generation=node.fieldGeneration){if(runtimeMode)probe.nativeChange(node,generation)(value,composing?{value}:undefined);else probe.changeField(node,generation,value,composing)},finish(node,generation=node.fieldGeneration){probe.finishField(node,generation)},fire(handle){assert(history.has(handle));history.get(handle).callback()},state(name){return probe.currentState.fields.get(name).value}}
+        change(node,value,composing=false,generation=node.fieldGeneration){if(runtimeMode)probe.nativeChange(node,generation)(value,composing?{value}:undefined);else probe.changeField(node,generation,value,composing)},finish(node,generation=node.fieldGeneration){probe.finishField(node,generation)},fire(handle){assert(history.has(handle));history.get(handle).callback()},state(name){return V.decodeRuntimeValue(JSON.parse(probe.actor?.snapshot()||observed)).fields.get(name).value}}
      }
       if(runtimeMode) {
        test('runtime traces: fast ticker preserves pending debounce', () => {
@@ -722,7 +797,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
         assert.deepEqual(f.calls,[]);assert.equal(probe.fieldActions.length,1)
         const queued=probe.fieldActions[0], cancellation=first.fieldCancellation
         assert(queued.dependencies.includes(first))
-        probe.currentState.fields.set('first',new V.VeraStringValue('external'));probe.renderView()
+        f.external({first:'external'})
         assert(first.fieldCancellation>cancellation);assert(first.fieldGeneration>generation)
         assert.equal(probe.fieldEdits.size,0);assert.deepEqual(probe.fieldActions,[])
         probe.enqueueFieldAction(queued)
@@ -775,7 +850,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
           },
           bind(msg) {
            const f=fieldProbe(false,msg.previewController), bubble=new Bubble();bubble.msg=msg
-           f.probe.persistKey='';f.probe.onStateSnapshot=bubble.snapshotHandler(msg.previewGeneration)
+           f.setPersistence('');f.probe.onStateSnapshot=bubble.snapshotHandler(msg.previewGeneration)
            return {...f,snapshotHandler:generation=>bubble.snapshotHandler(generation)}
           }}
         }
@@ -936,13 +1011,13 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        })
        for(const transition of ['refine','structural-refine','fullscreen-on','fullscreen-off']) test('field lifecycle: controller captures latest text before '+transition+' carries state', () => {
         const controller=previewController(), f=fieldProbe(false,controller), {probe}=f, parent=generateFieldHost(controller,transition==='structural-refine'), {host}=parent
-        probe.persistKey='';probe.onStateSnapshot=encoded=>{f.snapshots.push(encoded);parent.onStateSnapshot(encoded)}
+        f.setPersistence('');probe.onStateSnapshot=encoded=>{f.snapshots.push(encoded);parent.onStateSnapshot(encoded)}
         host.fullscreen=transition==='fullscreen-off'
         f.change(f.first,'old');f.advance(31);f.change(f.first,'latest text');f.change(f.second,'latest second');const timers=[...f.history.keys()]
         f.advance(17);assert.equal(host.liveState,'stale snapshot');assert.equal(host.carriedState,'previous carry');assert.deepEqual(f.calls,[])
         let captured=false
         const notify=probe.notifyStateSnapshot
-        probe.notifyStateSnapshot=function(){notify.call(this);captured=this.currentState.fields.get('second').value==='latest second'}
+        probe.notifyStateSnapshot=function(){notify.call(this);captured=f.state('second')==='latest second'}
         let carried=host.carriedState
         Object.defineProperty(host,'carriedState',{get:()=>carried,set(value){assert(captured,'capture before carry');assert.equal(value,host.liveState);carried=value}})
         if(transition.endsWith('refine'))host.doRefine();else host.setFullscreen(transition==='fullscreen-on')
@@ -957,12 +1032,12 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        })
        for(const transition of ['refine','structural-refine','fullscreen-on','fullscreen-off']) test('field lifecycle: composition blocks '+transition+' until explicit retry after native completion', () => {
         const controller=previewController(), f=fieldProbe(false,controller), {probe}=f, parent=generateFieldHost(controller,transition==='structural-refine'), {host}=parent, native=f.native()
-        probe.onStateSnapshot=parent.onStateSnapshot;host.fullscreen=transition==='fullscreen-off'
+        let snapshots=0
+         probe.onStateSnapshot=encoded=>{snapshots++;parent.onStateSnapshot(encoded)};host.fullscreen=transition==='fullscreen-off'
         const invoke=()=>transition.endsWith('refine')?host.doRefine():host.setFullscreen(transition==='fullscreen-on')
         f.change(f.first,'n');const timer=probe.fieldEdits.get(f.first).timer
         f.change(f.first,'ni',true);const edit=probe.fieldEdits.get(f.first)
-        const notify=probe.notifyStateSnapshot;let snapshots=0
-        probe.notifyStateSnapshot=function(){snapshots++;notify.call(this)}
+
         invoke();invoke();f.fire(timer);f.advance(1000)
         assert.deepEqual(f.calls,[]);assert.deepEqual(f.saves,[]);assert.equal(snapshots,0);assert.equal(host.liveState,'stale snapshot');assert.equal(host.carriedState,'previous carry')
         assert.equal(host.fullscreen,transition==='fullscreen-off');assert.equal(host.tab,'source');assert.equal(host.composerHidden,true);assert.deepEqual(parent.events,[])
@@ -976,7 +1051,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        })
         for(const transition of ['startNew','restoreBase']) test('field lifecycle: '+transition+' rotates snapshot identity before old disappearing draft can seed a new preview', () => {
          const controller=previewController(), parent=generateFieldHost(controller), {host}=parent, old=fieldProbe(false,controller)
-         old.probe.persistKey='';old.probe.onStateSnapshot=parent.onStateSnapshot
+         old.setPersistence('');old.probe.onStateSnapshot=parent.onStateSnapshot
          old.change(old.first,'departing draft');const timer=old.probe.fieldEdits.get(old.first).timer
          old.advance(399);assert.deepEqual(old.calls,[])
          let live=host.liveState, clears=0
@@ -989,7 +1064,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
          assert.equal(host.liveState,'');assert.equal(host.carriedState,'')
          host.setFullscreen(true);assert.equal(host.liveState,'');assert.equal(host.carriedState,'')
          const current=fieldProbe(false,host.previewController), callback=host.previewSnapshot(host.previewController)
-         current.probe.persistKey='';current.probe.onStateSnapshot=callback
+         current.setPersistence('');current.probe.onStateSnapshot=callback
          current.change(current.first,'current draft');assert.equal(host.previewController.flushAndSnapshot(),true)
          const accepted=host.liveState
          assert.equal(V.decodeRuntimeValue(JSON.parse(accepted)).fields.get('first').value,'current draft')
@@ -1109,7 +1184,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        for(const transition of ['load','preview-load','disappear','reappear']) test(`native fields: ${transition} drops controllers and rejects actual old callbacks`, () => {
         const f=fieldProbe(), {probe,first}=f, native=f.native()
         f.change(first,'old composition',true)
-        if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false }
+        if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false;probe.onPreviewOnlyChanged() }
         else if(transition==='disappear'||transition==='reappear') { probe.aboutToDisappear();if(transition==='reappear')probe.aboutToAppear() }
         else probe.load()
         assert.equal(probe.fieldInputs.size,0);assert.equal(probe.fieldEdits.size,0)
@@ -1190,7 +1265,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        else if(transition==='remove')f.remove(slider)
        else if(transition==='effect-generation')probe.effectGeneration++
        else if(transition==='load')probe.load()
-       else if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false }
+       else if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false;probe.onPreviewOnlyChanged() }
        else { probe.aboutToDisappear();if(transition==='reappear')probe.aboutToAppear() }
        f.change(first,'final',false,generation);probe.resumeFieldActions();f.advance(400)
        assert(!f.calls.some(call=>call.action==='slide'));assert(!f.saves.some(state=>state.position!==0))
@@ -1217,7 +1292,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        probe.dispatch=function(action,value,persist=true) { dispatch.call(this,action,value,persist);if(action==='setFirst')this.load() }
        if(input==='slider')f.slide(7,'End');else if(input==='back')probe.onBackPressSignal();else f.touch('Down')
        assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(f.calls.map(call=>call.action),['setFirst'])
-       assert.equal(f.saves.length,1);assert.equal(f.saves[0].first,'latest');assert.equal(f.saves[0].log,'');assert.equal(f.state('first'),'base')
+       assert.equal(f.saves.length,1);assert.equal(f.saves[0].first,'latest');assert.equal(f.saves[0].log,'');assert.equal(f.state('first'),'latest')
        f.fire(timer);f.touch('Move');f.touch('Up');assert.equal(f.calls.length,1);assert.equal(f.saves.length,1);assert.equal(probe.surfaceInputs.size,0);assert.equal(probe.error,'')
       })
       test('native back: real signal flushes pending drafts before handler and persists updated state', () => {
@@ -1340,7 +1415,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        else if(transition==='remove')f.remove(surface)
        else if(transition==='unmeasured')probe.surfaces.get(surface).width=0
        else if(transition==='effect-generation')probe.effectGeneration++
-       else if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false }
+       else if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false;probe.onPreviewOnlyChanged() }
        else if(transition==='disappear'||transition==='reappear') { probe.aboutToDisappear();if(transition==='reappear')probe.aboutToAppear() }
        else probe[transition]()
         const commits=probe.fieldEdits.has(f.first)?1:0
@@ -1501,11 +1576,11 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        const old=probe.fieldEdits.get(first)
        assert.equal(old.commitRequested,true);assert.equal(old.composing,true);assert.deepEqual(probe.fieldActions,[])
        f.advance(13)
-       if(transition==='external') { probe.currentState.fields.set('first',new V.VeraStringValue('external'));probe.renderView() }
+       if(transition==='external') { f.external({first:'external'}) }
        else if(['kind','action','enabled'].includes(transition)) { f.frame([{[transition]:{kind:'text',action:'normalize',enabled:false}[transition]},{}]);f.frame() }
        else if(transition==='remove') { f.frame([]);f.frame() }
        else if(transition==='cancelField')probe.cancelField(first)
-       else if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false }
+       else if(transition==='preview-load') { probe.previewOnly=true;probe.load();probe.previewOnly=false;probe.onPreviewOnlyChanged() }
        else if(transition==='reappear') { probe.aboutToDisappear();probe.aboutToAppear() }
        else probe[transition]()
        assert.equal(probe.fieldEdits.size,0);assert.equal(f.scheduled.size,0);assert.deepEqual(probe.fieldActions,[])
@@ -1603,7 +1678,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
       const f=fieldProbe(), {probe,first}=f, generation=first.fieldGeneration
       f.change(first,'pending');const edit=probe.fieldEdits.get(first), timer=edit.timer
       for(let i=0;i<3;i++) {
-       f.advance(100);probe.currentState.fields.set('note',new V.VeraStringValue('frame'+i));probe.renderView()
+       f.advance(100);f.external({note:'frame'+i})
        assert.equal(probe.liveRoot.children[0],first);assert.equal(first.fieldGeneration,generation);assert.equal(probe.fieldEdits.get(first),edit);assert.equal(edit.timer,timer);assert.equal(first.fieldValue,'base')
       }
       assert.deepEqual(f.writes,[]);f.advance(99);assert.deepEqual(f.calls,[]);f.advance(1)
@@ -1713,8 +1788,8 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        assert.notEqual(first[attr],value)
        f.change(first,'pending');const edit=probe.fieldEdits.get(first), timer=edit.timer
        for(let i=0;i<3;i++) {
-        f.advance(100);f.frame([{[attr]:value+i},{}])
-        assert.equal(first[attr],value+i);assert.equal(probe.liveRoot.children[0],first);assert.equal(first.fieldGeneration,generation)
+        const next=attr==='style'?['multiline','default','multiline'][i]:value+i;f.advance(100);f.frame([{[attr]:next},{}])
+        assert.equal(first[attr],next);assert.equal(probe.liveRoot.children[0],first);assert.equal(first.fieldGeneration,generation)
         assert.equal(probe.fieldEdits.get(first),edit);assert.equal(edit.value,'pending');assert.equal(edit.base,'base');assert.equal(edit.composing,false);assert.equal(edit.commitRequested,false)
         assert.equal(edit.timer,timer);assert.equal(f.scheduled.size,1);assert.equal(f.scheduled.get(timer).at,400);assert.equal(first.fieldValue,'base')
        }
@@ -1726,7 +1801,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
       const f=fieldProbe(), {probe,first}=f, generation=first.fieldGeneration
       f.change(first,'stale');const timer=probe.fieldEdits.get(first).timer
       f.advance(100)
-      if(transition==='external') { probe.currentState.fields.set('first',new V.VeraStringValue('external'));probe.renderView() }
+      if(transition==='external') { f.external({first:'external'}) }
       else if(transition==='remove')f.frame([])
       else f.frame([{[transition]:{kind:'text',action:'normalize',enabled:false}[transition]},{}])
       assert.equal(probe.fieldEdits.size,0);assert.equal(f.scheduled.size,0);assert(!f.scheduled.has(timer))
@@ -1739,7 +1814,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
       test('native fields: external update without pending edit bumps generation and rejects stale native callbacks', () => {
        const f=fieldProbe(), {probe,first}=f, generation=first.fieldGeneration
        assert.equal(probe.fieldEdits.size,0)
-       probe.currentState.fields.set('first',new V.VeraStringValue('external'));probe.renderView()
+       f.external({first:'external'})
        assert.equal(probe.liveRoot.children[0],first);assert.equal(first.fieldGeneration,generation+1);assert.equal(first.value,'external');assert.equal(first.fieldValue,'external')
        f.change(first,'stale',false,generation);f.finish(first,generation);f.advance(1000)
        assert.deepEqual(f.calls,[]);assert.equal(probe.fieldEdits.size,0);assert.equal(f.scheduled.size,0);assert.equal(f.state('first'),'external')
@@ -1754,7 +1829,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
        f.change(first,'composing',true);f.change(second,'other composing',true)
        probe.handleAction('save',5);probe.handleBoolAction('toggle',false)
        assert.deepEqual(f.calls,[]);assert.equal(probe.fieldActions.length,2);assert.equal(f.scheduled.size,0)
-       if(transition==='external') { probe.currentState.fields.set('first',new V.VeraStringValue('external'));probe.renderView() }
+       if(transition==='external') { f.external({first:'external'}) }
        else if(transition==='remove')f.frame([])
        else f.frame([{[transition]:{kind:'text',action:'normalize',enabled:false}[transition]},{}])
        assert.equal(first.fieldGeneration,generation+(transition==='remove'?0:1));assert.deepEqual(probe.fieldActions,[]);assert.equal(probe.resumingFieldActions,false)
@@ -1878,7 +1953,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
       })
       test('native fields: real handler normalization retains node identity but bumps native generation once', () => {
        const f=fieldProbe(), {probe,first}=f
-       probe.currentState.fields.set('note',new V.VeraStringValue('normalize'));probe.renderView();const generation=first.fieldGeneration
+       f.external({note:'normalize'});const generation=first.fieldGeneration
        f.change(first,'raw value');assert.equal(first.fieldValue,'base');assert.deepEqual(f.writes,[])
        f.finish(first)
        assert.deepEqual(f.calls,[{action:'normalize',value:'raw value',at:0}]);assert.equal(f.state('first'),'normalized');assert.equal(first.value,'normalized');assert.equal(first.fieldValue,'normalized')
@@ -1937,7 +2012,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
     function cancel(handle) { stops.push(handle);scheduled.delete(handle) }
     const Probe=new Function('StageTrace','setInterval','clearInterval','Date','VeraNumberValue',compiled.outputText+'; return Probe')(StageTrace,schedule,cancel,{now:()=>now},V.VeraNumberValue)
     const probe=new Probe()
-    Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
+    Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),sceneFrames:new Map(),stopSurfaceLoop(){surfaceStops++},stopPartsTimer(){},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
     function advance(ms) {
      const end=now+ms
      while(true) {

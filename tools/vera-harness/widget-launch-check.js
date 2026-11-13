@@ -333,6 +333,38 @@ async function test(name, run) {
     assertCommit(f, f.stage,
       [isolatedPath({ projectId: project.id, versionId: runnable.id, vbc2: runnable.vbc2 })], true);
   });
+  await test('Live card opens its project in immersive shortcut mode', async () => {
+    const source = fs.readFileSync(path.join(sourceRoot, 'widget/pages/LiveCard.ets'), 'utf8');
+    const actions = [];
+    const state = { projectId: project.id, formId: 'form-7' };
+    extractMethods(source, ['openApp'], state, {
+      postCardAction(owner, action) { assert.equal(owner, state); actions.push(action); }
+    });
+    state.openApp();
+    assert.deepEqual(actions, [{ action: 'router', abilityName: 'EntryAbility',
+      params: { projectId: project.id, launchMode: 'runLatest', veraFormId: '' } }]);
+    const f = await ready();
+    f.stage.stack.paths.push(projectPath(), runnerPath());
+    const request = await f.launch({ parameters: actions[0].params });
+    assert.equal(request.kind, 'shortcut');
+    assertCommit(f, f.stage,
+      [isolatedPath({ projectId: project.id, versionId: runnable.id, vbc2: runnable.vbc2 })], true);
+  });
+  await test('Live card without a project preserves widget binding instead of immersive launch', async () => {
+    const source = fs.readFileSync(path.join(sourceRoot, 'widget/pages/LiveCard.ets'), 'utf8');
+    const actions = [];
+    const state = { projectId: '', formId: 'form-7' };
+    extractMethods(source, ['openApp'], state, {
+      postCardAction(owner, action) { assert.equal(owner, state); actions.push(action); }
+    });
+    state.openApp();
+    assert.deepEqual(actions, [{ action: 'router', abilityName: 'EntryAbility',
+      params: { projectId: '', launchMode: 'runLatest', veraFormId: 'form-7' } }]);
+    const f = await ready();
+    const request = await f.launch({ parameters: actions[0].params });
+    assert.equal(request.kind, 'form');
+    assertCommit(f, f.stage, [library(), { name: 'widgetBind', param: params({ formId: 'form-7' }) }], false);
+  });
   await test('Navigation receives the raw stack without notifying observed state during render', async () => {
     const shell = fs.readFileSync(path.join(sourceRoot, 'pages/AppShell.ets'), 'utf8');
     assert.match(shell, /import\s*\{[^}]*\bUIUtils\b[^}]*\}\s*from\s*'@kit\.ArkUI'/);

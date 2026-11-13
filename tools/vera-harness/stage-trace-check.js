@@ -99,24 +99,24 @@ function devParameterProbe() {
 }
 function probe() {
   const V = loadVera('VeraInterpreter')
-  const fields = ['effectGeneration', 'liveGeneration', 'disposed', 'heldEffects', 'vm', 'host', 'currentState', 'refreshes',
+  const fields = ['effectGeneration', 'liveGeneration', 'disposed', 'heldEffects', 'actor', 'traceOwner',
     'fieldEdits', 'fieldInputs', 'fieldMenus', 'fieldActions', 'surfaceInputs', 'resumingFieldActions', 'fieldActionsNeedResume', 'renderingDepth',
     'timers', 'timerConfigs', 'timerLastFire', 'ticking', 'surfaces', 'liveSurfaces', 'surfaceSync', 'surfaceTimer',
-    'lastFrameAt', 'lastViewAt', 'lastSurfaceSave', 'framing', 'frameSplit', 'pageHidden', 'spinTimer', 'spinPeriod',
+    'lastFrameAt', 'framing', 'frameSplit', 'pageHidden', 'spinTimer', 'spinPeriod', 'partsTimer',
     'motionTimer', 'motionTriggers', 'poseAnims', 'sceneFrames'].map(name => {
     const field = renderer.match(new RegExp('^  private ' + name + ':[^\\n]+(?:\\n    [^\\n]+)*', 'm'))
     assert(field, name)
     return field[0]
   }).join('\n')
-  const names = ['invalidateEffects', 'load', 'runWidgetRefresh', 'dispatch', 'renderView', 'notifyStateSnapshot',
-    'persistState', 'stateKeys', 'restoreState', 'markLiveNodeGeneration', 'isLiveNode', 'collectFieldDependencies',
+  const names = ['invalidateEffects', 'load', 'actorOptions', 'createActor', 'dispatch', 'renderView', 'notifyStateSnapshot',
+    'persistState', 'markLiveNodeGeneration', 'isLiveNode', 'collectFieldDependencies',
     'captureFieldAction', 'dispatchFieldAction', 'enqueueFieldAction', 'resumeFieldActions', 'fieldActionCurrent',
     'releaseSurfaceAction', 'scheduleFieldActions', 'startTimer', 'stopTimer', 'stopAllTimers', 'stopSurfaceLoop',
-    'surfaceFrame', 'paintSurface', 'paintSurfaces', 'drainEffects', 'runQueued', 'runEffect', 'allowPending',
+    'surfaceFrame', 'paintSurface', 'paintSurfaces', 'acceptEffects', 'runQueued', 'runEffect', 'allowPending',
     'refusePending', 'cancelField', 'cancelFields', 'refreshFieldIssue', 'fieldActionState', 'watchDarkMode']
   const methods = names.map(name => declaration('  private ' + name + '('))
     .concat(declaration('  onResume('), declaration('  onPreviewOnlyChanged(')).join('\n')
-  const constants = ['SURFACE_VIEW_MS', 'SURFACE_SAVE_MS', 'SURFACE_MAX_ELAPSED_MS', 'SLOW_TICK_MS'].map(name => {
+  const constants = ['SURFACE_MAX_ELAPSED_MS', 'SLOW_TICK_MS'].map(name => {
     const constant = renderer.match(new RegExp('^const ' + name + ':[^\\n]+', 'm'))
     assert(constant, name)
     return constant[0]
@@ -131,8 +131,9 @@ function probe() {
   const media = {matches: false, on(event, callback) { this.callback = callback }}
   const surface = {kind: 'surface', action: 'step', label: 'draw', value: '', children: [], minimum: 100, maximum: 100, style: 'default'}
   const root = () => ({kind: 'column', children: [surface], text: secret})
+  const hosts = []
   class Host {
-    constructor() { this.effectsAllowed = false; this.pendingEffects = [] }
+    constructor() { this.effectsAllowed = false; this.pendingEffects = []; hosts.push(this) }
   }
   class Machine {
     constructor(module, host) { this.host = host }
@@ -161,12 +162,29 @@ function probe() {
         if (faults.save) throw Error('fixture save')
         disk.set(project + '/' + version, encoded); saves.push(encoded)
       }}}
+  const actorFile = path.join(sourceRoot, 'runtime/AppActor.ets')
+  const actorCode = ts.transpileModule(fs.readFileSync(actorFile, 'utf8'), {fileName: 'AppActor.ts',
+    compilerOptions: {target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true})
+  assert.equal((actorCode.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error).length, 0, 'actor syntax')
+  const actorModule = {exports: {}}
+  const dependencies = {
+    '../vera/VeraInterpreter': {...V, VirtualMachine: Machine, deserializeVbc2: mocks.deserializeVbc2},
+    '../vera/VeraUi': {UiHostEnvironment: Host, decodeVeraUi: mocks.decodeVeraUi},
+    '../vera/VeraGfx': {decodeGfx: mocks.decodeGfx},
+    '../vera/VeraStateCarry': loadVera('VeraStateCarry'),
+    '../vera/ProjectStore': {store: mocks.store}, './trace/StageTrace': {StageTrace}
+  }
+  new Function('require', 'module', 'exports', 'Date', 'console', actorCode.outputText)(id => {
+    assert(Object.hasOwn(dependencies, id), 'unexpected actor dependency ' + path.resolve(path.dirname(actorFile), id))
+    return dependencies[id]
+  }, actorModule, actorModule.exports, mocks.Date, mocks.console)
+  mocks.AppActor = actorModule.exports.AppActor
   const Probe = new Function(...Object.keys(mocks), compiled.outputText + '\nconst VeraPreview = Probe; return Probe')(...Object.values(mocks))
   p = new Probe()
   Object.assign(p, {previewOnly: false, programId: 0, revision: 0, liveRoot: null, hasRoot: false, error: '',
-    vbc2: 'fixture', persistKey: 'fixture/version', diskState: '', appForeground: true, pending: null,
-    stamp: () => 'fixture-stamp', seeded: value => value, onStateSnapshot: encoded => snapshots.push(encoded),
-    flushFields() {},
+    vbc2: 'fixture', persistKey: 'fixture/version', seedState: '', appForeground: true, pending: null,
+    stamp: () => 'fixture-stamp', onStateSnapshot: encoded => snapshots.push(encoded),
+    flushFields() {}, stopPartsTimer() {}, partPoses: () => [],
     reconcileTheme() {}, reconcileFields() {}, reconcileTimers() {}, reconcileSpin() {}, reconcileMotion() {},
     reconcileBackHandler() {}, reconcileSurfaces() {}, countFrame() {}, needsConsent: () => false,
     dark: false, darkListener: null, t: () => ({}),
@@ -174,7 +192,10 @@ function probe() {
       if (faults.media) throw Error('fixture media')
       return media
     }})})})
-  return {p, calls, snapshots, saves, replies, loads, timers, disk, V, surface, faults, media, paints: () => paints,
+  return {p, calls, snapshots, saves, replies, loads, timers, disk, V, surface, faults, media,
+    host: () => hosts.at(-1), state: () => V.decodeRuntimeValue(JSON.parse(p.actor.snapshot())),
+    deliverEffects(effects) { hosts.at(-1).pendingEffects = effects; p.actor.frameHandlers([], 0) },
+    paints: () => paints,
     elapse(ms) { now += ms }, fire() { assert.equal(timers.size, 1); [...timers.values()][0].callback() }}
 }
 function effect(id = 1, target = secret) {
@@ -416,14 +437,14 @@ async function main() {
     } finally { StageTrace.digest = digest }
   })
   await test('real renderer traps clear effects, stop timers and never commit input', () => {
-    const records = capture(), {p, V, replies, saves} = probe()
+    const records = capture(), f = probe(), {p, V, replies, saves} = f
     p.load(); records.length = 0
-    const state = p.currentState
+    const state = p.actor.snapshot()
     p.dispatch('trap', new V.VeraStringValue(secret))
     assert.match(p.error, /Action error: fixture trap/)
-    assert.equal(p.currentState, state)
-    assert.equal(p.host.effectsAllowed, false)
-    assert.deepEqual(p.host.pendingEffects, [])
+    assert.equal(p.actor.snapshot(), state)
+    assert.equal(f.host().effectsAllowed, false)
+    assert.deepEqual(f.host().pendingEffects, [])
     assert.deepEqual(replies, [])
     assert.deepEqual(saves, [])
     sequence(records, ['EXECUTE', 'ERROR', 'TIMERS_STOPPED'])
@@ -455,7 +476,7 @@ async function main() {
   await test('real ticker gates preserve elapsed time and trace delivered/skipped ticks', () => {
     const records = capture(), f = probe(), {p, calls} = f
     p.load(); calls.length = 0; records.length = 0
-    const state = p.currentState, tickerId = 'clock:' + state.value
+    const state = f.state(), tickerId = 'clock:' + state.value
     const config = Object.freeze({interval: 1000, action: 'tick'})
     p.startTimer(tickerId, config)
     p.appForeground = false; f.elapse(1000); f.fire()
@@ -502,13 +523,13 @@ async function main() {
     assert.equal(f.paints(), 1)
     surface.action = 'trap'; records.length = 0; p.surfaceFrame()
     sequence(records, ['ERROR', 'TIMERS_STOPPED'])
-    assert.equal(p.framing, false); assert.equal(p.host.effectsAllowed, false)
+    assert.equal(p.framing, false); assert.equal(f.host().effectsAllowed, false)
     privateRecords(records)
   })
   await test('real effect requests/results route current replies and gate stale callbacks', async () => {
-    const records = capture(), {p, V, replies, calls} = probe()
+    const records = capture(), f = probe(), {p, V, replies, calls} = f
     p.load(); records.length = 0
-    p.host.pendingEffects = [effect()]; p.drainEffects()
+    f.deliverEffects([effect()])
     assert.equal(replies.length, 1)
     assert(events(records).includes('EFFECT_REQUEST'))
     replies[0].resolve(secret); await settle()
@@ -549,8 +570,8 @@ async function main() {
     sequence(records, ['RESUME_STATE_RELOAD', 'FRAME'])
     assert.equal(records.find(record => record.event === 'RESUME_STATE_RELOAD').attributes.changed, true)
     assert.equal(loads.length, 2)
-    assert.equal(p.currentState.value, secret + '!')
-    p.persistKey = ''; records.length = 0; loads.length = 0; p.onResume()
+    assert.equal(V.decodeRuntimeValue(JSON.parse(p.actor.snapshot())).value, secret + '!')
+    p.persistKey = ''; p.onPreviewOnlyChanged(); records.length = 0; loads.length = 0; p.onResume()
     assert.equal(records.find(record => record.event === 'RESUME_STATE_RELOAD').attributes.changed, false)
     assert.equal(loads.length, 0)
     privateRecords(records)
@@ -562,7 +583,8 @@ async function main() {
       p.surfaces.set(surface, {ready: true, visible: false, width: 100, height: 100, ctx: {}})
       const field = {}
       if (pendingBefore) p.fieldEdits.set(field, {composing: false})
-      p.drainEffects = () => {
+      f.host().pendingEffects.push(effect())
+      p.acceptEffects = () => {
         p.surfaces.get(surface).visible = true
         if (pendingBefore) p.fieldEdits.clear()
         else p.fieldEdits.set(field, {composing: false})
@@ -576,8 +598,8 @@ async function main() {
       assert(calls.some(call => call.action === 'draw'))
       assert.equal(records.at(-1).event, 'SURFACE_FRAME')
       assert.equal(p.liveSurfaces.length, 0)
-      p.fieldEdits.clear(); p.drainEffects = () => {}; records.length = 0
-      if (!pendingBefore) p.lastSurfaceSave = 10000
+      p.fieldEdits.clear(); p.acceptEffects = () => {}; records.length = 0
+      if (!pendingBefore) p.actor.beginSurfaceLoop(10000)
       f.elapse(16); p.surfaceFrame()
       assert.equal(records.find(record => record.event === 'SURFACE_FRAME').attributes.save, 'NOT_DUE')
     }
@@ -591,12 +613,12 @@ async function main() {
     StageTrace.request = function (...args) { forwarded.push(args); return request.apply(this, args) }
     try {
       for (const allow of [true, false]) {
-        const records = capture(), {p, replies} = probe()
+        const records = capture(), f = probe(), {p, replies} = f
         p.load(); records.length = 0; forwarded.length = 0
         p.needsConsent = () => true; p.consentTitle = () => 'fixture'
         p.consentTarget = () => 'fixture'; p.consentKey = () => 'fixture'
         const value = effect(); value.rawMode = 'foreground'
-        p.host.pendingEffects = [value]; p.drainEffects()
+        f.deliverEffects([value])
         assert.equal(forwarded.length, 1)
         assert.deepEqual(forwarded[0].slice(5), ['foreground', p.effectGeneration])
         const requestAttributes = records.find(record => record.event === 'EFFECT_REQUEST').attributes
@@ -612,7 +634,7 @@ async function main() {
         assert.equal(result.outcome, allow ? 'OK' : 'DECLINED')
         assert(records.some(record => record.event === 'EXECUTE' && record.attributes.kind === 'EFFECT_RESULT'))
       }
-      const records = capture(), {p, replies} = probe()
+      const records = capture(), f = probe(), {p, replies} = f
       p.load(); records.length = 0; forwarded.length = 0
       const value = effect(); value.rawMode = 'background'
       p.runEffect(value)
@@ -683,20 +705,22 @@ async function main() {
     assert(records.some(record => record.event === 'ERROR' && record.attributes.kind === 'DARK_MODE'))
     p.previewOnly = true; p.onPreviewOnlyChanged()
     assert.equal(snapshots.length, 1)
-    p.previewOnly = false
+    p.previewOnly = false; p.onPreviewOnlyChanged()
     p.dispatch('ephemeral', new V.VeraStringValue(secret), false)
-    p.persistKey = ''; p.dispatch('unkeyed', new V.VeraStringValue(secret))
+    p.persistKey = ''; p.onPreviewOnlyChanged(); p.dispatch('unkeyed', new V.VeraStringValue(secret))
+    assert(calls.some(call => call.action === 'ephemeral'))
+    assert(calls.some(call => call.action === 'unkeyed'))
     assert.equal(saves.length, 0)
   })
   await test('MOCKED consent queue blocks followers then routes out-of-order replies by effect identity', async () => {
-    const records = capture(), {p, replies, calls} = probe()
+    const records = capture(), f = probe(), {p, replies, calls} = f
     p.load()
     p.needsConsent = () => true; p.consentTitle = () => 'fixture'
     p.consentTarget = () => 'fixture'; p.consentKey = () => 'fixture'
     const first = effect(41), second = effect(90), third = effect(103)
     first.rawMode = 'foreground'; second.rawMode = 'background'
     second.resultHandler = 'secondAnswer'; third.resultHandler = 'thirdAnswer'
-    p.host.pendingEffects = [first, second, third]; p.drainEffects()
+    f.deliverEffects([first, second, third])
     assert.equal(p.pending, first); assert.deepEqual(p.heldEffects, [second, third])
     assert.equal(replies.length, 0)
     p.allowPending()
@@ -714,13 +738,13 @@ async function main() {
       ['secondAnswer', 'thirdAnswer', 'answer'])
   })
   await test('MOCKED failure policies preserve observed restore/save/view/draw behavior', () => {
-    const records = capture(), {p, V, disk, faults, saves, surface} = probe()
+    const records = capture(), f = probe(), {p, V, disk, faults, saves, surface} = f
     disk.set('fixture/version', 'not-json'); p.load()
     assert.equal(p.error, '')
     assert(records.some(record => record.event === 'ERROR' && record.attributes.kind === 'RESTORE'))
     faults.save = true
     p.dispatch('tap', new V.VeraStringValue(secret + '!'))
-    assert.equal(p.currentState.value, secret + '!'); assert.equal(p.error, '')
+    assert.equal(V.decodeRuntimeValue(JSON.parse(p.actor.snapshot())).value, secret + '!'); assert.equal(p.error, '')
     assert.equal(saves.length, 0)
     assert.equal(records.filter(record => record.event === 'SAVE').at(-1).attributes.result, 'ERROR')
     faults.save = false; faults.view = true
@@ -732,10 +756,10 @@ async function main() {
     p.surfaces.set(surface, {ready: true, visible: true, width: 100, height: 100, ctx: {}})
     p.paintSurface(surface)
     assert.equal(records.filter(record => record.event === 'DRAW').at(-1).attributes.result, 'ERROR')
-    assert.equal(p.host.effectsAllowed, false)
+    assert.equal(f.host().effectsAllowed, false)
   })
   await test('MOCKED resolved effect failure strings retain classified outcomes and payload hashes', async () => {
-    const records = capture(), {p, replies, calls} = probe()
+    const records = capture(), f = probe(), {p, replies, calls} = f
     p.load()
     for (const [index, text] of ['declined code=7', 'error 9: fixture', 'ok', '{"value":1}'].entries()) {
       p.runEffect(effect(51 + index)); replies.at(-1).resolve(text); await settle()
@@ -749,7 +773,7 @@ async function main() {
     StageTrace.configure(true, () => { throw Error('fixture sink') })
     p.load(); p.dispatch('tap', new V.VeraStringValue(secret))
     assert.equal(p.error, '')
-    assert.equal(p.currentState.value, secret)
+    assert.equal(V.decodeRuntimeValue(JSON.parse(p.actor.snapshot())).value, secret)
     assert.equal(saves.length, 1)
   })
   await test('all required renderer event types were exercised', () => {
@@ -761,6 +785,7 @@ async function main() {
   }
   const failed = results.filter(result => result.result === 'FAIL').length
   console.log('stage-trace-check: ' + (results.length - failed) + ' passed, ' + failed + ' failed')
+  console.log('MOCKED orchestration: current AppActor and extracted VeraPreview methods; fake VM, UI and platform boundaries')
   if (failed) { process.exitCode = 1; return }
   if (options) {
     const value = baseline.artifact(scenarios)

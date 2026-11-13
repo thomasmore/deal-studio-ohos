@@ -76,7 +76,7 @@ try {
   let published = false
   fs.linkSync = (source, target) => {
     assert(!fs.existsSync(target))
-    if (posix) {assert.equal(fs.statSync(source).mode & 0o777, 0o600)
+    if (posix) {assert.equal(fs.statSync(source).mode & 0o777, 0o600)}
     assert.deepEqual(JSON.parse(fs.readFileSync(source, 'utf8')), expected)
     published = true
     return link(source, target)

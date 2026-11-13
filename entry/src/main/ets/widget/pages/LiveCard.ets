@@ -94,6 +94,6 @@ struct LiveCard {
   }
 
   private openApp(): void {
-    postCardAction(this, { action: 'router', abilityName: 'EntryAbility', params: { projectId: this.projectId, veraRun: '1', veraFormId: this.projectId.length === 0 ? this.formId : '' } })
+    postCardAction(this, { action: 'router', abilityName: 'EntryAbility', params: { projectId: this.projectId, launchMode: 'runLatest', veraFormId: this.projectId.length === 0 ? this.formId : '' } })
   }
 }
