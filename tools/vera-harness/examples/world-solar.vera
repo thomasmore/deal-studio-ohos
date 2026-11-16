@@ -47,11 +47,12 @@ function planets(): Planet[] {
 function build(state: AppState): scene.Thing[] {
   let things: scene.Thing[] = [];
   things.push(scene.camera(0, 4.5, 8, 0, 0, 0, true));
+  things.push(scene.sky("#060a16", 1400));
   things.push(scene.glow(scene.spin(scene.sphere("Sun", 0, 0, 0, 0.6, "#ffcc33"), 25)));
   let phase: number = 0;
   for (let p: Planet of planets()) {
     let body: scene.Thing = scene.sphere(p.name, 0, 0, 0, p.radius, p.color);
-    things.push(scene.spin(scene.orbit(body, "Sun", p.distance, p.years * yearS(), phase), p.dayS));
+    things.push(scene.trail(scene.spin(scene.orbit(body, "Sun", p.distance, p.years * yearS(), phase), p.dayS)));
     phase = phase + 47;
   }
   // 27.3 days is 0.0748 of a year.

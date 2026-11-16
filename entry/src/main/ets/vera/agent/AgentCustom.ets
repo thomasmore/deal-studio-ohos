@@ -17,6 +17,7 @@ import { compileVeraSource, CompileError } from '../VeraCompiler'
 import { smokeRun } from '../VeraSmoke'
 import { playSurface } from '../VeraSurfacePlay'
 import { isScene } from '../VeraCompose'
+import { asksFor3D } from '../Asks3D'
 import { SCENE_GUIDE, SCENE_TOKENS } from './AgentScene'
 import { applyRepair, SEARCH_MARK, SPLIT_MARK, REPLACE_MARK } from '../VeraRepair'
 
@@ -379,6 +380,18 @@ function check(source: string, scene: boolean = false, unreadToo: boolean = true
   }
 }
 
+/**
+ * A ui.World only for a request that asks for 3D in so many words: dice, planets or a tower without it may well be wanted
+ * flat, and a section wrote one for "roll two dice" (phone, 2026-11-16). '' when the section may stand.
+ */
+const USES_WORLD: RegExp = new RegExp('\\bui\\.World\\s*\\(')
+
+function flatOnly(prompt: string, reply: string): string {
+  if (asksFor3D(prompt) || !USES_WORLD.test(reply)) { return '' }
+  return 'The request does not ask for 3D, so nothing is built on a ui.World: draw it flat -- a ui.Surface for something ' +
+    'that moves or is touched, a ui.Motion (tumble, spin) for a throw -- or with ordinary components.'
+}
+
 /** Whether a section still compiles and runs after it was changed outside the writer's rounds, and leaves no field unread. */
 export function stillWorks(source: string): boolean {
   return check(source) === ''
@@ -485,7 +498,8 @@ export async function writeSection(request: CustomRequest, language: string, ask
     // Asked for twice at most: a section that still makes its own clock or list is better than none, so it is then taken as it is.
     let again = section === null || attempt >= 2 ? '' : repeats(section, request)
     let problem = section === null ? 'The answer was not in the form asked for: <classes>, <fields>, <functions> and <view>.' :
-      (calls.length > 0 ? calls : (again.length > 0 ? again : check(request.compose(section), scene, !unreadAsked)))
+      (calls.length > 0 ? calls : (again.length > 0 ? again : (flatOnly(request.prompt, reply) ||
+        check(request.compose(section), scene, !unreadAsked))))
     if (problem.startsWith(UNREAD_PROBLEM)) { unreadAsked = true }
     if (problem.length === 0) {
       // It compiles and runs; whether it does what it is for is Jev's reading. One it reads as not doing a need is asked

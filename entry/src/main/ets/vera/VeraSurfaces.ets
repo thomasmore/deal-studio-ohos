@@ -1,25 +1,25 @@
 /**
  * What a ball looks like on its surface: the patterns scene.paint names, as colours over a sphere, and the meshes the
- * renderer builds from them -- a sphere coloured vertex by vertex, and a flat ring (a planet's rings, or the mark round a
- * selected body). Pure: colours in, numbers out, so the host checks and proofs run it as the phone does.
+ * renderer builds from them -- a sphere coloured vertex by vertex, and a flat ring (rings round a body, or the mark round a
+ * selected one). Pure: colours in, numbers out, so the host checks and proofs run it as the phone does.
  *
- * A pattern is a kind of surface, not a particular planet: "continents" is any world of seas and land, real or made
- * up, "bands" any gas giant, "craters" any airless moon. Every colour comes from the program but the white of ice and
- * cloud; where a feature sits (a storm, a crater, a coast) comes from the body's seed. The program picks the pattern and both colours; the host draws
+ * A pattern is how a surface looks, not what it is: the program says which look suits its body ("patches" for land on
+ * sea, a map, a camouflage; "craters" for a moon or a golf ball). Every colour comes from the program but the white of
+ * the caps and wisps; where a feature sits (an oval, a crater, an edge) comes from the body's seed. The program picks the pattern and both colours; the host draws
  * it, with value noise over the unit sphere (no seam, no stretching at the poles) seeded by the body's id, so two moons
  * with the same pattern still differ and a body looks the same every time it is built.
  */
 
-/** The patterns scene.paint takes, each with what it is for (the prompt is built from this). */
+/** The patterns scene.paint takes, each by how it looks (the prompt is built from this). */
 export const SURFACE_PATTERNS: string[][] = [
-  ['continents', 'seas in the colour and land in the second colour, white polar ice and thin white cloud: a world of seas and land'],
-  ['bands', 'wavy stripes along the latitudes in the two colours: a gas giant, a striped ball'],
-  ['storm', 'bands with one large oval storm in a deeper shade of the second colour: a gas giant with a great storm'],
-  ['craters', 'the colour pocked with craters, with dark plains in the second colour: an airless moon or planet, an asteroid'],
-  ['rocky', 'the colour mottled with patches of the second colour: a rocky or desert world, a stone'],
-  ['icecaps', 'rocky, with white caps at both poles: a cold rocky world'],
-  ['clouds', 'soft swirls of the two colours: a world under thick cloud, the boiling face of a star'],
-  ['stripes', 'segments from pole to pole, alternating the two colours: a beach ball'],
+  ['patches', 'large patches of the second colour over the first, with white caps at both poles and thin white wisps'],
+  ['bands', 'wavy stripes along the latitudes in the two colours'],
+  ['oval', 'bands with one large oval in a deeper shade of the second colour'],
+  ['craters', 'the colour pocked with round craters, with dark plains in the second colour'],
+  ['mottled', 'the colour mottled with small patches of the second colour'],
+  ['polar', 'mottled, with white caps at both poles'],
+  ['swirls', 'soft swirls of the two colours'],
+  ['stripes', 'segments from pole to pole, alternating the two colours'],
 ]
 
 export function surfacePattern(name: string): boolean {
@@ -107,7 +107,7 @@ const WHITE: number[] = [0.96, 0.97, 0.99]
 export function surfaceColor(pattern: string, c1: number[], c2: number[], seed: number, x: number, y: number, z: number): number[] {
   let lat = Math.asin(Math.max(-1, Math.min(1, y)))
   let lon = Math.atan2(z, x)
-  if (pattern === 'continents') {
+  if (pattern === 'patches') {
     let h = fbm(x * 1.6 + 7, y * 1.6, z * 1.6, 5, seed)
     let land = step(0.5, 0.53, h)
     // Deeper seas darker, highland lighter and drier.
@@ -120,12 +120,12 @@ export function surfaceColor(pattern: string, c1: number[], c2: number[], seed: 
     let cloud = step(0.58, 0.72, fbm(x * 2.4 + 31, y * 3.6, z * 2.4, 4, seed + 77))
     return mix(c, WHITE, cloud * 0.55)
   }
-  if (pattern === 'bands' || pattern === 'storm') {
+  if (pattern === 'bands' || pattern === 'oval') {
     let warp = (fbm(x * 3, y * 3, z * 3, 3, seed) - 0.5) * 0.5
     let wave = 0.5 + 0.5 * Math.sin(lat * 11 + warp * 4 + Math.sin(lat * 3.7) * 1.3)
     let c = mix(c1, c2, wave)
     c = shade(c, 0.9 + 0.2 * fbm(x * 8, y * 2, z * 8, 2, seed + 5))
-    if (pattern === 'storm') {
+    if (pattern === 'oval') {
       // One oval, longer east-west than north-south, at a latitude and longitude of the body's own (seeded), in a deeper
       // shade of the second colour with a lighter core.
       let south = hash3(1, 2, 3, seed) < 0.5 ? -1 : 1
@@ -168,15 +168,15 @@ export function surfaceColor(pattern: string, c1: number[], c2: number[], seed: 
     }
     return c
   }
-  if (pattern === 'rocky' || pattern === 'icecaps') {
+  if (pattern === 'mottled' || pattern === 'polar') {
     let c = mix(c1, c2, step(0.45, 0.65, fbm(x * 1.8, y * 1.8, z * 1.8, 5, seed)))
     c = shade(c, 0.86 + 0.28 * fbm(x * 9, y * 9, z * 9, 2, seed + 4))
-    if (pattern === 'icecaps') {
+    if (pattern === 'polar') {
       c = mix(c, WHITE, step(0.84, 0.88, Math.abs(y) + 0.05 * (fbm(x * 5, y * 5, z * 5, 2, seed + 8) - 0.5)))
     }
     return c
   }
-  if (pattern === 'clouds') {
+  if (pattern === 'swirls') {
     let w = fbm(x * 1.5, y * 1.5, z * 1.5, 3, seed) * 2.2
     let t = fbm(x * 2 + w, y * 3.5 + w * 0.5, z * 2 - w, 4, seed + 41)
     return mix(c1, c2, step(0.35, 0.7, t))

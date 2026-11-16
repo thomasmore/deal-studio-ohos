@@ -34,7 +34,7 @@ import { displaySync } from '@kit.ArkGraphics2D'
 import { decodeGfx, paintGfx, pointerValue, gfxFit, gfxToSurface, gfxNaturalHeight, GfxOp } from '../vera/VeraGfx'
 import { TimerFace, timerFace } from '../widget/CardModel'
 import { decodeScene, sceneEventValue } from '../vera/VeraScene'
-import { worldInSpace } from '../vera/VeraLook3D'
+import { worldBackgroundRgba, isDarkRgba } from '../vera/VeraLook3D'
 import { WorldBox, WorldPick, WorldGesture } from './VeraWorld3D'
 import { SimEvent } from '../vera/VeraPhysics'
 
@@ -461,8 +461,8 @@ export struct VeraPreview {
   private fullWorld: LiveNode | null = null
   /** Bumped whenever fullWorld changes: a LiveNode (@ObservedV2) cannot be @State, so this redraws the frame instead. */
   @State fullWorldEpoch: number = 0
-  /** Whether the full-screen world is in space (dark): its title is then drawn light. Set when its scene is described. */
-  @State fullWorldSpace: boolean = false
+  /** Whether what is behind the full-screen world is dark: its title and caption are then drawn light. */
+  @State fullWorldDark: boolean = false
   /** The program whose "full" world has been opened: closing it is the person's choice, kept until the program changes. */
   private fullOpenedFor: number = -1
   /** How tall the snackbars drawn over the bottom of the window are, in vp: the content ends that far above it (programFrame). */
@@ -1194,7 +1194,8 @@ export struct VeraPreview {
       try {
         if (this.host !== null) { this.host!.effectsAllowed = false }
         let spec = decodeScene(this.vm!.execute(node.label, [this.currentState!]))
-        if (node === this.fullWorld && worldInSpace(spec) !== this.fullWorldSpace) { this.fullWorldSpace = worldInSpace(spec) }
+        let dark = isDarkRgba(worldBackgroundRgba(spec, theme))
+        if (node === this.fullWorld && dark !== this.fullWorldDark) { this.fullWorldDark = dark }
         let key = JSON.stringify(spec)
         if (key !== box.key || theme !== box.theme) {
           box.key = key
@@ -1703,15 +1704,30 @@ export struct VeraPreview {
   private setFullWorld(node: LiveNode | null): void {
     if (node === this.fullWorld) { return }
     this.fullWorld = node
+    // Opened from its corner button, with no state change to describe its scene again: whether it is dark comes from the
+    // box showing it, or its caption is drawn in the theme's ink on black.
+    let box = node !== null ? this.worlds.get(node) : undefined
+    this.fullWorldDark = box !== undefined && box.dark
     this.fullWorldEpoch++
   }
 
   /** The title of the Header beside a full-screen world, which full screen leaves out: '' when there is none. */
   private fullWorldTitle(world: LiveNode): string {
+    let header = this.fullWorldHeader(world)
+    return header !== null ? header.text : ''
+  }
+
+  /** The Header's supporting line (how to use the world: drag to turn, tap a planet), which full screen would lose. */
+  private fullWorldHint(world: LiveNode): string {
+    let header = this.fullWorldHeader(world)
+    return header !== null ? header.value.trim() : ''
+  }
+
+  private fullWorldHeader(world: LiveNode): LiveNode | null {
     let parent = this.liveRoot !== null ? this.parentOf(this.liveRoot!, world) : null
-    if (parent === null) { return '' }
+    if (parent === null) { return null }
     let header = parent.children.find((child: LiveNode): boolean => child.kind === 'header')
-    return header !== undefined ? header.text : ''
+    return header !== undefined ? header : null
   }
 
   /** The caption over a full-screen world: the text of the plain Texts beside it in its column, the result line(s). */
@@ -1736,7 +1752,9 @@ export struct VeraPreview {
   worldFullButton(node: LiveNode) {
     Row() {
       Button({ type: ButtonType.Circle }) {
-        SymbolGlyph($r(this.fullWorldEpoch >= 0 && node === this.fullWorld ? 'sys.symbol.arrow_down_right_and_arrow_up_left' :
+        // Out of full screen is back to the app's buttons under the world: a chevron up, so it is not mistaken for the
+        // Generate page's own collapse button beside it, which leaves the program's full screen.
+        SymbolGlyph($r(this.fullWorldEpoch >= 0 && node === this.fullWorld ? 'sys.symbol.chevron_up' :
           'sys.symbol.arrow_up_left_and_arrow_down_right'))
           .fontSize(16)
           .fontColor([this.t().ink])
@@ -1745,6 +1763,7 @@ export struct VeraPreview {
       .height(36)
       .backgroundColor(this.t().surface)
       .opacity(0.9)
+      .accessibilityText(this.fullWorldEpoch >= 0 && node === this.fullWorld ? 'Show the controls' : 'Full screen')
       .onClick(() => { this.setFullWorld(node === this.fullWorld ? null : node) })
     }
     .width('100%')
@@ -1796,8 +1815,8 @@ export struct VeraPreview {
   }
 
   /**
-   * Fingers on a world. A drag on empty space turns the camera when the program's camera orbits (the box does that
-   * itself, nothing reaches the program); a drag that started on a body is a "swipe" when it lifts; a tap is a raycast,
+   * Fingers on a world. A drag on empty space turns the camera and two fingers pinch it nearer or further when the
+   * program's camera orbits (the box does both itself, nothing reaches the program); a drag that started on a body is a "swipe" when it lifts; a tap is a raycast,
    * and what it hit goes to the event handler as a "tap". Both go the way every tap goes, through the field-action queue
    * -- the tap unless the world, its handler or the program changed while the ray was cast.
    */
@@ -1811,7 +1830,9 @@ export struct VeraPreview {
       return
     }
     if (event.type === TouchType.Move) {
-      box.touchMove(touch.id, touch.x, touch.y)
+      // Every finger down, not only the first changed one: a pinch needs where both are.
+      let fingers = event.touches.length > 0 ? event.touches : event.changedTouches
+      for (let f of fingers) { box.touchMove(f.id, f.x, f.y) }
       return
     }
     if (event.type !== TouchType.Up) {
@@ -2400,28 +2421,40 @@ export struct VeraPreview {
                   Text(line)
                     .fontSize(15)
                     .fontFamily(this.textFamily())
-                    .fontColor(this.fullWorldSpace ? '#E8ECF8' : this.t().ink)
+                    .fontColor(this.fullWorldDark ? '#E8ECF8' : this.t().ink)
                     .textAlign(TextAlign.Center)
                     .maxLines(2)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .textShadow({ radius: 6, color: this.fullWorldSpace ? '#C0000000' : '#00000000', offsetX: 0, offsetY: 1 })
+                    .textShadow({ radius: 6, color: this.fullWorldDark ? '#C0000000' : '#00000000', offsetX: 0, offsetY: 1 })
                 }, (line: string, index: number) => index.toString() + ':' + line)
               }
               .width('100%')
               .padding({ left: 24, right: 24, bottom: 16 + this.snackbarRoom() + this.bottomRoom })
               .hitTestBehavior(HitTestMode.Transparent)
               // The app's name, which the Header gave and full screen leaves out, beside the corner button.
+              // Under it, the Header's supporting line: what to do with the world, which nothing else on this screen says.
               if (this.fullWorldTitle(this.fullWorld!).length > 0) {
-                Text(this.fullWorldTitle(this.fullWorld!))
-                  .fontSize(15)
-                  .fontWeight(600)
-                  .fontFamily(this.textFamily())
-                  .fontColor(this.fullWorldSpace ? '#E8ECF8' : this.t().ink)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .position({ x: 56, y: 16 })
-                  .width('70%')
-                  .hitTestBehavior(HitTestMode.Transparent)
+                Column({ space: 2 }) {
+                  Text(this.fullWorldTitle(this.fullWorld!))
+                    .fontSize(15)
+                    .fontWeight(600)
+                    .fontFamily(this.textFamily())
+                    .fontColor(this.fullWorldDark ? '#E8ECF8' : this.t().ink)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  if (this.fullWorldHint(this.fullWorld!).length > 0) {
+                    Text(this.fullWorldHint(this.fullWorld!))
+                      .fontSize(12)
+                      .fontFamily(this.textFamily())
+                      .fontColor(this.fullWorldDark ? '#A8B0C8' : this.t().inkSoft)
+                      .maxLines(2)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  }
+                }
+                .alignItems(HorizontalAlign.Start)
+                .position({ x: 56, y: 14 })
+                .width('45%')
+                .hitTestBehavior(HitTestMode.Transparent)
               }
             }
             .width('100%')
@@ -5156,8 +5189,8 @@ export struct VeraPreview {
       // The program describes this world (reconcileWorlds) and its box moves it; the tree only gives it a place.
       if (this.worldBox(node).options !== null) {
         Stack({ alignContent: Alignment.TopStart }) {
-          // Space under the scene: its colour, stars, orbit rings and the sun's halo (WorldBox.paintBackdrop), which the
-          // scene, clear in space, lets through round its bodies. Empty on a table or floor, where the scene is opaque.
+          // What is behind the world, under the scene: the sky, its stars, the trails and the halos of glowing bodies
+          // (WorldBox.paintBackdrop), which the scene, see-through then, lets through round its bodies. Empty otherwise.
           Canvas(this.worldBox(node).backdrop)
             .width('100%')
             .height('100%')

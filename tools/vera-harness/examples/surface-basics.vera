@@ -1,0 +1,135 @@
+// The parts of a full-canvas program, with no game in it: the example the surface guide carries (vera-surface-skill.txt).
+//
+// Balls move and bounce off the walls of the surface. A finger on a ball drags it; a tap on empty space adds a ball
+// there, up to twelve. It shows the frame handler moving records by elapsed time, a pointer drag remembered by the
+// finger's id, a seeded random choice, groups, and text over the scene.
+
+@jsonable
+class Ball {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hue: number;
+}
+
+@jsonable
+class AppState {
+  balls: Ball[];
+  held: number;
+  finger: number;
+  seed: number;
+}
+
+function init(): AppState {
+  let balls: Ball[] = [{x: 120, y: 200, vx: 90, vy: 140, hue: 0}, {x: 240, y: 420, vx: -120, vy: 60, hue: 1}];
+  return {balls: balls, held: -1, finger: -1, seed: 20261116};
+}
+
+function radius(): number {
+  return 26;
+}
+
+function onFrame(state: AppState, elapsedMs: number): AppState {
+  let dt: number = math.min(elapsedMs, 50) / 1000;
+  let r: number = radius();
+  let balls: Ball[] = [];
+  let i: number = 0;
+  for (let b: Ball of state.balls) {
+    if (i === state.held) {
+      balls.push(b);
+    } else {
+      let x: number = b.x + b.vx * dt;
+      let y: number = b.y + b.vy * dt;
+      let vx: number = b.vx;
+      let vy: number = b.vy;
+      // Off a wall: turn that way round and put it back inside, so it cannot stick.
+      if (x < r) { x = r; vx = math.abs(vx); }
+      if (x > 360 - r) { x = 360 - r; vx = -math.abs(vx); }
+      if (y < 80 + r) { y = 80 + r; vy = math.abs(vy); }
+      if (y > 640 - r) { y = 640 - r; vy = -math.abs(vy); }
+      balls.push({x: x, y: y, vx: vx, vy: vy, hue: b.hue});
+    }
+    i = i + 1;
+  }
+  return {balls: balls, held: state.held, finger: state.finger, seed: state.seed};
+}
+
+function ballAt(state: AppState, x: number, y: number): number {
+  let i: number = 0;
+  let found: number = -1;
+  for (let b: Ball of state.balls) {
+    if (gfx.distance(x, y, b.x, b.y) < radius() + 8) {
+      found = i;
+    }
+    i = i + 1;
+  }
+  return found;
+}
+
+function onPointer(state: AppState, p: gfx.Pointer): AppState {
+  if (p.phase === "down") {
+    let hit: number = ballAt(state, p.x, p.y);
+    if (hit >= 0) {
+      return {balls: state.balls, held: hit, finger: p.id, seed: state.seed};
+    }
+    if (state.balls.length() >= 12 || p.y < 80) {
+      return state;
+    }
+    let seed: number = math.randomStep(state.seed);
+    let a: number = math.randomBelow(seed, 360) * math.pi() / 180;
+    let balls: Ball[] = [];
+    for (let b: Ball of state.balls) {
+      balls.push(b);
+    }
+    balls.push({x: p.x, y: p.y, vx: 130 * math.cos(a), vy: 130 * math.sin(a), hue: state.balls.length() % 3});
+    return {balls: balls, held: -1, finger: -1, seed: seed};
+  }
+  if (p.id !== state.finger || state.held < 0) {
+    return state;
+  }
+  if (p.phase === "move") {
+    let balls: Ball[] = [];
+    let i: number = 0;
+    for (let b: Ball of state.balls) {
+      if (i === state.held) {
+        balls.push({x: math.max(radius(), math.min(360 - radius(), p.x)), y: math.max(80 + radius(), math.min(640 - radius(), p.y)),
+          vx: b.vx, vy: b.vy, hue: b.hue});
+      } else {
+        balls.push(b);
+      }
+      i = i + 1;
+    }
+    return {balls: balls, held: state.held, finger: state.finger, seed: state.seed};
+  }
+  return {balls: state.balls, held: -1, finger: -1, seed: state.seed};
+}
+
+function colourOf(hue: number): string {
+  if (hue === 0) {
+    return "accent";
+  }
+  if (hue === 1) {
+    return "warning";
+  }
+  return "#22c55e";
+}
+
+function draw(state: AppState): gfx.Shape[] {
+  let shapes: gfx.Shape[] = [];
+  shapes.push(gfx.rect(0, 0, 360, 640, "background"));
+  let r: number = radius();
+  for (let b: Ball of state.balls) {
+    let body: gfx.Shape[] = [gfx.circle(0, 0, r, colourOf(b.hue)), gfx.circle(-8, -8, 7, "#ffffff66")];
+    shapes.push(gfx.group(b.x, b.y, 0, 1, 1, body));
+  }
+  shapes.push(gfx.text(20, 34, 18, "left", "ink", ui.numberToString(state.balls.length()) + " balls", true));
+  shapes.push(gfx.text(20, 58, 14, "left", "soft", "Drag a ball, tap to add one"));
+  return shapes;
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Surface("fill", 360, 640, "draw", "onFrame", "onPointer")
+  ]);
+}

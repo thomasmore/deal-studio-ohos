@@ -16,21 +16,23 @@ const {playSurface} = loadVera('VeraSurfacePlay')
 const rawfile = name => fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile', name), 'utf8')
 const guide = rawfile('vera-surface-skill.txt')
 const worldGuide = rawfile('vera-world-skill.txt')
+const worldBasics = fs.readFileSync(path.join(__dirname, 'examples/world-basics.vera'), 'utf8')
+// A dice app as the model might write one: the fixture for the route's 3D tests (not what the guide shows).
 const worldDice = fs.readFileSync(path.join(__dirname, 'examples/world-dice.vera'), 'utf8')
 const language = rawfile('vera-skill.txt')
 const example = guide.slice(guide.indexOf('--- EXAMPLE ---') + '--- EXAMPLE ---'.length, guide.indexOf('--- END EXAMPLE ---')).trim()
 
 // The guide's example is the program the model copies its structure from: it must compile, run and play.
 assert.equal(S.checkSurfaceProgram(example), '', 'the guide\'s example compiles, runs once and plays')
-assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surface-catch.vera'), 'utf8')
-  .slice(fs.readFileSync(path.join(__dirname, 'examples/surface-catch.vera'), 'utf8').indexOf('@jsonable')).trim(),
-'the guide carries examples/surface-catch.vera as it is (regenerate the rawfile when the example changes)')
+assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surface-basics.vera'), 'utf8')
+  .slice(fs.readFileSync(path.join(__dirname, 'examples/surface-basics.vera'), 'utf8').indexOf('@jsonable')).trim(),
+'the guide carries examples/surface-basics.vera as it is (regenerate the rawfile when the example changes)')
 
-// The world guide's example is examples/world-dice.vera byte for byte, and it compiles, runs once and its world plays.
+// The world guide's example is examples/world-basics.vera byte for byte, and it compiles, runs once and its world plays.
 {
   const open = '--- EXAMPLE ---\n', close = '--- END EXAMPLE ---'
   const worldExample = worldGuide.slice(worldGuide.indexOf(open) + open.length, worldGuide.indexOf(close))
-  assert.equal(worldExample, worldDice, 'the world guide carries examples/world-dice.vera as it is (regenerate the rawfile when the example changes)')
+  assert.equal(worldExample, worldBasics, 'the world guide carries examples/world-basics.vera as it is (regenerate the rawfile when the example changes)')
   assert.equal(S.checkWorldProgram(worldExample), '', 'the world guide\'s example compiles, runs once and plays')
   assert.match(S.checkWorldProgram(example), /^1:1 P0008 .*shows no ui.World/, 'a flat game is not a 3D program')
 }
@@ -85,10 +87,12 @@ assert.ok(!worldSystem.includes('ui.Surface(style') && !worldSystem.includes('gf
   'no surface, std/gfx or screens of sections in the 3D language')
 assert.ok(!worldSystem.includes('FULL-CANVAS APPS'))
 
-// The play check refuses a surface that never moves, one that traps mid-game, and a program with no surface.
-const still = example.replace('if (state.phase !== "playing") {\n    if (p.phase !== "down") {', 'if (true) {\n    if (true) {')
+// The play check refuses a surface that never moves, one that traps mid-game, and a program with no surface: on a game
+// with rounds (examples/surface-catch.vera, a fixture, not what the guide shows).
+const catchGame = fs.readFileSync(path.join(__dirname, 'examples/surface-catch.vera'), 'utf8')
+const still = catchGame.replace('if (state.phase !== "playing") {\n    if (p.phase !== "down") {', 'if (true) {\n    if (true) {')
 assert.match(playSurface(compileVeraSource(still)), /nothing on the surface changed/, 'a game that never starts is refused')
-const trapping = example.replace('let dt: number = math.min(elapsedMs, 50) / 1000;',
+const trapping = catchGame.replace('let dt: number = math.min(elapsedMs, 50) / 1000;',
   'let dt: number = math.min(elapsedMs, 50) / 1000;\n  if (state.stars.length() > 1) { let none: Star[] = []; dt = none[1].y; }')
 assert.match(playSurface(compileVeraSource(trapping)), /^\d+:1 R\d+ The program compiled, but stopped in onFrame at frame \d+/, 'a trap mid-game says where')
 assert.match(playSurface(compileVeraSource('@jsonable class AppState { n: number; }\nfunction init(): AppState { return {n: 0}; }\n' +
@@ -105,6 +109,7 @@ function mockHost(answers) {
   h.askPlan = async (systemPrompt, user) => {
     h.calls.plan.push(systemPrompt === S.SURFACE_CLASSIFY_PROMPT ? 'surface' : 'needs')
     if (systemPrompt !== S.SURFACE_CLASSIFY_PROMPT) h.calls.needsUser = user
+    else h.calls.surfaceUser = user
     return systemPrompt === S.SURFACE_CLASSIFY_PROMPT ? answers.brief : null
   }
   h.askCode = async (systemPrompt, user, budget, think) => {
@@ -181,7 +186,7 @@ const brief = JSON.stringify({surface: true, title: 'Star Catch', design: 'Catch
   // A 3D request: designed with engine world, written on a ui.World from the world guide, played on the host's physics, served.
   const worldBrief = JSON.stringify({surface: 'whole', engine: 'world', title: 'Dice', design: 'Two dice thrown on a table; the total shows.'})
   host = mockHost({brief: worldBrief, code: ['```vera\n' + worldDice + '\n```']})
-  outcome = await route.buildScreen(request('dice game'), host)
+  outcome = await route.buildScreen(request('3D dice game'), host)
   assert.equal(outcome.kind, route.OUTCOME_AGENT, 'the 3D app is served')
   assert.equal(outcome.agent.source, worldDice.trim())
   assert.ok(outcome.agent.vbc2.length > 0)
@@ -198,7 +203,7 @@ const brief = JSON.stringify({surface: true, title: 'Star Catch', design: 'Catch
   assert.match(S.checkWorldProgram(unread), /^\d+:1 P0007 /)
   const fix = '<<<<<<< SEARCH\n  return state;\n}\n\nfunction view\n=======\n  return {throws: state.throws, read: state.throws, total: total, faces: faces};\n}\n\nfunction view\n>>>>>>> REPLACE'
   host = mockHost({brief: worldBrief, code: [unread, fix]})
-  outcome = await route.buildScreen(request('dice game'), host)
+  outcome = await route.buildScreen(request('3D dice game'), host)
   assert.equal(outcome.kind, route.OUTCOME_AGENT, 'the repaired 3D app is served')
   assert.equal(outcome.agent.source, worldDice.trim())
   assert.match(outcome.agent.note, /1 repair round/)
@@ -206,13 +211,24 @@ const brief = JSON.stringify({surface: true, title: 'Star Catch', design: 'Catch
 
   // A flat game written for a 3D brief does not pass: a 3D program must show a ui.World.
   host = mockHost({brief: worldBrief, code: [example, 'no edits', 'no edits', example, 'no edits', 'no edits']})
-  outcome = await route.buildScreen(request('dice game'), host)
+  outcome = await route.buildScreen(request('3D dice game'), host)
   assert.equal(outcome.kind, route.OUTCOME_NOT_BUILT)
   assert.match(outcome.reason, /^world "Dice": not built/)
 
+  // Without "3D" in the request, a world brief is written flat: dice, planets or a tower may well be wanted in 2D. The
+  // classifier is told which, and the host holds to it whatever it answers.
+  for (const p of ['3D dice game', 'a 3d solar system', 'three-dimensional tower', '三维骰子', '3D骰子', 'dice in 3 d']) assert.ok(S.asksFor3D(p), p + ' asks for 3D')
+  for (const p of ['dice game', 'solar system', 'knock down the tower', 'roll five dice', '3Dish', 'a d3 roller']) assert.ok(!S.asksFor3D(p), p + ' does not')
+  host = mockHost({brief: worldBrief, code: ['```vera\n' + example + '\n```']})
+  outcome = await route.buildScreen(request('dice game'), host)
+  assert.equal(outcome.kind, route.OUTCOME_AGENT)
+  assert.ok(host.calls.code[0].system.includes('FULL-CANVAS APPS'), 'no 3D asked: written on a surface')
+  assert.match(host.calls.surfaceUser, /does not ask for 3D: engine is "flat"/)
+  assert.match(outcome.agent.note, /^surface "Dice"/)
+
   // No world guide on the host: the 3D brief is written flat, from the surface guide.
   host = mockHost({brief: worldBrief, code: ['```vera\n' + example + '\n```'], worldGuide: ''})
-  outcome = await route.buildScreen(request('dice game'), host)
+  outcome = await route.buildScreen(request('3D dice game'), host)
   assert.equal(outcome.kind, route.OUTCOME_AGENT)
   assert.ok(host.calls.code[0].system.includes('FULL-CANVAS APPS'))
   assert.match(outcome.agent.note, /^surface "Dice"/)

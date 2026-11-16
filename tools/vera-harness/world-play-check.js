@@ -1,7 +1,7 @@
 // The pre-serve plays and the phone's frame budget (vera/VeraWorldPlay.ets, vera/VeraBudget.ets, vera/VeraSurfacePlay.ets):
 // the three example worlds play and keep within budget; broken worlds are refused with the code the repair needs (two
 // bodies with one id, too many bodies, a camera looking away, bodies inside one another or under the floor or off the
-// table, a still world, dice never thrown, never settled, or settled and not read, a build too slow); the surface
+// table, orbits that pass through each other or their centre, a still world, thrown bodies never thrown or never settled, dice faces not read, a build too slow); the surface
 // examples keep within the frame budget, and a game doing 107 000 steps a frame -- the generated maze that ran at 23
 // frames a second -- is refused.
 'use strict'
@@ -11,7 +11,7 @@ const path = require('node:path')
 const {loadVera} = require('./source-loader')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playWorld, WorldPlayReport, CODE_NOT_SEEN, CODE_OVERLAP, CODE_OUT_OF_WORLD, CODE_STILL, CODE_NO_SETTLE,
-  CODE_RESULT_UNREAD, CODE_NO_WORLD} = loadVera('VeraWorldPlay')
+  CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL} = loadVera('VeraWorldPlay')
 const B = loadVera('VeraBudget')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
@@ -51,7 +51,7 @@ for (const name of ['world-dice', 'world-cubes', 'world-solar']) {
       (ms * 4 * 60).toFixed(0) + ' ms a second)')
   }
   if (name === 'world-dice') {
-    assert.ok(report.kicksWithDice > 0 && report.settledWithDice > 0 && report.settledRead > 0, 'the dice are thrown, settle and are read')
+    assert.ok(report.kicks > 0 && report.settledAfterKick > 0 && report.settledRead > 0, 'the dice are thrown, settle and are read')
   }
 }
 for (const name of ['surface-catch', 'surface-roulette']) {
@@ -106,6 +106,34 @@ refused(swap(dice, 'scene.camera(0, 1.25, 0.85, 0, 0, 0, false)', 'scene.camera(
 // Bodies inside one another, under the floor, off the table.
 refused(swap(dice, 'scene.die("d2", 0.2, 0.3, 0.1', 'scene.die("d2", -0.18, 0.3, 0.1'), CODE_OVERLAP, /"d\d" and "d\d" start inside one another/, 'overlapping dice')
 refused(swap(cubes, 'side / 2 + row * side', 'side / 2 + row * side * 0.5'), CODE_OVERLAP, null, 'a wall of cubes in one another')
+
+// ---- orbits round one centre that pass through each other: Saturn's rings through Jupiter, the moon through Venus (a
+// generated orrery, 2026-11-16), or an orbit inside its sun; laid out with room, they play.
+{
+  const orrery = planets => `@jsonable
+class AppState { n: number; }
+function init(): AppState { return {n: 0}; }
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 7, 5, 0, 0, 0, true));
+  things.push(scene.glow(scene.sphere("sun", 0, 0, 0, 0.45, "#fbbf24")));
+  ${planets}
+  return things;
+}
+function onWorld(state: AppState, e: scene.Event): AppState { return {n: state.n + 1}; }
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [ui.World("full", 0, "build", "onWorld"), ui.Text("body", ui.numberToString(state.n))]);
+}`
+  const planet = (id, r, at, period, extra = '') => `things.push(scene.orbit(${extra || `scene.sphere("${id}", 0, 0, 0, ${r}, "#888888")`}, "sun", ${at}, ${period}, 0));`
+  const jupiter = planet('jupiter', 0.25, 2.6, 24)
+  const saturn = at => planet('saturn', 0, at, 32, `scene.rings(scene.sphere("saturn", 0, 0, 0, 0.21, "#e5d3a1"), 0.28, 0.48, "#d8c9a3")`)
+  refused(orrery(jupiter + '\n  ' + saturn(3.2)), CODE_ORBITS_CROSS, /"jupiter" \(orbit 2\.6\) and "saturn" \(orbit 3\.2\) pass through each other: their orbits are 0\.6 apart and the two reach 0\.73/, 'rings through a giant')
+  assert.equal(play(orrery(jupiter + '\n  ' + saturn(3.4))), '', 'with room for the rings, they play')
+  const venus = planet('venus', 0.14, 1.2, 9)
+  const earth = planet('earth', 0.15, 1.6, 12) + '\n  things.push(scene.orbit(scene.sphere("moon", 0, 0, 0, 0.05, "#cccccc"), "earth", 0.28, 3, 0));'
+  refused(orrery(venus + '\n  ' + earth), CODE_ORBITS_CROSS, /"venus" \(orbit 1\.2\) and "earth" \(orbit 1\.6\).*reach 0\.47/, 'a moon through the next planet')
+  refused(orrery(planet('mercury', 0.1, 0.5, 6)), CODE_ORBITS_CROSS, /"mercury" orbits "sun" at 0\.5, inside it/, 'an orbit inside its sun')
+}
 refused(swap(dice, 'scene.die("d1", -0.2, 0.3, 0.1', 'scene.die("d1", -0.2, -0.3, 0.1'), CODE_OUT_OF_WORLD, /below the table top/, 'a die under the table')
 refused(swap(dice, 'scene.die("d1", -0.2, 0.3, 0.1', 'scene.die("d1", 2, 0.3, 0.1'), CODE_OUT_OF_WORLD, /outside the table/, 'a die off the table')
 // A still world: nothing moves and nothing changes the state.
@@ -128,9 +156,12 @@ refused(still, CODE_STILL, /nothing in the world moves/, 'a still world')
 assert.equal(play(swap(still, 'return state; }', 'return {n: state.n + 1}; }')), '', 'a static world whose taps change the state is not still')
 assert.equal(play(swap(still, 'scene.sphere("b", 1.5, 0.5, 0, 0.5, "warning")', 'scene.spin(scene.sphere("b", 1.5, 0.5, 0, 0.5, "warning"), 4)')), '',
   'a spinning body is not still')
+// Bodies sized for reality, not for the phone: dice of 16 mm on the table are specks (a generated dice app, 2026-11-16).
+refused(swap(swap(dice, 'scene.die("d1", -0.2, 0.3, 0.1, 0.16,', 'scene.die("d1", -0.2, 0.3, 0.1, 0.016,'),
+  'scene.die("d2", 0.2, 0.3, 0.1, 0.16,', 'scene.die("d2", 0.2, 0.3, 0.1, 0.016,'), CODE_TOO_SMALL, /are specks on the phone/, 'dice of 16 mm')
 // Dice: never thrown, thrown without a handler to hear them settle, settled and not read.
 refused(swap(swap(dice, 'state.throws, 0.5 * way', '0, 0.5 * way'), 'state.throws, 0.4 * way', '0, 0.4 * way'), CODE_NO_SETTLE,
-  /dice are never thrown/, 'dice that are never thrown')
+  /scene.kick are never thrown/, 'dice that are never thrown')
 refused(swap(dice, 'ui.World("default", 0, "build", "onWorld")', 'ui.World("default", 0, "build", "")'), CODE_NO_SETTLE,
   /"settled" never arrived: the World has no event handler/, 'dice no handler hears')
 refused(swap(dice, 'return {throws: state.throws, read: state.throws, total: total, faces: faces};', 'return state;'), CODE_RESULT_UNREAD,

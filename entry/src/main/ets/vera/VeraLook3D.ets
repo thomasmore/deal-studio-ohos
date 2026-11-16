@@ -16,7 +16,7 @@
 
 import { ResolvedTheme } from './VeraTheme'
 import { gfxColor } from './GfxPaint'
-import { WorldSpec, BodySpec, CameraSpec, TableSpec } from './VeraScene'
+import { WorldSpec, BodySpec, CameraSpec, TableSpec, SkySpec } from './VeraScene'
 
 /** The sun: a directional light this bright (the kit's default of 1 does practically nothing), from here, at the origin. */
 export const LOOK_SUN_INTENSITY: number = 14
@@ -37,8 +37,8 @@ export const LOOK_BACKGROUND_ROLE: string = 'background'
 /**
  * Ground colours, as the phone showed they need to be. A floor in a light neutral role ("surface", "background", "white"
  * or none) is drawn as the page background a little darker, so the horizon melts into the page instead of standing out
- * as a white band; a table in one is felt, so white dice show on it. Any other colour is used as written, except that a
- * table as close in colour to one of its dice as LOOK_TABLE_CLASH is darkened by LOOK_TABLE_DARKEN.
+ * as a white band. A table is drawn in the colour the program gives it: which colours tell its bodies apart is the
+ * program's choice, not the host's.
  */
 export const LOOK_NEUTRAL_GROUND: string[] = ['', 'surface', 'background', 'white']
 export const LOOK_FLOOR_SHADE: number = 0.06
@@ -54,7 +54,7 @@ export const LOOK_FLOOR_SHADE: number = 0.06
  * about 4.5, and 4.5 gave (229,233,234), within one level of the target (phone, 2026-11-13).
  */
 export const FLOOR_LIGHT_GAIN: number = 4.5
-/** The gain when a glow body moves the light to the camera (ambient 0.7). UNCALIBRATED: scaled from FLOOR_LIGHT_GAIN. */
+/** The gain when glowing bodies light the world (their spots, GLOW_AMBIENT). UNCALIBRATED: scaled from FLOOR_LIGHT_GAIN. */
 export const FLOOR_LIGHT_GAIN_GLOW: number = 4.6
 export const FLOOR_ROUGHNESS: number = 1
 export const FLOOR_METALLIC: number = 0
@@ -67,14 +67,6 @@ export function floorGain(glows: boolean): number {
   return floorGainOverride > 0 ? floorGainOverride : (glows ? FLOOR_LIGHT_GAIN_GLOW : FLOOR_LIGHT_GAIN)
 }
 
-export const LOOK_FELT: string = '#35654d'
-export const LOOK_TABLE_CLASH: number = 0.2
-export const LOOK_TABLE_DARKEN: number = 0.4
-/**
- * A world with a glowing body (a sun) is lit from the eye: the light stands at the camera and looks where it looks,
- * with more ambient light, so whatever side of a planet the camera is turned to is lit (the kit has no point light).
- */
-export const LOOK_GLOW_AMBIENT: number = 0.7
 
 /** A table: its top is a slab this thick whose upper face is y = 0; its walls stand this high above the top and are this thick. */
 export const TABLE_TOP_THICKNESS: number = 0.04
@@ -168,37 +160,73 @@ export function linearHex(c: number[]): string {
   return hexOf(out)
 }
 
-/** The colour a table is drawn in, given the colours of the dice on it (see LOOK_NEUTRAL_GROUND). */
-export function tableColor(t: ResolvedTheme, color: string, dieColors: string[]): string {
-  let base = LOOK_NEUTRAL_GROUND.indexOf(color) >= 0 ? LOOK_FELT : color
-  let c = lookRgba(t, base)
-  for (let die of dieColors) {
-    let d = lookRgba(t, die)
-    if (Math.hypot(c[0] - d[0], c[1] - d[1], c[2] - d[2]) < LOOK_TABLE_CLASH) { return hexOf(darker(c, LOOK_TABLE_DARKEN)) }
-  }
-  return base
+// ---------------------------------------------------------------- what is behind the world, and light from glowing bodies
+
+/**
+ * Ambient light when glowing bodies light the world: the side of a body facing away from them is darker but still shows
+ * its colour. At 0.12 the planets between the camera and their sun -- seen from their night side -- came out nearly
+ * black-brown (Jupiter and Saturn in a generated orrery, phone, 2026-11-16).
+ */
+export const GLOW_AMBIENT: number = 0.3
+/**
+ * The candela of each spot light in a glowing body (GLOW_SPOTS of them) for bodies GLOW_REFERENCE_M away: about as look
+ * B's sun lights them. A light further from what it lights is made brighter by the square of the distance (glowCandela),
+ * so a lamp over a table and a sun among its planets light their worlds alike.
+ */
+export const GLOW_CANDELA: number = 70
+export const GLOW_REFERENCE_M: number = 2
+/**
+ * Spot lights in a glowing body: four looking out level along +x, +z, -x, -z, one down and one up, together a light that
+ * shines all round.
+ */
+export const GLOW_SPOTS: number = 6
+/**
+ * Their cones, in radians: full strength only near the axis and fading out to 69 degrees, so each direction is lit by two
+ * or three spots at once and no seam shows. Cones of 40/50 degrees left a bright cross and dark bands on a floor under a
+ * lamp (phone, 2026-11-16); in space, with nothing flat to show them, the seams had never been seen.
+ */
+export const GLOW_SPOT_INNER: number = 0.35
+export const GLOW_SPOT_OUTER: number = 1.2
+/** The ring points per trail drawn. */
+export const TRAIL_POINTS: number = 72
+
+/** The colour behind the world, [r, g, b, a] in 0..1: the scene.sky's, else the theme's background. */
+export function worldBackgroundRgba(spec: WorldSpec | null, t: ResolvedTheme): number[] {
+  let sky = spec !== null ? spec.sky : null
+  return sky !== null ? lookRgba(t, (sky as SkySpec).color, LOOK_BACKGROUND_ROLE) : lookRgba(t, LOOK_BACKGROUND_ROLE, LOOK_BACKGROUND_ROLE)
 }
 
-// ---------------------------------------------------------------- space: a world with neither table nor floor
+/** Whether a colour is dark enough that text over it is drawn light: relative luminance (linear) under 0.18, mid-grey. */
+export function isDarkRgba(c: number[]): boolean {
+  let l = 0.2126 * srgbToLinear(c[0]) + 0.7152 * srgbToLinear(c[1]) + 0.0722 * srgbToLinear(c[2])
+  return l < 0.18
+}
 
-/** The colour of space behind a world with neither table nor floor (a solar system), whatever the theme. */
-export const SPACE_BACKGROUND: string = '#060a16'
-/** Ambient light in space with a sun in it: the night side of a planet is dark but still shows its colour. */
-export const SPACE_AMBIENT: number = 0.12
-/** The candela of each of the sun's spot lights (SPACE_SUN_SPOTS of them): a planet 2 m out is lit about as look B's sun lights. */
-export const SPACE_SUN_CANDELA: number = 70
-/** Spot lights in a glowing sun, looking out level along +x, +z, -x, -z: together a light that shines all round in the plane of the orbits. */
-export const SPACE_SUN_SPOTS: number = 4
-/** Their cones, in radians: full strength to 40 degrees off the axis, none past 50, so neighbours cross-fade at 45. */
-export const SPACE_SPOT_INNER: number = 0.70
-export const SPACE_SPOT_OUTER: number = 0.87
-/** Stars painted behind a world in space, and the ring points per orbit drawn. */
-export const SPACE_STARS: number = 1400
-export const ORBIT_RING_POINTS: number = 72
+/**
+ * Whether anything is painted behind the world's bodies -- a sky, a trail, the halo of a glowing body -- so the scene is
+ * cleared see-through over a canvas that paints it. Otherwise the scene clears to the theme's background itself.
+ */
+export function worldHasBackdrop(spec: WorldSpec): boolean {
+  return spec.sky !== null || spec.bodies.some((b: BodySpec): boolean => b.trail) || worldSuns(spec).length > 0
+}
 
-/** Whether a world floats in space: no table and no floor. Space is dark, starry, its orbits drawn and its sun shines all round. */
-export function worldInSpace(spec: WorldSpec): boolean {
-  return spec.table === null && spec.floor === null
+/**
+ * How bright each spot light of a glowing body at sun is: GLOW_CANDELA for the bodies it lights GLOW_REFERENCE_M away,
+ * by the square of the middle distance to them (an orbit by its radius, anything else by where it was put).
+ */
+export function glowCandela(spec: WorldSpec, sun: number[]): number {
+  let ds: number[] = []
+  for (let b of spec.bodies) {
+    if (b.glow) { continue }
+    let d = b.orbit !== null ? Math.abs(b.orbit.radius) :
+      Math.hypot(b.position[0] - sun[0], b.position[1] - sun[1], b.position[2] - sun[2])
+    if (d > 1e-6) { ds.push(d) }
+  }
+  if (ds.length === 0) { return GLOW_CANDELA }
+  ds.sort((x: number, y: number): number => x - y)
+  let mid = ds[Math.floor(ds.length / 2)]
+  let k = mid / GLOW_REFERENCE_M
+  return GLOW_CANDELA * Math.max(0.01, Math.min(100, k * k))
 }
 
 /**
@@ -227,18 +255,19 @@ export function starField(n: number): number[][] {
 }
 
 /**
- * The orbits to draw as rings: [cx, cy, cz, radius] for each orbit whose centre does not move itself (a planet's round
- * the sun; a moon's round a moving planet is left out). An orbit is level (orbitPositions), so its ring is a circle in
- * the plane y = cy. Rings of one radius round one centre are drawn once.
+ * The trails to draw: [cx, cy, cz, radius] for each body with scene.trail that orbits a centre which does not move
+ * itself (a moon's round a moving planet is left out: the backdrop is painted when the view changes, not per frame). An
+ * orbit is level (orbitPositions), so its trail is a circle in the plane y = cy. Trails of one radius round one centre
+ * are drawn once.
  */
-export function orbitRings(spec: WorldSpec): number[][] {
+export function worldTrails(spec: WorldSpec): number[][] {
   let byId = new Map<string, BodySpec>()
   for (let b of spec.bodies) { byId.set(b.id, b) }
   let seen = new Set<string>()
   let out: number[][] = []
   for (let b of spec.bodies) {
     let o = b.orbit
-    if (o === null || Math.abs(o.radius) < 1e-6) { continue }
+    if (!b.trail || o === null || Math.abs(o.radius) < 1e-6) { continue }
     let c = byId.get(o.centre)
     if (c === undefined || c.orbit !== null) { continue }
     let key = o.centre + ':' + Math.abs(o.radius).toFixed(4)
@@ -249,7 +278,7 @@ export function orbitRings(spec: WorldSpec): number[][] {
   return out
 }
 
-/** The glowing bodies that do not move (a sun), where a halo is painted and a sun's light stands: [x, y, z, radius]. */
+/** The glowing bodies that do not move (a sun, a lamp), where a halo is painted and their light stands: [x, y, z, radius]. */
 export function worldSuns(spec: WorldSpec): number[][] {
   let out: number[][] = []
   for (let b of spec.bodies) {
@@ -259,10 +288,9 @@ export function worldSuns(spec: WorldSpec): number[][] {
   return out
 }
 
-/** Whether something in the world glows: then the light follows the eye (LOOK_GLOW_AMBIENT). */
+/** Whether glowing bodies light the world: one stands still (worldSuns), and its spots replace look B's sun. */
 export function worldGlows(spec: WorldSpec): boolean {
-  for (let b of spec.bodies) { if (b.glow) { return true } }
-  return false
+  return worldSuns(spec).length > 0
 }
 
 // ---------------------------------------------------------------- rotations
@@ -543,6 +571,34 @@ export function worldCamera(spec: WorldSpec, aspect: number): CameraPose {
   }
   planes(pose, distance, bounds !== null ? bounds[3] : 1)
   return pose
+}
+
+/**
+ * How near and how far a pinch takes a camera, as fractions of the distance it stood at when the world was framed (the
+ * whole world in view): near enough for the smallest planet of a system to fill a finger, a little further out than
+ * the framing so it can be found again.
+ */
+export const ZOOM_NEAREST: number = 0.15
+export const ZOOM_FARTHEST: number = 1.25
+
+/**
+ * The camera's distance for a pinch that started with the fingers startSpan vp apart and the camera at from, now span
+ * apart: spreading the fingers brings it nearer in proportion, within ZOOM_NEAREST..ZOOM_FARTHEST of framed.
+ */
+export function pinchDistance(from: number, startSpan: number, span: number, framed: number): number {
+  if (startSpan <= 0 || span <= 0 || framed <= 0) { return from }
+  let d = from * startSpan / span
+  return Math.max(framed * ZOOM_NEAREST, Math.min(framed * ZOOM_FARTHEST, d))
+}
+
+/** The pose moved along its line of sight to stand distance from where it looks, its clip planes fitted again. */
+export function zoomPose(pose: CameraPose, distance: number, radius: number): void {
+  let d = sub3(pose.eye, pose.look)
+  let now = Math.sqrt(dot3(d, d))
+  if (now <= 1e-9 || distance <= 0) { return }
+  let k = distance / now
+  pose.eye = [pose.look[0] + d[0] * k, pose.look[1] + d[1] * k, pose.look[2] + d[2] * k]
+  planes(pose, distance, radius)
 }
 
 /**

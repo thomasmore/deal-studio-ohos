@@ -15,7 +15,8 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
   encodeRuntimeValue } from './VeraInterpreter'
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
-import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, decodeScene, diffWorld, orbitPositions, sceneEventValue } from './VeraScene'
+import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, decodeScene, diffWorld, orbitPositions, sceneEventValue,
+  MotionCarry, SceneOrbit } from './VeraScene'
 import { FakePhys, WorldSim, SimEvent, specBounds } from './VeraPhysics'
 import { worldCamera, projectPoint, metresPerVp, floorDirection, CameraPose } from './VeraLook3D'
 import { functionLine, worldBudgetProblem, predictWorkMs } from './VeraBudget'
@@ -38,6 +39,10 @@ export const CODE_STILL: string = 'P0005'
 export const CODE_NO_SETTLE: string = 'P0006'
 export const CODE_RESULT_UNREAD: string = 'P0007'
 export const CODE_NO_WORLD: string = 'P0008'
+export const CODE_ORBITS_CROSS: string = 'P0009'
+export const CODE_TOO_SMALL: string = 'P0010'
+/** The biggest body the person plays with or watches is at least this many vp across as the world starts, or it is a speck. */
+export const MIN_BODY_VP: number = 12
 
 /** The box the world is seen in on a phone about 360 vp wide: square by default, its height when given, tall when it fills, the whole screen when full. */
 function boxSize(node: VeraUiNode): number[] {
@@ -78,6 +83,22 @@ function radiusOf(b: BodySpec): number {
   return Math.sqrt(b.dims[0] * b.dims[0] + b.dims[1] * b.dims[1] + b.dims[2] * b.dims[2]) / 2
 }
 
+/** How far a body reaches across from its centre, seen from above: a ball its radius, rings to their outer edge. */
+function flatReach(b: BodySpec): number {
+  let own = b.shape === 'sphere' ? b.dims[0] / 2 : Math.sqrt(b.dims[0] * b.dims[0] + b.dims[2] * b.dims[2]) / 2
+  return b.rings.length === 2 ? Math.max(own, b.rings[1]) : own
+}
+
+/** flatReach, or further when something orbits the body: a planet with a moon reaches to the moon's far side. */
+function orbitReach(b: BodySpec, byCentre: Map<string, BodySpec[]>, depth: number): number {
+  let r = flatReach(b)
+  let around = byCentre.get(b.id)
+  if (around !== undefined && depth < 4) {
+    for (let m of around) { r = Math.max(r, (m.orbit as SceneOrbit).radius + orbitReach(m, byCentre, depth + 1)) }
+  }
+  return r
+}
+
 /** One of the scripted inputs: a tap on a body (or on empty space), a swipe of a loose body, or a button pressed. */
 class Input {
   frame: number
@@ -89,14 +110,14 @@ class Input {
   }
 }
 
-/** What a play saw, for the host checks: the slowest change of state and what the dice did. */
+/** What a play saw, for the host checks: the slowest change of state and what the throws did. */
 export class WorldPlayReport {
   /** VM steps of the slowest event handler plus the build after it, and its predicted ms on the phone. */
   slowestSteps: number = 0
   slowestMs: number = 0
   bodies: number = 0
-  kicksWithDice: number = 0
-  settledWithDice: number = 0
+  kicks: number = 0
+  settledAfterKick: number = 0
   settledRead: number = 0
   stateChanged: boolean = false
   /** Hits handed to the handler, and the VM steps of the costliest (handler, and the build when the state changed). */
@@ -122,14 +143,18 @@ class WorldPlay {
   spec: WorldSpec | null = null
   /** Simulated seconds, the orbits' clock. */
   time: number = 0
+  /** Orbits and spins go on from where they are when a state changes their periods, as on the phone. */
+  carry: MotionCarry = new MotionCarry()
   /** The slowest change of state: event handler and the build after it, VM steps. */
   slowest: number = 0
   /** Whether any body ever moved by itself (loose, orbiting, spinning), whether the state ever changed, whether dice were seen. */
   moving: boolean = false
   stateChanged: boolean = false
   dice: boolean = false
-  kicksWithDice: number = 0
-  settledWithDice: number = 0
+  /** Whether a body has scene.kick; the throws the state changes fired; the "settled" told after one; dice faces read. */
+  thrower: boolean = false
+  kicks: number = 0
+  settledAfterKick: number = 0
   settledRead: number = 0
   hitEvents: number = 0
   hitStepsMax: number = 0
@@ -195,17 +220,18 @@ class WorldPlay {
     } catch (e) {
       throw this.trap(e as Error, this.build, 'in ' + this.build + ' ' + when)
     }
+    this.carry.apply(next, this.time)
     let diff = diffWorld(this.spec, next)
     this.checkCreated(next, diff)
+    this.checkOrbits(next)
     for (let b of next.bodies) {
       if (b.motion !== 'static' || b.orbit !== null || b.spinPeriodS !== 0) { this.moving = true }
       if (b.isDie) { this.dice = true }
+      if (b.kick !== null) { this.thrower = true }
     }
     let kicksBefore = this.sim.kickSerial
     this.sim.apply(diff, next)
-    if (this.sim.kickSerial > kicksBefore && next.bodies.some((b: BodySpec): boolean => b.isDie && b.motion === 'loose')) {
-      this.kicksWithDice++
-    }
+    if (this.sim.kickSerial > kicksBefore) { this.kicks++ }
     this.spec = next
     return steps
   }
@@ -258,6 +284,56 @@ class WorldPlay {
     }
   }
 
+  /**
+   * Bodies circling one centre at different speeds pass each other, so neighbouring orbits must be further apart than
+   * the two bodies reach: their radius, their rings and whatever orbits them (a planet's moon). Closer, they go through
+   * each other -- Saturn's rings through Jupiter -- and an orbit must clear its centre the same way.
+   */
+  checkOrbits(next: WorldSpec): void {
+    let byCentre = new Map<string, BodySpec[]>()
+    for (let b of next.bodies) {
+      if (b.orbit === null) { continue }
+      let c = (b.orbit as SceneOrbit).centre
+      let list = byCentre.get(c)
+      if (list === undefined) {
+        list = []
+        byCentre.set(c, list)
+      }
+      list.push(b)
+    }
+    let r2 = (v: number): string => (Math.round(v * 100) / 100).toString()
+    for (let entry of byCentre.entries()) {
+      let list = entry[1]
+      let centre = next.bodies.find((b: BodySpec): boolean => b.id === entry[0])
+      if (centre !== undefined) {
+        for (let b of list) {
+          let o = b.orbit as SceneOrbit
+          let need = flatReach(centre) + orbitReach(b, byCentre, 0)
+          if (o.radius >= need) { continue }
+          throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_ORBITS_CROSS + ' The program plays, but "' + b.id +
+            '" orbits "' + centre.id + '" at ' + r2(o.radius) + ', inside it: the two reach ' + r2(need) + ' across (radius, rings ' +
+            'and the orbits of moons). Orbit further out, or make the bodies smaller')
+        }
+      }
+      let sorted = list.slice().sort((a: BodySpec, b: BodySpec): number => (a.orbit as SceneOrbit).radius - (b.orbit as SceneOrbit).radius)
+      for (let i = 0; i < sorted.length; i++) {
+        for (let j = i + 1; j < sorted.length; j++) {
+          let inner = sorted[i]
+          let outer = sorted[j]
+          let oi = inner.orbit as SceneOrbit
+          let oo = outer.orbit as SceneOrbit
+          let gap = oo.radius - oi.radius
+          let need = orbitReach(inner, byCentre, 0) + orbitReach(outer, byCentre, 0)
+          if (gap >= need) { continue }
+          throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_ORBITS_CROSS + ' The program plays, but "' + inner.id +
+            '" (orbit ' + r2(oi.radius) + ') and "' + outer.id + '" (orbit ' + r2(oo.radius) + ') pass through each other: their orbits are ' +
+            r2(gap) + ' apart and the two reach ' + r2(need) + ' across (radius, rings and the orbits of their moons). Put neighbouring ' +
+            'orbits further apart than that -- spread the outer ones wider, or make the bodies, rings and moon orbits smaller')
+        }
+      }
+    }
+  }
+
   /** The bodies the camera sees now, by their centres and sizes on the screen. */
   seen(pose: CameraPose, spec: WorldSpec, t: number): number {
     let orbits = orbitPositions(spec, t)
@@ -293,6 +369,37 @@ class WorldPlay {
     throw new PlayStop(at.toString() + ':1 ' + CODE_NOT_SEEN + ' The program plays, but the camera sees none of the ' +
       spec.bodies.length.toString() + ' bodies' + (c !== null ? ' (it stands at ' + cameraText(c as CameraSpec) + ')' : '') + ': put scene.camera back from the bodies and above them, looking at ' +
       'their middle -- for things about s metres across, about 2 to 3 s away -- or leave the camera out and the host frames everything')
+  }
+
+  /**
+   * The bodies that move (or, with none moving, all of them) are not specks: the biggest is MIN_BODY_VP across on screen
+   * as the world starts. Real sizes can make them so -- dice of 16 mm on a table 0.9 m wide came out 4 vp (2026-11-16).
+   */
+  checkReadable(): void {
+    let spec = this.spec as WorldSpec
+    let pose = worldCamera(spec, this.width / this.height)
+    let orbits = orbitPositions(spec, 0)
+    let moving = spec.bodies.filter((b: BodySpec): boolean => b.motion !== 'static')
+    let list = moving.length > 0 ? moving : spec.bodies
+    let biggest = 0
+    let biggestId = ''
+    for (let b of list) {
+      let o = orbits.get(b.id)
+      let p: number[] = o !== undefined ? [o[0], o[1], o[2]] : b.position
+      let at = projectPoint(pose, this.width, this.height, p)
+      if (at === null) { continue }
+      let across = Math.max(b.dims[0], b.dims[1], b.dims[2]) / Math.max(1e-6, metresPerVp(pose, this.height, at[2]))
+      if (across > biggest) {
+        biggest = across
+        biggestId = b.id
+      }
+    }
+    if (biggestId.length === 0 || biggest >= MIN_BODY_VP) { return }
+    throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_TOO_SMALL + ' The program plays, but its bodies are specks on ' +
+      'the phone: the biggest, "' + biggestId + '", is ' + (Math.round(biggest * 10) / 10).toString() + ' points across in a world ' +
+      Math.round(this.width).toString() + ' points wide. Size the scene for the screen, not for reality: make the bodies bigger ' +
+      'and keep the table or the spread of things just big enough for them, so each body the person watches is a good part ' +
+      'of the view')
   }
 
   /** Where a body is now, for a tap on it. */
@@ -344,9 +451,9 @@ class WorldPlay {
       let e = queue.shift() as SimEvent
       n++
       if (this.event.length === 0) { continue }
+      if (e.kind === 'settled' && this.kicks > 0) { this.settledAfterKick++ }
       let isDiceSettle = e.kind === 'settled' && this.spec !== null &&
         (this.spec as WorldSpec).bodies.some((b: BodySpec): boolean => b.isDie)
-      if (isDiceSettle) { this.settledWithDice++ }
       let before = fingerprint(this.state)
       let steps = this.handle(this.event, sceneEventValue(e.kind, e.body, e.other, e.x, e.y, e.z, e.speed, e.bodies, e.values),
         'in ' + this.event + ' (the event "' + e.kind + '" at frame ' + frame.toString() + ')')
@@ -361,6 +468,7 @@ class WorldPlay {
   play(): string {
     this.rebuild('when the program starts')
     this.checkSeen()
+    this.checkReadable()
     let buttons: VeraUiNode[] = []
     for (let root of decodeVeraUi(this.vm.execute('view', [this.state]))) { buttonsIn(root, buttons) }
     let pressed = spread(buttons, PRESSED_BUTTONS)
@@ -402,15 +510,18 @@ class WorldPlay {
         'with scene.loose and scene.kick (thrown when a count in the state changes), scene.orbit or scene.spin, and change the ' +
         'state in ' + (this.event.length > 0 ? this.event : 'an event handler (the World\'s last argument)') + ' when a body is tapped'
     }
-    if (this.dice && this.kicksWithDice === 0) {
-      return this.line(this.build).toString() + ':1 ' + CODE_NO_SETTLE + ' The program plays, but the dice are never thrown: ' +
-        'neither a tap, a swipe nor a button changed their kick trigger. Wrap each die in scene.kick(scene.loose(die, 1), ' +
-        'state.throws, ...) and add 1 to state.throws in the handler that throws'
+    // Anything with scene.kick is there to be thrown, and a throw ends in "settled"; a die's face is read from it.
+    if ((this.thrower || this.dice) && this.kicks === 0) {
+      return this.line(this.build).toString() + ':1 ' + CODE_NO_SETTLE + ' The program plays, but ' +
+        (this.thrower ? 'the bodies with scene.kick are' : 'the dice are') + ' never thrown: neither a tap, a swipe nor a ' +
+        'button changed a kick trigger. Wrap each in scene.kick(scene.loose(body, 1), state.throws, ...) and add 1 to ' +
+        'state.throws in the handler that throws'
     }
-    if (this.dice && this.settledWithDice === 0) {
-      return this.line(this.build).toString() + ':1 ' + CODE_NO_SETTLE + ' The program plays, but the dice were thrown and the ' +
-        'event "settled" never arrived' + (this.event.length === 0 ? ': the World has no event handler, so nothing can read ' +
-        'the faces. Name one as the World\'s last argument' : ': keep the dice loose on a scene.table, thrown by scene.kick')
+    if (this.kicks > 0 && this.settledAfterKick === 0 && (this.dice || this.event.length > 0)) {
+      return this.line(this.build).toString() + ':1 ' + CODE_NO_SETTLE + ' The program plays, but the bodies were thrown and ' +
+        'the event "settled" never arrived' + (this.event.length === 0 ? ': the World has no event handler, so nothing can ' +
+        'read the faces. Name one as the World\'s last argument' : ': keep what is thrown loose, over the table or floor, ' +
+        'thrown by scene.kick')
     }
     if (this.dice && this.settledRead === 0) {
       return this.line(this.event).toString() + ':1 ' + CODE_RESULT_UNREAD + ' The program plays, but when the dice came to rest ' +
@@ -458,8 +569,8 @@ export function playWorld(compiled: CompileResult, requireWorld: boolean = true,
     report.slowestSteps = play.slowest
     report.slowestMs = predictWorkMs(play.slowest)
     report.bodies = play.spec !== null ? (play.spec as WorldSpec).bodies.length : 0
-    report.kicksWithDice = play.kicksWithDice
-    report.settledWithDice = play.settledWithDice
+    report.kicks = play.kicks
+    report.settledAfterKick = play.settledAfterKick
     report.settledRead = play.settledRead
     report.stateChanged = play.stateChanged
     report.hitEvents = play.hitEvents

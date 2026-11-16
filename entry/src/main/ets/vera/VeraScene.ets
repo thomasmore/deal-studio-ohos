@@ -30,6 +30,9 @@ export const SCENE_EVENT: string = 'std/scene:Event'
 /** The most bodies one world may hold (a camera, a table and a floor are not bodies). */
 export const MAX_WORLD_BODIES: number = 300
 
+/** The most stars scene.sky paints. */
+export const MAX_SKY_STARS: number = 3000
+
 /** The kinds of a scene.Event, in the order the prompt lists them. */
 export const SCENE_EVENT_KINDS: string[] = ['tap', 'swipe', 'hit', 'settled']
 
@@ -56,7 +59,11 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'a table top at y = 0, width by depth, centred on 0, 0, with low walls round it: loose bodies stay on it. Use it for dice and ' +
     'for anything thrown'),
   new GfxFunction('floor', [color()], 'thing',
-    'the ground at y = 0, as far as the eye sees: a world with no table or floor floats in space (a solar system)'),
+    'the ground at y = 0, as far as the eye sees. With no table or floor nothing falls: loose bodies float'),
+  new GfxFunction('sky', [color(), num('stars')], 'thing',
+    'what is behind the world: its colour and how many stars are painted in it (0 to ' + MAX_SKY_STARS.toString() + '; ' +
+    'they turn with the view and never move by themselves). Without it the world stands on the app\'s own background. ' +
+    'At most one'),
   new GfxFunction('camera', [num('x'), num('y'), num('z'), num('lookX'), num('lookY'), num('lookZ'), new GfxParam('orbit', 'boolean')],
     'thing', 'where the viewer stands and the point it looks at; orbit true lets a drag on empty space turn the view around that point. ' +
     'At most one; without it the host picks a view of everything'),
@@ -74,16 +81,19 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
   new GfxFunction('turn', [thing(), num('rx'), num('ry'), num('rz')], 'thing',
     'the thing\'s starting rotation, in degrees about x, y and z: a tilted box, a fallen pillar'),
   new GfxFunction('glow', [thing()], 'thing',
-    'the thing shines by itself and casts no shadow: a sun, a lamp, a light'),
+    'the thing shines by itself, casts no shadow and, if it stands still, lights the bodies round it from where it is, ' +
+    'each brighter on its side facing it: a sun, a lamp, a fire'),
   new GfxFunction('paint', [thing(), str('pattern'), new GfxParam('color2', 'color')], 'thing',
     'a ball\'s surface: pattern drawn in the ball\'s own colour and color2, so it reads as what it is -- ' +
     SURFACE_PATTERNS.map((p: string[]): string => '"' + p[0] + '" ' + p[1]).join('; ') +
     '. With scene.spin the pattern turns, so the ball is seen turning'),
   new GfxFunction('rings', [thing(), num('inner'), num('outer'), color()], 'thing',
-    'flat rings round the thing\'s equator from radius inner to outer (metres from its centre), tilted and carried with it: ' +
-    'a ringed planet\'s rings (about 1.3 to 2.3 times its radius)'),
+    'flat rings round the thing\'s equator from radius inner to outer (metres from its centre, both beyond its radius), ' +
+    'tilted and carried with it'),
   new GfxFunction('mark', [thing(), color()], 'thing',
-    'a thin ring round the thing that marks it, in the colour (the accent): the planet or body the person selected'),
+    'a thin ring round the thing that marks it, in the colour (the accent): the body the person selected'),
+  new GfxFunction('trail', [thing()], 'thing',
+    'the thing\'s path is drawn as a faint line: the circle of an orbit round a centre that stays put'),
   new GfxFunction('bounce', [thing(), num('restitution'), num('friction')], 'thing',
     'how the thing bounces (0 dead .. 1 rubber; 0.3 by default) and grips (0 ice .. 1 rubber; 0.6 by default)'),
 ]
@@ -153,6 +163,10 @@ export class SceneThing {
   ringColor: string = ''
   /** scene.mark: the colour of the ring that marks the body ('' for none). */
   mark: string = ''
+  /** scene.trail: its path is drawn. */
+  trail: boolean = false
+  /** scene.sky: how many stars. */
+  stars: number = 0
 
   copy(): SceneThing {
     let t = new SceneThing()
@@ -164,6 +178,7 @@ export class SceneThing {
     t.rx = this.rx; t.ry = this.ry; t.rz = this.rz; t.glow = this.glow
     t.pattern = this.pattern; t.color2 = this.color2
     t.ringInner = this.ringInner; t.ringOuter = this.ringOuter; t.ringColor = this.ringColor; t.mark = this.mark
+    t.trail = this.trail; t.stars = this.stars
     return t
   }
 }
@@ -280,6 +295,13 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
       t.color = asStr(args, 0)
       return wrap(t)
     }
+    case 'sky': {
+      let t = new SceneThing()
+      t.kind = 'sky'
+      t.color = asStr(args, 0)
+      t.stars = Math.round(Math.max(0, Math.min(MAX_SKY_STARS, asNum(args, 1, 'stars'))))
+      return wrap(t)
+    }
     case 'camera': {
       let t = new SceneThing()
       t.kind = 'camera'
@@ -382,6 +404,11 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
       t.mark = c.length > 0 ? c : 'accent'
       return wrap(t)
     }
+    case 'trail': {
+      let t = asBody(args, 'trail')
+      t.trail = true
+      return wrap(t)
+    }
     case 'bounce': {
       let t = asBody(args, 'bounce')
       t.restitution = Math.max(0, Math.min(1, asNum(args, 1, 'restitution')))
@@ -435,6 +462,11 @@ export class FloorSpec {
   color: string = ''
 }
 
+export class SkySpec {
+  color: string = ''
+  stars: number = 0
+}
+
 export class BodySpec {
   id: string = ''
   /** 'box' | 'sphere' | 'cylinder' (a die is a box with isDie) */
@@ -465,12 +497,15 @@ export class BodySpec {
   ringColor: string = ''
   /** scene.mark's colour, '' for none. */
   mark: string = ''
+  /** scene.trail: its path is drawn. */
+  trail: boolean = false
 }
 
 export class WorldSpec {
   camera: CameraSpec | null = null
   floor: FloorSpec | null = null
   table: TableSpec | null = null
+  sky: SkySpec | null = null
   bodies: BodySpec[] = []
 }
 
@@ -496,6 +531,7 @@ function bodySpec(t: SceneThing): BodySpec {
   b.rings = t.ringOuter > 0 ? [t.ringInner, t.ringOuter] : []
   b.ringColor = t.ringColor
   b.mark = t.mark
+  b.trail = t.trail
   return b
 }
 
@@ -517,6 +553,12 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
       let s = new TableSpec()
       s.width = t.w; s.depth = t.d; s.color = t.color
       world.table = s
+    } else if (t.kind === 'sky') {
+      if (world.sky !== null) { throw new RuntimeTrap('R0029', 'a world has at most one scene.sky') }
+      let k = new SkySpec()
+      k.color = t.color
+      k.stars = t.stars
+      world.sky = k
     } else if (t.kind === 'floor') {
       if (world.floor !== null) { throw new RuntimeTrap('R0029', 'a world has at most one scene.floor') }
       let f = new FloorSpec()
@@ -579,10 +621,13 @@ export class WorldDiff {
   cameraChanged: boolean = false
   tableChanged: boolean = false
   floorChanged: boolean = false
+  /** The sky, or which bodies leave a trail: only what is painted behind the world changes. */
+  backdropChanged: boolean = false
 
   empty(): boolean {
     return this.create.length === 0 && this.remove.length === 0 && this.recreate.length === 0 && this.material.length === 0 &&
-      this.setPose.length === 0 && this.kick.length === 0 && !this.cameraChanged && !this.tableChanged && !this.floorChanged
+      this.setPose.length === 0 && this.kick.length === 0 && !this.cameraChanged && !this.tableChanged && !this.floorChanged &&
+      !this.backdropChanged
   }
 }
 
@@ -606,6 +651,13 @@ function sameTable(a: TableSpec | null, b: TableSpec | null): boolean {
 function sameFloor(a: FloorSpec | null, b: FloorSpec | null): boolean {
   if (a === null || b === null) { return a === b }
   return a.color === b.color
+}
+
+/** What the backdrop paints from: the sky and the bodies leaving a trail. */
+function backdropKey(w: WorldSpec | null): string {
+  if (w === null) { return '' }
+  let sky = w.sky !== null ? (w.sky as SkySpec).color + '/' + (w.sky as SkySpec).stars.toString() : '-'
+  return sky + '|' + w.bodies.filter((b: BodySpec): boolean => b.trail).map((b: BodySpec): string => b.id).join(',')
 }
 
 /** What the renderer has to do to go from the world it shows to the next one. Pure. */
@@ -647,6 +699,7 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
   diff.cameraChanged = !sameCamera(prevCamera, next.camera)
   diff.tableChanged = !sameTable(prevTable, next.table)
   diff.floorChanged = !sameFloor(prevFloor, next.floor)
+  diff.backdropChanged = backdropKey(prev) !== backdropKey(next)
   return diff
 }
 
@@ -690,6 +743,77 @@ function placeAt(b: BodySpec, byId: Map<string, BodySpec>, placed: Map<string, n
   let out: number[] = [p[0], p[1], p[2], b.rotation[0], ry, b.rotation[2]]
   placed.set(b.id, out)
   return out
+}
+
+/** Degrees turned by tSeconds at one turn every periodS (0: not turning). */
+function turnedDeg(tSeconds: number, periodS: number): number {
+  return periodS !== 0 ? 360 * tSeconds / periodS : 0
+}
+
+/** The starting angle that, at periodS, is where oldStart at oldPeriodS is at tSeconds: the motion goes on from there. */
+function carriedStart(oldStart: number, oldPeriodS: number, periodS: number, tSeconds: number): number {
+  let a = (oldStart + turnedDeg(tSeconds, oldPeriodS) - turnedDeg(tSeconds, periodS)) % 360
+  return a < 0 ? a + 360 : a
+}
+
+class CarriedMotion {
+  centre: string = ''
+  /** As the program wrote them. */
+  periodS: number = 0
+  phaseDeg: number = 0
+  spinPeriodS: number = 0
+  ry: number = 0
+  /** What the host uses, so the motion goes on from where it was. */
+  phaseUsed: number = 0
+  ryUsed: number = 0
+}
+
+/**
+ * Orbits and spins as a pure function of time put a body wherever start + 360 * t / period says, so a new state that only
+ * changes a period (a Faster button dividing every period by the speed) would throw each body to another place on its
+ * orbit -- after a minute, many turns away. The host keeps, per body, what the program wrote and the start it really uses:
+ * when only the period changes, the start is moved so the body is where it was at that moment and goes on at the new
+ * period. A start the program changed itself, or a new centre, is taken as written. One per world, fed every spec it shows
+ * at the world's own time; it rewrites the spec's orbit (copied) and starting ry in place.
+ */
+export class MotionCarry {
+  private bodies: Map<string, CarriedMotion> = new Map<string, CarriedMotion>()
+
+  apply(spec: WorldSpec, tSeconds: number): void {
+    let next = new Map<string, CarriedMotion>()
+    for (let b of spec.bodies) {
+      if (b.motion !== 'kinematic') { continue }
+      let o = b.orbit
+      let m = new CarriedMotion()
+      m.centre = o !== null ? o.centre : ''
+      m.periodS = o !== null ? o.periodS : 0
+      m.phaseDeg = o !== null ? o.phaseDeg : 0
+      m.spinPeriodS = b.spinPeriodS
+      m.ry = b.rotation[1]
+      m.phaseUsed = m.phaseDeg
+      m.ryUsed = m.ry
+      let old = this.bodies.get(b.id)
+      if (old !== undefined) {
+        if (o !== null && old.centre === m.centre && old.phaseDeg === m.phaseDeg) {
+          m.phaseUsed = old.periodS === m.periodS ? old.phaseUsed : carriedStart(old.phaseUsed, old.periodS, m.periodS, tSeconds)
+        }
+        if (old.ry === m.ry) {
+          m.ryUsed = old.spinPeriodS === m.spinPeriodS ? old.ryUsed : carriedStart(old.ryUsed, old.spinPeriodS, m.spinPeriodS, tSeconds)
+        }
+      }
+      if (o !== null && m.phaseUsed !== m.phaseDeg) {
+        let c = new SceneOrbit()
+        c.centre = o.centre
+        c.radius = o.radius
+        c.periodS = o.periodS
+        c.phaseDeg = m.phaseUsed
+        b.orbit = c
+      }
+      if (m.ryUsed !== m.ry) { b.rotation = [b.rotation[0], m.ryUsed, b.rotation[2]] }
+      next.set(b.id, m)
+    }
+    this.bodies = next
+  }
 }
 
 /**
@@ -738,7 +862,7 @@ export function describeSceneForPrompt(): string {
   lines.push('  Wrappers take a thing and return it changed, so they nest: scene.kick(scene.loose(scene.die("d1", 0, 0.5, 0, 0.3, "white"), 1), ' +
     'state.throws, 2, 3, 0, 2). Without loose, kick, orbit or spin a body never moves.')
   lines.push('  Every body has an id of its own (two bodies with one id stop the program); at most ' + MAX_WORLD_BODIES.toString() +
-    ' bodies, at most one camera, table and floor. Do not let bodies start inside one another or below y = 0.')
+    ' bodies, at most one camera, table, floor and sky. Do not let bodies start inside one another or below y = 0.')
   lines.push('  build runs only when the state changes, never per frame: once a loose body exists the host moves it, and its x, y, z are ' +
     'only where it starts -- returning it again somewhere else does nothing. To throw it again change its kick trigger; to put it ' +
     'back, give it a new id (state.round in the id). Never keep positions or angles in the state to animate them: orbit, spin and ' +

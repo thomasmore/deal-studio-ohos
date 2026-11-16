@@ -4,43 +4,43 @@ Build it on one ui.Surface drawn with std/gfx, not out of buttons, cards and gri
 
 The shape of the program:
 - view(state) returns ui.AppTheme(preset, "", [ui.Surface("fill", 360, 640, "draw", "onFrame", "onPointer")]).
-  Nothing else goes in the view unless the request asks for controls outside the play area. The score, the lives,
-  the level, the title and the game-over message are all drawn on the surface with gfx.text.
-- 360 by 640 is the surface for a portrait game. Use 640 by 360 only when the request is clearly landscape.
+  Nothing else goes in the view unless the request asks for controls outside the drawing. What the person reads -- a
+  score, a count, a title, a message -- is drawn on the surface with gfx.text.
+- 360 by 640 is the surface for a portrait app. Use 640 by 360 only when the request is clearly landscape.
   Every position, size and speed is in these units; the phone scales the whole surface to fit.
 - draw(state: AppState): gfx.Shape[] builds a local gfx.Shape[], pushes shapes back to front and returns it.
   The background rect comes first and the HUD last. draw only reads state.
 - onFrame(state: AppState, elapsedMs: number): AppState runs before every frame, about 60 times a second.
   Start it with let dt: number = math.min(elapsedMs, 50) / 1000; and move everything by speed * dt,
-  with speeds in units per second. Return state unchanged when the game is not being played.
+  with speeds in units per second. Return state unchanged while nothing is moving.
 - onPointer(state: AppState, p: gfx.Pointer): AppState gets every finger event: p.phase is "down", "move", "up" or "cancel",
   p.x and p.y are in surface units, and p.id tells two fingers apart.
 
 State:
-- Keep a phase string in AppState: "ready" before the first round, "playing", "over" after the last life.
-  "ready" and "over" draw the title or the result over the scene with "Tap to play"; a pointer "down" in either starts a
-  fresh round. Never make a ui.Button the only way to start or restart.
+- A game with rounds keeps a phase string in AppState: "ready" before the first round, "playing", "over" at the end;
+  "ready" and "over" draw the title or the result over the scene with what to tap, and a pointer "down" in either
+  starts a fresh round. A toy, a simulation or a scene to watch runs from the start and needs no phase. Never make a
+  ui.Button the only way to start or restart.
 - One record class per kind of thing (class Ball { x: number; y: number; vx: number; vy: number; }), and an array of
-  records for many of them (bricks, bullets, enemies, particles). Keep counts, timers, the level, the score, the best
-  score and a random seed as numbers. AppState holds no gfx.Shape.
+  records for many of them. Keep counts, timers, a score and a random seed as numbers. AppState holds no gfx.Shape.
 - State is immutable here too: onFrame builds new arrays and new records with a loop every frame and returns a new
   AppState with every field. Never assign into an array or a record that came from state.
 - Count down timers with elapsedMs: spawnIn = spawnIn - elapsedMs; when it reaches 0, spawn and reset it.
 - Random choices use math.randomStep(seed) and math.randomBelow(seed, n), with the seed kept in state and advanced
   each time.
-- Build levels and layouts with loops (rows times columns, a ring of enemies), never as long literal arrays.
+- Build layouts with loops (rows times columns, a ring), never as long literal arrays.
 
-Controls -- choose what fits the game and say it on the "ready" screen in a few words:
-- Drag: while a finger is down, the paddle, ship or basket follows p.x (and p.y if it moves freely), clamped to the
-  surface. Remember the finger with a dragging boolean or its p.id.
-- Tap: a "down" anywhere fires, jumps or flaps.
-- Two jobs at once (a tank, a ship that turns and shoots): the left half of the surface is a stick -- on "down" there,
+Controls -- choose what fits and say it on the surface in a few words:
+- Drag: while a finger is down, the thing it holds follows p.x (and p.y if it moves freely), clamped to the surface.
+  Remember the finger with a dragging boolean or its p.id.
+- Tap: a "down" anywhere does the one action (fires, jumps, adds, picks).
+- Two jobs at once (move and act): the left half of the surface is a stick -- on "down" there,
   store the finger's id and where it went down; on "move", the offset from that point (capped at 50) is the direction
   and speed; on "up", stop. A "down" on the right half fires. Draw the stick as a ring with a knob where the finger is.
 - Keep every control reachable with a thumb, and draw it, so the person can see what to touch.
 - With a stick or on-screen buttons, the play area is the top of the surface and ends at y = 500; the stick and the
-  buttons sit in the strip under it (y 500 to 640) on a background of their own. Nothing of the game -- the player, a
-  base, a wall, an enemy -- is placed or moves into that strip: a thumb on the stick would hide it.
+  buttons sit in the strip under it (y 500 to 640) on a background of their own. Nothing that matters is placed or
+  moves into that strip: a thumb on the stick would hide it.
 
 Movement and collisions:
 - Bounce off a wall: reverse that velocity component and put the object back inside, so it cannot stick.
@@ -52,20 +52,19 @@ Movement and collisions:
 - A paddle that steers the ball: set vx from where the ball hit it, (ball.x - paddle centre) / half width * a top speed.
 - Heading: a shape drawn pointing right (+x) and turned by math.atan2(dy, dx) * 180 / math.pi() degrees in gfx.group
   points along (dx, dy). Moving along an angle a in degrees: dx = math.cos(a * math.pi() / 180), dy = math.sin(...).
-- Remove what leaves the surface or expires: bullets, particles, enemies that passed. Keep moving things under about 200
-  and the shapes drawn per frame under about 1500.
-- Simple enemies: move toward the player, turn by a few degrees per frame, fire on a timer with a random delay.
+- Remove what leaves the surface or expires. Keep moving things under about 200 and the shapes drawn per frame under
+  about 1500.
+- Something that chases: moves toward its target, turns by a few degrees per frame, acts on a timer with a random delay.
 
 Drawing:
-- gfx.group(x, y, rotation, scale, alpha, shapes) draws shapes made around 0, 0 at x, y: write a ship, a tank or a brick
-  once, around its own centre, and place it with a group. A tank is a body group with a turret group inside it.
+- gfx.group(x, y, rotation, scale, alpha, shapes) draws shapes made around 0, 0 at x, y: write a thing once, around its
+  own centre, and place it with a group. A part that turns on its own is a group inside the thing's group.
 - Everything that moves must read at a glance at its real size: a silhouette of 3 to 6 shapes, not a square in a square,
-  with the part that shows which way it faces plainly visible -- a tank's barrel is a rect at least half the body long
-  sticking out of the front, its tracks two darker strips along the sides, and the whole group is turned to the heading.
-  The player and the enemies differ in colour and in shape.
-- A level is laid out as several separate walls or obstacles with lanes and gaps between them, never one solid block,
-  with an open way from where enemies appear to the player. Walls that can be shot away are built of small tiles (a brick
-  about 12 units) in a grid, knocked out one at a time.
+  with the part that shows which way it faces plainly visible and sticking out, and the whole group turned to its
+  heading. Things on different sides differ in colour and in shape.
+- Obstacles are laid out separately with lanes and gaps between them, never one solid block, with an open way between
+  where things appear and where the person is. What can be broken away is built of small tiles in a grid, removed one at
+  a time.
 - "Pixel", "retro" or "8-bit": draw sprites and walls from squares on a grid (a pixel of 3 or 4 units), a palette of a few
   flat colours, a dark plain background; no rounded rects, no glow, no gradients.
 - Shapes computed at run time: a star, a gear or an asteroid is a polygon whose points come from a loop with
@@ -76,203 +75,144 @@ Drawing:
   up and left of the middle, the darkest last; the sky, the sea or a metal bar is gfx.linear; a thing standing on the
   ground has a soft gfx.shadow under it ("#00000055"); a lamp, a star or a spark is in a gfx.glow; overlapping lights are
   in gfx.blend("add", ...). An effect costs a frame time: put it on the few things that matter, not on every particle.
-- Glow, for "neon" or "glowing": the shape in gfx.glow of its own colour. Neon means a near-black background ("#05010f"),
-  saturated colours ("#00f0ff", "#ff2bd6", "#39ff14", "#ffe600", "#ff6b00"), thin bright lines, and glowing text.
+- Glow, for "neon" or "glowing": the shape in gfx.glow of its own colour, on a near-black background, a few saturated
+  colours, thin bright lines and glowing text.
 - Particles for a hit or an explosion: a few short-lived records with a velocity and an age, drawn as circles or arcs
   that fade with group alpha 1 - age / lifetime.
-- The HUD: gfx.text(20, 34, 22, "left", ...) for the score, lives as small shapes under it, the level after the score on
-  the same line. Keep the top right corner (x over 260, y under 70) empty: the phone draws its own buttons there.
+- What the person reads: gfx.text(20, 34, 22, "left", ...) at the top left, counts as small shapes under it. Keep the top right corner (x over 260, y under 70) empty: the phone draws its own buttons there.
   Use ui.numberToString for numbers in text.
 - A "ready" or "over" overlay is a translucent rect over the whole surface ("#000000aa") with centred text on it.
 
-A complete example: catch falling stars by dragging a basket. Write your own program for the request; take the
-structure from this, not the game.
+A complete example of these parts in one program, with no game in it. Write your own program for the request; take
+the structure and the calls from this, not its things.
 
 --- EXAMPLE ---
 @jsonable
-class Star {
+class Ball {
   x: number;
   y: number;
-  speed: number;
-  spin: number;
-}
-
-@jsonable
-class Spark {
-  x: number;
-  y: number;
-  age: number;
+  vx: number;
+  vy: number;
+  hue: number;
 }
 
 @jsonable
 class AppState {
-  stars: Star[];
-  sparks: Spark[];
-  basketX: number;
-  dragging: boolean;
-  score: number;
-  lives: number;
-  best: number;
+  balls: Ball[];
+  held: number;
+  finger: number;
   seed: number;
-  spawnIn: number;
-  phase: string;
 }
 
 function init(): AppState {
-  let stars: Star[] = [];
-  let sparks: Spark[] = [];
-  return {stars: stars, sparks: sparks, basketX: 180, dragging: false, score: 0, lives: 3, best: 0,
-    seed: 20261029, spawnIn: 600, phase: "ready"};
+  let balls: Ball[] = [{x: 120, y: 200, vx: 90, vy: 140, hue: 0}, {x: 240, y: 420, vx: -120, vy: 60, hue: 1}];
+  return {balls: balls, held: -1, finger: -1, seed: 20261116};
 }
 
-function clampX(x: number): number {
-  return math.max(50, math.min(310, x));
+function radius(): number {
+  return 26;
 }
 
 function onFrame(state: AppState, elapsedMs: number): AppState {
-  if (state.phase !== "playing") {
-    return state;
-  }
   let dt: number = math.min(elapsedMs, 50) / 1000;
-  let score: number = state.score;
-  let lives: number = state.lives;
-  let seed: number = state.seed;
-  let spawnIn: number = state.spawnIn - elapsedMs;
-
-  let sparks: Spark[] = [];
-  for (let s: Spark of state.sparks) {
-    if (s.age + dt < 0.5) {
-      sparks.push({x: s.x, y: s.y, age: s.age + dt});
-    }
-  }
-
-  let stars: Star[] = [];
-  for (let s: Star of state.stars) {
-    let y: number = s.y + s.speed * dt;
-    if (y >= 556 && y <= 596 && math.abs(s.x - state.basketX) < 56) {
-      score = score + 1;
-      sparks.push({x: s.x, y: 570, age: 0});
-    } else if (y > 660) {
-      lives = lives - 1;
+  let r: number = radius();
+  let balls: Ball[] = [];
+  let i: number = 0;
+  for (let b: Ball of state.balls) {
+    if (i === state.held) {
+      balls.push(b);
     } else {
-      stars.push({x: s.x, y: y, speed: s.speed, spin: s.spin + 120 * dt});
+      let x: number = b.x + b.vx * dt;
+      let y: number = b.y + b.vy * dt;
+      let vx: number = b.vx;
+      let vy: number = b.vy;
+      // Off a wall: turn that way round and put it back inside, so it cannot stick.
+      if (x < r) { x = r; vx = math.abs(vx); }
+      if (x > 360 - r) { x = 360 - r; vx = -math.abs(vx); }
+      if (y < 80 + r) { y = 80 + r; vy = math.abs(vy); }
+      if (y > 640 - r) { y = 640 - r; vy = -math.abs(vy); }
+      balls.push({x: x, y: y, vx: vx, vy: vy, hue: b.hue});
     }
+    i = i + 1;
   }
+  return {balls: balls, held: state.held, finger: state.finger, seed: state.seed};
+}
 
-  if (spawnIn <= 0) {
-    seed = math.randomStep(seed);
-    let x: number = 30 + math.randomBelow(seed, 300);
-    seed = math.randomStep(seed);
-    let speed: number = math.min(420, 150 + score * 6 + math.randomBelow(seed, 60));
-    stars.push({x: x, y: -20, speed: speed, spin: 0});
-    spawnIn = math.max(380, 1100 - score * 25);
+function ballAt(state: AppState, x: number, y: number): number {
+  let i: number = 0;
+  let found: number = -1;
+  for (let b: Ball of state.balls) {
+    if (gfx.distance(x, y, b.x, b.y) < radius() + 8) {
+      found = i;
+    }
+    i = i + 1;
   }
-
-  let phase: string = "playing";
-  let best: number = state.best;
-  if (lives <= 0) {
-    phase = "over";
-    best = math.max(best, score);
-  }
-  return {stars: stars, sparks: sparks, basketX: state.basketX, dragging: state.dragging, score: score,
-    lives: math.max(0, lives), best: best, seed: seed, spawnIn: spawnIn, phase: phase};
+  return found;
 }
 
 function onPointer(state: AppState, p: gfx.Pointer): AppState {
-  if (state.phase !== "playing") {
-    if (p.phase !== "down") {
+  if (p.phase === "down") {
+    let hit: number = ballAt(state, p.x, p.y);
+    if (hit >= 0) {
+      return {balls: state.balls, held: hit, finger: p.id, seed: state.seed};
+    }
+    if (state.balls.length() >= 12 || p.y < 80) {
       return state;
     }
-    let stars: Star[] = [];
-    let sparks: Spark[] = [];
-    return {stars: stars, sparks: sparks, basketX: clampX(p.x), dragging: true, score: 0, lives: 3,
-      best: state.best, seed: state.seed, spawnIn: 400, phase: "playing"};
-  }
-  let dragging: boolean = state.dragging;
-  let x: number = state.basketX;
-  if (p.phase === "down") {
-    dragging = true;
-    x = clampX(p.x);
-  } else if (p.phase === "move") {
-    if (dragging) {
-      x = clampX(p.x);
+    let seed: number = math.randomStep(state.seed);
+    let a: number = math.randomBelow(seed, 360) * math.pi() / 180;
+    let balls: Ball[] = [];
+    for (let b: Ball of state.balls) {
+      balls.push(b);
     }
-  } else {
-    dragging = false;
+    balls.push({x: p.x, y: p.y, vx: 130 * math.cos(a), vy: 130 * math.sin(a), hue: state.balls.length() % 3});
+    return {balls: balls, held: -1, finger: -1, seed: seed};
   }
-  return {stars: state.stars, sparks: state.sparks, basketX: x, dragging: dragging, score: state.score,
-    lives: state.lives, best: state.best, seed: state.seed, spawnIn: state.spawnIn, phase: state.phase};
+  if (p.id !== state.finger || state.held < 0) {
+    return state;
+  }
+  if (p.phase === "move") {
+    let balls: Ball[] = [];
+    let i: number = 0;
+    for (let b: Ball of state.balls) {
+      if (i === state.held) {
+        balls.push({x: math.max(radius(), math.min(360 - radius(), p.x)), y: math.max(80 + radius(), math.min(640 - radius(), p.y)),
+          vx: b.vx, vy: b.vy, hue: b.hue});
+      } else {
+        balls.push(b);
+      }
+      i = i + 1;
+    }
+    return {balls: balls, held: state.held, finger: state.finger, seed: state.seed};
+  }
+  return {balls: state.balls, held: -1, finger: -1, seed: state.seed};
 }
 
-function starPoints(outer: number, inner: number): number[] {
-  let points: number[] = [];
-  let i: number = 0;
-  while (i < 10) {
-    let r: number = outer;
-    if (i % 2 === 1) {
-      r = inner;
-    }
-    let a: number = math.pi() * i / 5 - math.pi() / 2;
-    points.push(r * math.cos(a));
-    points.push(r * math.sin(a));
-    i = i + 1;
+function colourOf(hue: number): string {
+  if (hue === 0) {
+    return "accent";
   }
-  return points;
+  if (hue === 1) {
+    return "warning";
+  }
+  return "#22c55e";
 }
 
 function draw(state: AppState): gfx.Shape[] {
   let shapes: gfx.Shape[] = [];
-  shapes.push(gfx.rect(0, 0, 360, 640, "#0b1d3a"));
-  shapes.push(gfx.rect(0, 420, 360, 220, "#10284d"));
-  let i: number = 0;
-  while (i < 24) {
-    let x: number = 180 + 170 * math.sin(i * 12.9898);
-    let y: number = 300 + 290 * math.sin(i * 78.233);
-    shapes.push(gfx.circle(x, y, 1.2 + (i % 3) * 0.6, "#ffffff55"));
-    i = i + 1;
+  shapes.push(gfx.rect(0, 0, 360, 640, "background"));
+  let r: number = radius();
+  for (let b: Ball of state.balls) {
+    let body: gfx.Shape[] = [gfx.circle(0, 0, r, colourOf(b.hue)), gfx.circle(-8, -8, 7, "#ffffff66")];
+    shapes.push(gfx.group(b.x, b.y, 0, 1, 1, body));
   }
-
-  let star: number[] = starPoints(18, 8);
-  for (let s: Star of state.stars) {
-    let glow: gfx.Shape[] = [gfx.circle(0, 0, 22, "#ffd54a33"), gfx.polygon(star, "#ffd54a")];
-    shapes.push(gfx.group(s.x, s.y, s.spin, 1, 1, glow));
-  }
-  for (let s: Spark of state.sparks) {
-    let ring: gfx.Shape[] = [gfx.arc(0, 0, 14 + s.age * 80, 0, 360, 3, "#ffe082")];
-    shapes.push(gfx.group(s.x, s.y, 0, 1, 1 - s.age * 2, ring));
-  }
-
-  shapes.push(gfx.roundRect(state.basketX - 50, 572, 100, 28, 12, "accent"));
-  shapes.push(gfx.line(state.basketX - 44, 580, state.basketX + 44, 580, 3, "onAccent"));
-
-  shapes.push(gfx.text(20, 34, 22, "left", "white", "Score " + ui.numberToString(state.score), true));
-  let life: number = 0;
-  while (life < 3) {
-    let tone: string = "#ffffff33";
-    if (life < state.lives) {
-      tone = "danger";
-    }
-    shapes.push(gfx.circle(27 + life * 22, 62, 7, tone));
-    life = life + 1;
-  }
-
-  if (state.phase !== "playing") {
-    let title: string = "Star Catch";
-    if (state.phase === "over") {
-      title = "Caught " + ui.numberToString(state.score);
-    }
-    shapes.push(gfx.rect(0, 0, 360, 640, "#00000088"));
-    shapes.push(gfx.text(180, 280, 34, "center", "white", title, true));
-    shapes.push(gfx.text(180, 326, 18, "center", "#ffffffcc", "Drag the basket. Tap to play."));
-    if (state.best > 0) {
-      shapes.push(gfx.text(180, 364, 16, "center", "#ffd54a", "Best " + ui.numberToString(state.best)));
-    }
-  }
+  shapes.push(gfx.text(20, 34, 18, "left", "ink", ui.numberToString(state.balls.length()) + " balls", true));
+  shapes.push(gfx.text(20, 58, 14, "left", "soft", "Drag a ball, tap to add one"));
   return shapes;
 }
 
 function view(state: AppState): ui.View {
-  return ui.AppTheme("expressive", "", [
+  return ui.AppTheme("clean", "", [
     ui.Surface("fill", 360, 640, "draw", "onFrame", "onPointer")
   ]);
 }

@@ -264,6 +264,52 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
   close(at.get('earth'), [-2, 1, 0, 0, 0, 0], 'half a year')
 }
 
+// ---- a new period goes on from where the body is (a Faster button), not from where the period alone would put it
+{
+  const close = (a, b, msg) => a.forEach((v, i) => assert.ok(Math.abs(v - b[i]) < 1e-9, msg + ': ' + a + ' vs ' + b))
+  const solar = (m, phase = 0) => world([call('spin', box('sun', 0, 1, 0), 8 / m), call('orbit', box('earth'), 'sun', 2, 12 / m, phase),
+    call('orbit', box('moon'), 'earth', 0.5, 3 / m, 90)])
+  const carry = new S.MotionCarry()
+  const slow = solar(1); carry.apply(slow, 0)
+  const t = 100.3
+  const before = S.orbitPositions(slow, t)
+  const fast = solar(2); carry.apply(fast, t)
+  const after = S.orbitPositions(fast, t)
+  const mod = v => ((v % 360) + 360) % 360
+  for (const id of ['sun', 'earth', 'moon']) {
+    close(after.get(id).slice(0, 3), before.get(id).slice(0, 3), id + ' stays where it was when the period halves')
+    const dry = mod(after.get(id)[4] - before.get(id)[4])
+    assert.ok(dry < 1e-6 || 360 - dry < 1e-6, id + ' keeps its turn: ' + dry)
+  }
+  // ... and goes on at the new period: a quarter of the new year (3 s) later the earth is a quarter round.
+  const e0 = S.orbitPositions(fast, t).get('earth'), e1 = S.orbitPositions(fast, t + 1.5).get('earth')
+  const angle = p => Math.atan2(-p[2], p[0]) * 180 / Math.PI
+  assert.ok(Math.abs(((angle(e1) - angle(e0)) % 360 + 360) % 360 - 90) < 1e-6, 'a quarter of the new 6 s year in 1.5 s')
+  // The same state again keeps the carried start; a start the program moves itself is taken as written.
+  const again = solar(2); carry.apply(again, t + 5)
+  close(S.orbitPositions(again, t + 5).get('earth'), S.orbitPositions(fast, t + 5).get('earth'), 'an unchanged state changes nothing')
+  const moved = solar(2, 45); carry.apply(moved, t + 5)
+  assert.equal(moved.bodies.find(b => b.id === 'earth').orbit.phaseDeg, 45, 'a new start is the program\'s')
+  // Without the carry the earth would jump: the check above means something.
+  const raw = S.orbitPositions(solar(2), t).get('earth')
+  assert.ok(Math.hypot(raw[0] - before.get('earth')[0], raw[2] - before.get('earth')[2]) > 0.5, 'uncarried, the earth jumps')
+}
+
+// ---- a pinch: fingers spread twice as far bring the camera to half the distance, along its line of sight, within
+// ZOOM_NEAREST..ZOOM_FARTHEST of where the whole world was framed; the clip planes follow it
+{
+  const L = loadVera('VeraLook3D')
+  assert.equal(L.pinchDistance(10, 100, 200, 10), 5, 'spread twice as far: half the distance')
+  assert.equal(L.pinchDistance(5, 100, 50, 10), 10, 'closed back: the framing again')
+  assert.equal(L.pinchDistance(10, 100, 10000, 10), 10 * L.ZOOM_NEAREST, 'no nearer than ZOOM_NEAREST of the framing')
+  assert.equal(L.pinchDistance(10, 100, 1, 10), 10 * L.ZOOM_FARTHEST, 'no further than ZOOM_FARTHEST')
+  assert.equal(L.pinchDistance(7, 0, 50, 10), 7, 'fingers on one spot change nothing')
+  const pose = new L.CameraPose(); pose.eye = [0, 8, 6]; pose.look = [0, 0, 0]
+  L.zoomPose(pose, 5, 4)
+  assert.ok(pose.eye.every((v, i) => Math.abs(v - [0, 4, 3][i]) < 1e-9), 'along the line of sight: ' + pose.eye)
+  assert.ok(pose.near > 0 && pose.near < 5 - 0 && pose.far > 5 + 4, 'clip planes round the world at the new distance')
+}
+
 // ---- topFace for all 24 orientations of a die
 {
   const det = M => M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0])
@@ -392,46 +438,67 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
   const far = Object.assign(Object.create(Object.getPrototypeOf(solar)), solar,
     {camera: Object.assign(Object.create(Object.getPrototypeOf(solar.camera)), solar.camera, {x: 0, y: 40, z: 70})})
   assert.deepEqual(L.worldCamera(far, 0.5).eye, [0, 40, 70], 'a camera already far enough is left alone')
-  // Space: a world with neither table nor floor. Its rings are the orbits round a centre that does not move (the moon's
-  // round a moving planet is left out), its suns the glowing bodies that stand still, its stars an even, fixed sky.
-  assert.equal(L.worldInSpace(solar), true); assert.equal(L.worldInSpace(dice), false); assert.equal(L.worldInSpace(cubes), false)
-  const rings = L.orbitRings(solar)
+  // Nothing is added by the host on its own: what is behind a world is the app's background unless scene.sky gives one,
+  // trails are drawn only for bodies with scene.trail (and only round a centre that does not move: not the moon's round
+  // the moving Earth), and a glowing body that stands still is the light, as bright for what it lights whatever the
+  // scale. Text over the world is light when what is behind it is dark.
+  const strip = (w, f) => Object.assign(Object.create(Object.getPrototypeOf(w)), w, f(w))
+  assert.equal(L.worldHasBackdrop(solar), true); assert.equal(L.worldHasBackdrop(dice), false); assert.equal(L.worldHasBackdrop(cubes), false)
+  const apple = strip(solar, w => ({sky: null, bodies: w.bodies.map(b => Object.assign(Object.create(Object.getPrototypeOf(b)), b, {glow: false, trail: false}))}))
+  assert.equal(L.worldHasBackdrop(apple), false, 'no sky, no trail, nothing shining: no backdrop, whatever the ground')
+  assert.equal(L.isDarkRgba(L.worldBackgroundRgba(solar, theme)), true, 'the sky the program gave is dark')
+  assert.equal(L.isDarkRgba(L.worldBackgroundRgba(apple, theme)), false, 'without a sky, the light theme\'s background')
+  assert.equal(L.isDarkRgba([1, 1, 1, 1]), false); assert.equal(L.isDarkRgba([0.1, 0.1, 0.15, 1]), true)
+  const rings = L.worldTrails(solar)
   const planets = solar.bodies.filter(b => b.orbit !== null && b.orbit.centre === 'Sun')
-  assert.equal(rings.length, new Set(planets.map(b => Math.abs(b.orbit.radius).toFixed(4))).size, 'one ring per planet orbit')
+  assert.equal(rings.length, new Set(planets.map(b => Math.abs(b.orbit.radius).toFixed(4))).size, 'one trail per planet orbit')
   assert.ok(rings.every(r => r[0] === 0 && r[2] === 0 && r[3] > 0), 'round the sun at the origin')
-  assert.ok(!rings.some(r => Math.abs(r[3] - 0.2) < 1e-9), 'no ring for the moon round the moving Earth')
+  assert.ok(!rings.some(r => Math.abs(r[3] - 0.2) < 1e-9), 'no trail for the moon round the moving Earth')
+  assert.deepEqual(L.worldTrails(apple), [], 'no scene.trail, no trails')
+  const sky = world([call('sky', '#000010', 99999)])
+  assert.deepEqual([sky.sky.color, sky.sky.stars], ['#000010', S.MAX_SKY_STARS], 'stars clamped to MAX_SKY_STARS')
+  traps(() => world([call('sky', 'ink', 1), call('sky', 'ink', 2)]), 'R0029', /at most one scene.sky/)
+  assert.ok(S.diffWorld(solar, apple).backdropChanged && !S.diffWorld(solar, solar).backdropChanged, 'a new sky or trail repaints the backdrop')
+  // A lamp 0.5 m over what it lights is dimmer than a sun 2 m from its planets, by the square of the distance.
+  const lamp = world([call('glow', call('sphere', 'lamp', 0, 0.6, 0, 0.05, '#fff2c0')), call('box', 'a', 0.3, 0.05, 0.4, 0.1, 0.1, 0.1, 'ink'),
+    call('box', 'b', -0.3, 0.05, -0.4, 0.1, 0.1, 0.1, 'ink'), call('floor', 'surface')])
+  const lampCd = L.glowCandela(lamp, L.worldSuns(lamp)[0])
+  assert.ok(lampCd < L.GLOW_CANDELA * 0.2 && lampCd > 0, 'a lamp near what it lights is gentler: ' + lampCd)
+  assert.equal(L.worldGlows(lamp), true, 'a lamp lights its floor world as a sun lights space')
   assert.deepEqual(L.worldSuns(solar).map(s => s.slice(0, 3)), [[0, 0, 0]], 'the sun is the one sun')
   assert.deepEqual(L.worldSuns(dice), [])
   const stars = L.starField(220)
   assert.equal(stars.length, 220); assert.deepEqual(L.starField(220), stars, 'the same sky every time')
   assert.ok(stars.every(st => Math.abs(Math.hypot(st[0], st[1], st[2]) - 1) < 1e-9 && st[3] > 0 && st[3] <= 1), 'unit directions, visible')
   assert.ok(stars.filter(st => st[1] > 0).length > 90 && stars.filter(st => st[1] < 0).length > 90, 'spread over the whole sphere')
+  // Patterns are named by how they look, not by what planet they suit.
+  { const V0 = loadVera('VeraSurfaces'); assert.ok(V0.SURFACE_PATTERNS.every(p => !/planet|giant|moon|world|star|asteroid/i.test(p.join(' '))), 'no pattern names a kind of body') }
   // scene.paint, rings and mark: carried to the body, checked, and any change to them makes the body again.
   {
     const earth = (pattern, extra = x => x) => world([extra(call('paint', call('sphere', 'e', 0, 0, 0, 0.2, '#1f5fa8'), pattern, '#3f8a3a'))])
-    const e = earth('continents').bodies[0]
-    assert.deepEqual([e.pattern, e.color2, e.rings, e.mark], ['continents', '#3f8a3a', [], ''])
-    traps(() => earth('marble'), 'R0029', /no pattern "marble".*"continents"/, 'an unknown pattern names the ones there are')
+    const e = earth('patches').bodies[0]
+    assert.deepEqual([e.pattern, e.color2, e.rings, e.mark], ['patches', '#3f8a3a', [], ''])
+    traps(() => earth('marble'), 'R0029', /no pattern "marble".*"patches"/, 'an unknown pattern names the ones there are')
     traps(() => world([call('paint', call('box', 'b', 0, 0, 0, 1, 1, 1, 'ink'), 'bands', 'ink')]), 'R0029', /paints a sphere/)
     const saturn = world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, '#f0e0b0'), 0.26, 0.46, '#d8c8a0')]).bodies[0]
     assert.deepEqual([saturn.rings, saturn.ringColor], [[0.26, 0.46], '#d8c8a0'])
     traps(() => world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, 'ink'), 0.1, 0.4, 'ink')]), 'R0029', /beyond its radius/)
     traps(() => world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, 'ink'), 0.4, 0.3, 'ink')]), 'R0029', /outer more than inner/)
     assert.equal(world([call('mark', call('sphere', 'm', 0, 0, 0, 0.1, 'ink'), '')]).bodies[0].mark, 'accent', 'a mark is the accent by default')
-    const a = earth('continents'), b = earth('continents', t => call('mark', t, 'accent'))
+    const a = earth('patches'), b = earth('patches', t => call('mark', t, 'accent'))
     assert.deepEqual(S.diffWorld(a, b).recreate.map(x => x.id), ['e'], 'marking a painted ball makes it again')
-    const recoloured = world([call('paint', call('sphere', 'e', 0, 0, 0, 0.2, '#ffd166'), 'continents', '#3f8a3a')])
+    const recoloured = world([call('paint', call('sphere', 'e', 0, 0, 0, 0.2, '#ffd166'), 'patches', '#3f8a3a')])
     assert.deepEqual(S.diffWorld(a, recoloured).recreate.map(x => x.id), ['e'], 'a painted ball\'s colour is in its mesh')
-    assert.deepEqual(S.diffWorld(a, earth('continents')).recreate, [], 'the same paint changes nothing')
+    assert.deepEqual(S.diffWorld(a, earth('patches')).recreate, [], 'the same paint changes nothing')
     // Rings count in the world's size, so the camera fits them.
     const ringed = world([call('camera', 0, 0.2, 1, 0, 0, 0, false), call('rings', call('sphere', 's', 0, 0, 0, 0.1, 'ink'), 0.15, 0.6, 'ink')])
     assert.ok(L.worldBounds(ringed)[3] >= 0.6, 'rings widen the bounds')
     const V = loadVera('VeraSurfaces')
-    const sph = V.paintedSphere(1, 'continents', [0.12, 0.37, 0.66], [0.25, 0.54, 0.23], 7)
+    const sph = V.paintedSphere(1, 'patches', [0.12, 0.37, 0.66], [0.25, 0.54, 0.23], 7)
     assert.equal(sph.positions.length, sph.colors.length); assert.equal(sph.indices.length, V.SURFACE_LON * (V.SURFACE_LAT - 1) * 6)
     const tones = new Set()
     for (let i = 0; i < sph.colors.length; i += 3) tones.add(sph.colors[i + 2] > 0.9 ? 'ice' : sph.colors[i + 2] > sph.colors[i + 1] ? 'sea' : 'land')
-    assert.deepEqual([...tones].sort(), ['ice', 'land', 'sea'], 'continents has sea, land and polar ice')
+    assert.deepEqual([...tones].sort(), ['ice', 'land', 'sea'], 'patches has two colours and white caps')
     for (let i = 0; i < sph.indices.length; i += 3) {
       const P = k => sph.positions.slice(sph.indices[i + k] * 3, sph.indices[i + k] * 3 + 3)
       const [A, B, C] = [P(0), P(1), P(2)], u = B.map((v, k) => v - A[k]), w = C.map((v, k) => v - A[k])
@@ -954,10 +1021,7 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     assert.equal(L.linearHex(L.lookLinear(theme, '#c3c9d2')), '#c3c9d2', 'linearHex round trips')
     const src = require('fs').readFileSync(__dirname + '/../../entry/src/main/ets/components/VeraWorld3D.ets', 'utf8')
     assert.ok(/shadowReceiver = true/.test(src) && !/UNLIT_SHADOW_ALPHA/.test(src), 'the floor is one shadow-receiving lit material')
-    assert.equal(L.tableColor(theme, 'surface', ['white', '#f43f5e']), L.LOOK_FELT, 'a neutral table is felt')
-    const clash = L.lookRgba(theme, L.tableColor(theme, '#ffffff', ['white']))
-    assert.ok(clash[0] < 0.7, 'a white table under a white die is darkened: ' + clash)
-    assert.equal(L.tableColor(theme, '#ffffff', ['#000000']), '#ffffff')
+    assert.equal(L.tableColor, undefined, 'the table is the colour the program gives it: no felt, no darkening by the host')
     assert.equal(L.worldGlows(run('world-solar').spec), true); assert.equal(L.worldGlows(run('world-dice').spec), false)
   }
 }

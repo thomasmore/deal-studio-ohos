@@ -19,6 +19,9 @@ import { smokeRun } from '../VeraSmoke'
 import { playSurface } from '../VeraSurfacePlay'
 import { playWorld } from '../VeraWorldPlay'
 import { describeCatalogForPrompt } from '../VeraUiCatalog'
+import { asksFor3D } from '../Asks3D'
+
+export { asksFor3D } from '../Asks3D'
 
 /** Room for a whole game: its records, its frame, its fingers and its drawing. */
 export const SURFACE_TOKENS: number = 14000
@@ -53,46 +56,46 @@ export function setSurfaceRouteEnabled(on: boolean): void { surfaceRoute = on }
 export function surfaceRouteEnabled(): boolean { return surfaceRoute }
 
 export const SURFACE_CLASSIFY_PROMPT: string = [
-  'You decide how an app request on a phone is built, and if it is a game or something like one, you design it.',
+  'You decide how an app request on a phone is built, and if the whole screen is drawn, you design it.',
   'Answer with one JSON object: {"surface": "whole" | "part" | "none", "engine": "flat" | "world", "title": "...", ' +
     '"design": "...", "scene": "..."}.',
   '',
   'surface is "whole" when the heart of the request is something that moves continuously or is touched anywhere on a',
-  'drawing, and the whole screen is that: a real-time game (arcade, action, shooter, racing, a ball and a paddle, falling',
-  'things, a tank battle, a snake), a physics or particle toy, a simulation, an animated scene, a drawing or painting pad.',
+  'drawing, and the whole screen is that: a real-time game, a physics or particle toy, a model or simulation to watch, an',
+  'animated scene, a drawing or painting pad.',
   'surface is "part" when the request is a screen of ordinary controls -- forms, choices, amounts, lists, results -- with',
-  'one drawn picture among them that moves or is touched: a roulette or prize wheel that spins beside the bets and the',
-  'bank, a ball that rolls down a slope beside its settings, a signature area on a delivery form, a pendulum whose length a ' +
-    'slider sets.',
+  'one drawn picture among them that moves or is touched, which the controls set going or read from.',
   'surface is "none" for everything built from controls and text alone: trackers, lists, timers, calculators, forms,',
-  'quizzes, flashcards, charts of figures, and turn-based games played by tapping buttons or cells (tic-tac-toe, hangman,',
-  'memory), and coins or cards that only show a result.',
-  '"part" needs the request itself to ask for the picture: an animation, a wheel or ball that moves, something drawn or',
-  'signed with a finger. A request that only names a thing that could be animated (a coin flip, a timer) is',
-  '"none", however well an animation would suit it.',
-  'Solid things in 3D are "whole": anything asked for as 3D, dice that are rolled or thrown (a dice game, a dice roller),',
-  'cubes, blocks, towers or dominoes that fall, stack or are knocked over, balls that roll and collide, planets on their',
-  'orbits, a solar system.',
+  'quizzes, charts of figures, turn-based games played by tapping buttons or cells, and anything that only shows a result.',
+  '"part" needs the request itself to ask for the picture: something that moves, something drawn or signed with a finger.',
+  'A request that only names a thing that could be animated is "none", however well an animation would suit it.',
+  'Something asked for in 3D is "whole".',
   '',
-  'engine says how a "whole" app is made: "world" for those solid things in 3D -- the phone has real 3D with light, shadows',
-  'and physics, so the program only describes the bodies and the physics throws, rolls and stacks them; "flat" for',
-  'everything else (arcade and action games, drawing pads, 2D animations, particles, a 2D maze). For "part" and "none",',
-  'engine is "flat".',
+  'engine says how a "whole" app is made: "world" only when the request asks for 3D in its own words -- the phone has',
+  'real 3D with light, shadows and physics, so the program only describes the bodies and the physics throws, rolls and',
+  'stacks them; "flat" for everything else, drawn in 2D on a surface, whatever it shows. For "part" and "none", engine is',
+  '"flat". The request line says which.',
   '',
-  'When surface is "whole", title is a short name of your own for the app, and design is a short original game design in',
-  'plain sentences, at most 12 lines: the goal; what the player controls and exactly how on a touch screen (drag, tap,',
-  'a stick on the left half and fire on the right half); the objects and how each moves and behaves; collisions and what',
-  'they do; score, lives, levels and how the game gets harder; how a round starts and ends; the look, with 4 to 6 hex',
-  'colours; portrait (360 by 640) unless landscape clearly suits it better. A named game means its genre and mechanics:',
-  'describe your own take, never its levels, characters, names or artwork.',
-  'When engine is "world", design describes the scene instead, at most 10 lines: the table (about 1.2 by 0.9: a bigger',
-  'one makes every body small) or floor, or none for space; the bodies with their sizes in metres and their colours (a die',
-  '0.16, a block 0.1; a sun of radius 0.5, planets of radius 0.1 to 0.25, orbits at most 3.5 from the sun, for the phone',
-  'screen is narrow), a real body (a real star, planet or moon) in its real colours and surface as you know them --',
+  'When surface is "whole", title is a short name of your own for the app, and design is a short original design in plain',
+  'sentences, at most 12 lines. Make it what the request asks for: a game only when it asks for a game (or names one), a',
+  'model or simulation to watch when it names a thing or a system, a toy or a pad when it asks for one. For a game: the',
+  'goal; what the player controls and exactly how on a touch screen (drag, tap, a stick and a button); the objects and',
+  'how each moves; collisions and what they do; score and how it gets harder; how a round starts and ends. For anything',
+  'else: what it shows and how each part moves; what a finger does (drag, tap, nothing) and what the person can change;',
+  'what is read out. Always the look, with 4 to 6 hex colours, and portrait (360 by 640) unless landscape clearly suits',
+  'it better. A named game means its genre and mechanics: describe your own take, never its levels, characters, names',
+  'or artwork.',
+  'When engine is "world", design describes the scene instead, at most 10 lines: the table (just big enough: a bigger',
+  'one makes every body small) or floor, or none; the bodies with their sizes in metres and their colours (sized for the',
+  'phone, not for reality: each body the person plays with a good part of the view, small real things made bigger; the scene',
+  '0.3 to 5 m across; bodies circling a centre not to scale: the widest orbit at most 4.5, the centre a tenth of it in radius, each body circling it at least a fiftieth,',
+  'for the phone screen is narrow; every body the request implies, as many as the real thing has, made smaller',
+  'rather than left out), a real body in its real colours and surface as you know them --',
   'the design\'s own colours are for made-up worlds and the screen round them; what moves by itself (orbits, spins); what a tap, a swipe and each button do (throw, shoot, add one,',
-  'build again; there is no pinch or zoom, a drag on empty space only turns the view, and there are no lines or orbit',
-  'rings to show or hide); and what the screen shows from what the world tells: the faces of the dice and their total,',
-  'hits, the blocks knocked over, the planet tapped (it never tells where a body is or whether it left the table).',
+  'build again; with an orbiting camera a drag on empty space turns the view and a pinch zooms, both by the host); what',
+  'is behind the world (the app\'s background, or a sky of a colour with or without stars) and which orbit paths are',
+  'drawn; and what the screen shows from what the world tells: the face of a die, the hits, which bodies were knocked',
+  'from where they were built, the body tapped (it never tells where a body is or whether it left the table).',
   'Nothing moves frame by frame in the program: physics and the host move the bodies.',
   'When surface is "part", scene is one or two plain sentences: what the picture shows, what moves or is touched, what',
   'sets it moving, and what it decides or changes on the screen. title and design are "".',
@@ -240,12 +243,15 @@ export async function briefSurface(prompt: string, host: AgentHost): Promise<Sur
   if (!surfaceRoute || host.surfaceGuide.length === 0 || host.askCode === null || !looksLikeSurface(prompt)) { return null }
   host.status('Is this a game?')
   checkAgent(host)
-  let reply = await host.askPlan(SURFACE_CLASSIFY_PROMPT, 'Request: ' + prompt, (_soFar: string): void => {}, false)
+  let threeD = asksFor3D(prompt) && host.worldGuide.length > 0
+  let ask = 'Request: ' + prompt + '\n' + (threeD ? 'It asks for 3D: when surface is "whole", engine is "world".' :
+    'It does not ask for 3D: engine is "flat".')
+  let reply = await host.askPlan(SURFACE_CLASSIFY_PROMPT, ask, (_soFar: string): void => {}, false)
   checkAgent(host)
   if (reply === null) { return null }
   let brief = parseSurfaceBrief(reply)
-  // A host without the world guide writes every game flat, as before there was one.
-  if (brief !== null && brief.engine === ENGINE_WORLD && host.worldGuide.length === 0) { brief.engine = ENGINE_FLAT }
+  // 3D only when asked for in so many words, and only with the world guide there to write it.
+  if (brief !== null && brief.engine === ENGINE_WORLD && !threeD) { brief.engine = ENGINE_FLAT }
   return brief
 }
 
