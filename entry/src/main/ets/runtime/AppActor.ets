@@ -32,6 +32,7 @@ export class AppActor {
   private lastSurfaceSave: number = 0
   private worldUnsaved: boolean = false
   private disposed: boolean = false
+  private cancelled: boolean = false
 
   constructor(callbacks: AppActorCallbacks, traceOwner: Object) {
     this.callbacks = callbacks
@@ -39,11 +40,11 @@ export class AppActor {
   }
 
   ready(): boolean {
-    return !this.disposed && this.vm !== null && this.currentState !== null
+    return !this.disposed && !this.cancelled && this.vm !== null && this.currentState !== null
   }
 
-  initialize(program: ProgramRef, options: AcquireOptions): void {
-    if (this.disposed) { return }
+  initialize(program: ProgramRef, options: AcquireOptions, refresh: boolean = true): void {
+    if (this.disposed || this.cancelled) { return }
     this.clearEffects()
     this.vm = null
     this.host = null
@@ -69,8 +70,10 @@ export class AppActor {
         this.currentState = this.seeded(this.vm!.execute('init'))
       }
       this.notifyStateSnapshot()
+      if (!this.ready()) { return }
       this.callbacks.render(true, false)
-      this.runWidgetRefresh()
+      if (!this.ready()) { return }
+      if (refresh) { this.runWidgetRefresh() }
     } catch (e) {
       StageTrace.emit(this.traceOwner, 'ERROR', { kind: 'INIT' })
       this.clearEffects()
@@ -83,11 +86,13 @@ export class AppActor {
   }
 
   promote(options: AcquireOptions): void {
-    if (this.disposed || (this.mode === options.mode && this.persistKey === options.persistKey)) { return }
+    if (this.disposed || this.cancelled ||
+        (this.mode === options.mode && this.persistKey === options.persistKey)) { return }
     this.mode = options.mode
     this.persistKey = options.persistKey
     if (this.mode === 'PREVIEW') { this.clearEffects() }
     this.notifyStateSnapshot()
+    if (!this.ready()) { return }
     this.callbacks.render(true, false)
   }
 
@@ -101,6 +106,7 @@ export class AppActor {
       if (restored !== null) { this.currentState = restored }
     }
     this.callbacks.render(true, false)
+    if (!this.ready()) { return }
     this.runWidgetRefresh()
   }
 
@@ -122,6 +128,15 @@ export class AppActor {
   }
 
   persistState(): boolean {
+    try {
+      return this.saveNow()
+    } catch (e) {
+      console.error('VERA-STATE save failed: ' + (e as Error).message)
+      return false
+    }
+  }
+
+  saveNow(): boolean {
     if (!this.ready() || this.mode !== 'LIVE_PERSISTENT') { return false }
     let keys = this.stateKeys()
     if (keys.length === 0) { return false }
@@ -141,8 +156,7 @@ export class AppActor {
       if (StageTrace.enabled()) {
         StageTrace.emit(this.traceOwner, 'SAVE', { digest: StageTrace.digest(encoded), result: 'ERROR' })
       }
-      console.error('VERA-STATE save failed: ' + (e as Error).message)
-      return false
+      throw e as Error
     }
   }
 
@@ -153,8 +167,13 @@ export class AppActor {
     }
   }
 
-  dispose(): void {
+  cancel(): void {
+    this.cancelled = true
     this.clearEffects()
+  }
+
+  dispose(): void {
+    this.cancel()
     this.disposed = true
     this.vm = null
     this.host = null
@@ -210,14 +229,17 @@ export class AppActor {
       }
       StageTrace.emit(this.traceOwner, 'INPUT_APPLIED', { action: action })
       this.notifyStateSnapshot()
+      if (!this.ready()) { return }
       console.info('VERA-ACTION ' + action + ' steps=' + this.vm!.stepsExecuted().toString() +
         ' ms=' + (Date.now() - t0).toString())
       this.callbacks.render(true, true)
+      if (!this.ready()) { return }
       if (persist) {
         this.persistState()
       } else {
         this.worldUnsaved = true
       }
+      if (!this.ready()) { return }
       this.drainEffects()
     } catch (e) {
       StageTrace.emit(this.traceOwner, 'ERROR', { kind: kind })
@@ -236,8 +258,11 @@ export class AppActor {
       this.currentState = this.vm!.execute('widgetRefresh', [this.currentState!])
       if (this.host !== null) { this.host!.effectsAllowed = false }
       this.notifyStateSnapshot()
+      if (!this.ready()) { return }
       this.callbacks.render(true, false)
+      if (!this.ready()) { return }
       this.persistState()
+      if (!this.ready()) { return }
       this.drainEffects()
     } catch (e) {
       StageTrace.emit(this.traceOwner, 'ERROR', { kind: 'WIDGET_REFRESH' })
@@ -290,8 +315,8 @@ export class AppActor {
   surfaceSave(now: number, editsPending: boolean): string {
     if (!this.ready() || this.mode === 'PREVIEW' || now - this.lastSurfaceSave < 5000) { return 'NOT_DUE' }
     if (editsPending) { return 'DEFERRED' }
+    if (!this.persistState()) { return 'NOT_SAVED' }
     this.lastSurfaceSave = now
-    this.persistState()
     this.notifyStateSnapshot()
     return 'DONE'
   }

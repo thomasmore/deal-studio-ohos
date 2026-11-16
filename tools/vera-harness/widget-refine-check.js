@@ -5,7 +5,8 @@ const {compileVeraSource, widgetRefinementError, spliceWidget, withoutWidget, ap
 const {smokeRun} = loadVera('VeraSmoke')
 const {widgetRefinementPrompt, validateWidgetRefinement, widgetRepairNote, checkWidget, CARD_KINDS} = loadVera('VeraWidgetRefine')
 const {WidgetSession} = loadVera('VeraLiveWidget')
-const source = fs.readFileSync(path.join(__dirname,'examples/widget-counter.vera'),'utf8')
+const readText = (p, enc) => fs['readFileSync'](p, enc || 'utf8').replace(/\r\n/g, '\n')
+const source = readText(path.join(__dirname,'examples/widget-counter.vera'), 'utf8')
 // Standalone fullscreen base, not a view delegating to widget.
 const base = source.replace('function widget(', 'function compact(').replace('return widget(state);','return compact(state);')
 const addition = '\nfunction widget(state: AppState): ui.View { return compact(state); }'
@@ -24,7 +25,7 @@ assert.equal(smokeRun(compiled),'')
 // runs them leaves its button off for good, and the reason asks for a handler that finishes at once. A picture that does nothing on the
 // card although the app's does is a dead toy: the reason names the app's handler.
 {
-  const wheel = fs.readFileSync(path.join(__dirname, 'examples/widget-wheel.vera'), 'utf8')
+  const wheel = readText(path.join(__dirname, 'examples/widget-wheel.vera'), 'utf8').replace(/\r\n/g, '\n')
   const wheelBase = withoutWidget(wheel)
   assert.equal(validateWidgetRefinement(wheelBase, wheel, compileVeraSource(wheel).vbc2), '', 'a wheel that lands within the card\'s frames passes')
   const slow = wheel.replace('let speed: number = state.speed - 900 * ms / 1000;', 'let speed: number = state.speed - 30 * ms / 1000;')
@@ -72,7 +73,7 @@ function view(state: AppState): ui.View { return ui.AppTheme("soft", "", [ui.Sur
 // and the pivot; the widget that moves only the rod and the bob passes.
 {
   const {appMovingPart, partFromLooks} = loadVera('VeraMovingPart')
-  const clock = fs.readFileSync(path.join(__dirname, 'examples/widget-pendulum-frames.vera'), 'utf8')
+  const clock = readText(path.join(__dirname, 'examples/widget-pendulum-frames.vera'), 'utf8')
   const code = compileVeraSource(clock).vbc2
   const started = Date.now()
   const part = appMovingPart(code, '')
@@ -121,7 +122,7 @@ function widget(`).replace('ui.Surface("default", 100, 100, "clockCard", "", "")
   assert.deepEqual([both.pivotX, both.pivotY, both.moving, both.still], [50, 18, [4, 5], [0, 1, 2]], 'the pendulum, not the hand')
 
   // The wheel sits still until it is spun: the touch on its picture sets it going, and its slices, a group, turn round its centre.
-  const wheel = fs.readFileSync(path.join(__dirname, 'examples/widget-wheel.vera'), 'utf8')
+  const wheel = readText(path.join(__dirname, 'examples/widget-wheel.vera'), 'utf8')
   const spun = appMovingPart(compileVeraSource(wheel).vbc2, '')
   assert.deepEqual([spun.draw, spun.style, spun.pivotX, spun.pivotY, spun.anchorKind, spun.anchorPoint], ['wheel', 'spin', 50, 52, 'group', 0],
     'the wheel turns round the origin of its group')
@@ -129,7 +130,7 @@ function widget(`).replace('ui.Surface("default", 100, 100, "clockCard", "", "")
   assert.match(validateWidgetRefinement(withoutWidget(naive), naive, compileVeraSource(naive).vbc2),
     /these shapes turn round about the point 50, 52 of the widget's picture: the gfx\.group in #f87171, #fbbf24, #34d399; and these stay where they are: the gfx\.circle in white and the gfx\.polygon in #1f2937\. On the card nothing in the picture moves\.[\s\S]*gfx\.moving\("spin", 0, 50, 52,/)
   // A rocket that rises is not a turn: nothing is asked of its widget.
-  const rocket = fs.readFileSync(path.join(__dirname, 'examples/widget-countdown-rocket.vera'), 'utf8')
+  const rocket = readText(path.join(__dirname, 'examples/widget-countdown-rocket.vera'), 'utf8')
   assert.equal(appMovingPart(compileVeraSource(rocket).vbc2, ''), null, 'a rise is not a turn')
   // A part is not guessed from too little: one look, or nothing that stays.
   assert.equal(partFromLooks([[]], 100, 100), null)
@@ -138,7 +139,7 @@ function widget(`).replace('ui.Surface("default", 100, 100, "clockCard", "", "")
 // Many of the same is one gfx.repeat: the prompt says so beside the card's shape limit, and the bubble wrap example's widget passes.
 {
   assert.match(widgetRefinementPrompt(false), /At most 60 shapes and 5 pictures \(ui\.Surface or ui\.Sparkline\) in all; many of the same \(bubbles, bricks, stars in a grid\) is one gfx\.repeat\(columns, rows, dx, dy/)
-  const bubbles = fs.readFileSync(path.join(__dirname, 'examples/widget-bubbles.vera'), 'utf8')
+  const bubbles = readText(path.join(__dirname, 'examples/widget-bubbles.vera'), 'utf8')
   assert.equal(validateWidgetRefinement(withoutWidget(bubbles), bubbles, compileVeraSource(bubbles).vbc2), '', 'the bubble wrap widget passes')
   // A touch in the middle of the sheet falls between four bubbles and pops none; one a little off it pops one, so the touch shows.
   const exact = bubbles.replace('let at: number = row * 12 + column;',
@@ -149,14 +150,14 @@ function widget(`).replace('ui.Surface("default", 100, 100, "clockCard", "", "")
 
 // A picture that takes a touch and shows nothing for it -- no movement, the same card after the tap -- is refused.
 {
-  const rocket = fs.readFileSync(path.join(__dirname, 'examples/widget-countdown-rocket.vera'), 'utf8')
+  const rocket = readText(path.join(__dirname, 'examples/widget-countdown-rocket.vera'), 'utf8')
   assert.equal(validateWidgetRefinement(withoutWidget(rocket), rocket, compileVeraSource(rocket).vbc2), '', 'a tap that launches the rocket on the card passes')
   const inert = rocket.replace('if (p.phase !== "up" || state.launching) { return state; }', 'return state;')
   assert.notEqual(inert, rocket)
   assert.match(validateWidgetRefinement(withoutWidget(inert), inert, compileVeraSource(inert).vbc2), /A touch on the picture changes nothing you can see/)
   // A rocket that flies up and lands back on its pad in the app's frames is drawn on its pad again; a launch count beside it that rose is not
   // the picture answering. Wrapped in gfx.moving("launch") it moves on the card.
-  const back = fs.readFileSync(path.join(__dirname, 'examples/widget-return-rocket.vera'), 'utf8')
+  const back = readText(path.join(__dirname, 'examples/widget-return-rocket.vera'), 'utf8')
   assert.match(validateWidgetRefinement(withoutWidget(back), back, compileVeraSource(back).vbc2), /A touch on the picture changes nothing you can see[\s\S]*comes back is drawn where it started/)
   const rocketShapes = 'shapes.push(gfx.polygon([rx - 6, ry + 7, rx - 11, ry + 14, rx - 6, ry + 12], "#e0453f"));'
   const moving = back.replace(rocketShapes, 'let body: gfx.Shape[] = [];\n  ' + rocketShapes.replace('shapes.push', 'body.push'))
@@ -188,7 +189,7 @@ function widget(`).replace('ui.Surface("default", 100, 100, "clockCard", "", "")
 
 // A picture that paints its own background is a scene: Make widget asks for it as a cover picture, so it is not a square in the middle of the card.
 {
-  const rich = fs.readFileSync(path.join(__dirname, 'examples/widget-rich.vera'), 'utf8')
+  const rich = readText(path.join(__dirname, 'examples/widget-rich.vera'), 'utf8')
   const richBase = withoutWidget(rich)
   assert.notEqual(richBase, rich)
   assert.match(validateWidgetRefinement(richBase, rich, compileVeraSource(rich).vbc2), /paints its own background[\s\S]*ui\.Surface\("cover", 100, 100/)
@@ -255,7 +256,7 @@ assert.equal(spliceWidget(base, 'not a program {'), 'not a program {')
 assert.match(widgetRepairNote('3:5 E2031 class AppState has no field doneToday'), /cannot add fields to the state/)
 assert.equal(widgetRepairNote('3:5 E2036 expected 5 arguments, found 4'), '3:5 E2036 expected 5 arguments, found 4')
 // widgetRefresh: its own signature (E2113); one that keeps changing the state is refused; it belongs to the widget.
-const daily = fs.readFileSync(path.join(__dirname,'examples/widget-daily.vera'),'utf8')
+const daily = readText(path.join(__dirname,'examples/widget-daily.vera'),'utf8')
 const dailyBase = daily.replace(/function widget\(state[\s\S]*$/, '')
 assert.equal(validateWidgetRefinement(dailyBase, daily, compileVeraSource(daily).vbc2), '')
 assert.throws(() => compileVeraSource(daily.replace('function widgetRefresh(state: AppState): AppState', 'function widgetRefresh(state: AppState, v: number): AppState')), /E2113/)
@@ -335,7 +336,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 // A program with a live source: widgetRefresh may ask for Vera.Source.fetch (and only that), its handler takes a failure and
 // still draws; the address cannot be built from the state (E2114).
 {
-  const live = fs.readFileSync(path.join(__dirname, 'examples/widget-source.vera'), 'utf8')
+  const live = readText(path.join(__dirname, 'examples/widget-source.vera'), 'utf8')
   const c = compileVeraSource(live)
   assert.equal(smokeRun(c), '')
   assert.equal(checkWidget(c.vbc2), '')
@@ -369,7 +370,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 
   // A drum on the card whose handler vibrates: the tap would be refused on the card, so Make widget sends it back (found on a phone).
 {
-  const drum = fs.readFileSync(path.join(__dirname, 'examples/widget-drum.vera'), 'utf8')
+  const drum = readText(path.join(__dirname, 'examples/widget-drum.vera'), 'utf8')
   assert.equal(checkWidget(compileVeraSource(drum).vbc2), '')
   const buzzing = 'import * as sdk from "std/sdk"\n' + drum.replace('return { hits: state.hits + value };',
     'sdk.call("SensorServiceKit.vibrator.vibrate", ["duration", "60"], "buzzed"); return { hits: state.hits + 1 };') +
@@ -381,7 +382,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 }
 // A drum that jumps when it is hit: ui.Motion is a card kind with the presets a card can play, and the prompt says so.
 {
-  const motion = fs.readFileSync(path.join(__dirname, 'examples/widget-drum-motion.vera'), 'utf8')
+  const motion = readText(path.join(__dirname, 'examples/widget-drum-motion.vera'), 'utf8')
   assert.equal(checkWidget(compileVeraSource(motion).vbc2), '')
   assert.match(widgetRefinementPrompt(), /ui\.Motion\(style, 0, \[the picture\]\)/)
   assert.match(widgetRefinementPrompt(), /NEVER a ui\.Path/, 'a drawing of several colours is a Surface, not a Path')
@@ -395,7 +396,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 }
 // A picture on the card (ui.Surface): described to the model, its tap held to the same rules as a button's.
 {
-  const panda = fs.readFileSync(path.join(__dirname, 'examples/widget-panda.vera'), 'utf8')
+  const panda = readText(path.join(__dirname, 'examples/widget-panda.vera'), 'utf8')
   assert.equal(checkWidget(compileVeraSource(panda).vbc2), '')
   assert.match(widgetRefinementPrompt(), /ui\.Surface\(style, width, height, "draw", "", "touch"\)/)
   assert.match(widgetRefinementPrompt(), /gfx\.Shape\[\]/)
@@ -424,7 +425,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 {
   assert.match(widgetRefinementPrompt(), /STYLES\. A text style is drawn as the app draws it/)
   assert.match(widgetRefinementPrompt(), /eyebrow \(a small spaced label/)
-  const styles = fs.readFileSync(path.join(__dirname, 'examples/widget-styles.vera'), 'utf8').replace(/\r\n/g, '\n')
+  const styles = readText(path.join(__dirname, 'examples/widget-styles.vera'), 'utf8').replace(/\r\n/g, '\n')
   const at = styles.indexOf('function widget(')
   const lines = n => Array.from({length: n}, (_, i) => 'ui.Text("display", "big ' + i + '")').join(', ')
   const tall = styles.substring(0, at) + styles.substring(at).replace('ui.Column("accent", [\n        ui.Text("caption", "3 of 5 done")\n      ])', lines(3))
@@ -432,7 +433,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 }
 // An icon button is one of the two buttons; the new kinds are on the card list and in the prompt.
 {
-  const water = fs.readFileSync(path.join(__dirname, 'examples/widget-water.vera'), 'utf8')
+  const water = readText(path.join(__dirname, 'examples/widget-water.vera'), 'utf8')
   assert.equal(checkWidget(compileVeraSource(water).vbc2), '')
   for (const kind of ['Icon', 'IconButton', 'Badge', 'Progress', 'ProgressRing', 'Stat', 'NumberStat', 'MetricGroup', 'Sparkline']) assert(CARD_KINDS.includes(kind), kind + ' is a card kind')
   const at = water.indexOf('function widget(')
@@ -445,11 +446,11 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 {
   assert(CARD_KINDS.includes('Timer'), 'Timer is a card kind')
   assert.match(widgetRefinementPrompt(), /TIME THAT MOVES\. ui\.Timer\(style, millis, down\) runs by itself/)
-  assert.equal(checkWidget(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-timer.vera'), 'utf8')).vbc2), '')
+  assert.equal(checkWidget(compileVeraSource(readText(path.join(__dirname, 'examples/widget-timer.vera'), 'utf8')).vbc2), '')
 }
 // A widget that takes the card's size is held to the limits of every size; the prompt says how to ask for it.
 {
-  const sized = fs.readFileSync(path.join(__dirname, 'examples/widget-sizes.vera'), 'utf8')
+  const sized = readText(path.join(__dirname, 'examples/widget-sizes.vera'), 'utf8')
   assert.equal(checkWidget(compileVeraSource(sized).vbc2), '')
   assert.match(widgetRefinementPrompt(), /CARD SIZES\. The card is 2x2 by default/)
   assert.match(widgetRefinementPrompt(), /function widget\(state, size: number\): ui\.View/)
@@ -476,11 +477,11 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
 // ui.Layers: in the prompt, and a widget that uses it passes the glance checks.
 {
   assert.match(widgetRefinementPrompt(), /LAYERS\. A subject made of parts that move differently/)
-  assert.equal(checkWidget(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')).vbc2), '')
+  assert.equal(checkWidget(compileVeraSource(readText(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')).vbc2), '')
 }
 // A control the first tap takes away is not tapped a second time: a box shown only while the task is open is a valid widget.
 {
-  const once = fs.readFileSync(path.join(__dirname, 'examples/widget-switch.vera'), 'utf8').replace(/function widget\(state: AppState\): ui\.View \{[\s\S]*$/, 'function widget(state: AppState): ui.View {\n' +
+  const once = readText(path.join(__dirname, 'examples/widget-switch.vera'), 'utf8').replace(/function widget\(state: AppState\): ui\.View \{[\s\S]*$/, 'function widget(state: AppState): ui.View {\n' +
     '  if (state.done) { return ui.AppTheme("soft", "", [ui.Column("default", [ui.Text("eyebrow", "DONE")])]); }\n' +
     '  return ui.AppTheme("soft", "", [ui.Column("default", [ui.Checkbox("default", "Done", state.done, "setDone")])]);\n}\n')
   assert.equal(checkWidget(compileVeraSource(once).vbc2), '')
@@ -492,7 +493,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
   const {veraStateStamp} = loadVera('VeraStateStamp')
   const {withoutWidgetRequests} = loadVera('ProjectText')
   const {WIDGET_ASK} = loadVera('agent/AgentWidget')
-  const pageSource = fs.readFileSync(path.join(sourceRoot, 'pages/GeneratePage.ets'), 'utf8')
+  const pageSource = readText(path.join(sourceRoot, 'pages/GeneratePage.ets'), 'utf8')
   const {OperationController, throwIfCancelled} = loadVera('OperationCancellation')
   const {GenerateRequest, GenerateResult} = loadVera('LlamaEngine')
   const names = ['aboutToAppear', 'makeWidgetAlone', 'doServerGenerate', 'commitSave', 'widgetSaveState', 'checkWidgetSave', 'hasResult', 'versionCount',

@@ -112,7 +112,7 @@ async function test(name,fn){try{const observed=await fn();checks.push({name,sta
    const controller=new mod.exports(), snapshots=[], trees=[]
    controller.vbc2=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
    controller.persistKey='chat-fixture/1';controller.seedState='';controller.revision=0;controller.acceptEffects=effects=>assert.deepEqual(effects,[])
-   controller.actor=null;controller.traceOwner={};controller.previewOnly=false;controller.disposed=false;controller.effectGeneration=0;controller.liveGeneration=0;controller.liveRoot=null;controller.programId=0
+   controller.actor=null;controller.effectController=null;controller.traceOwner={};controller.previewOnly=false;controller.disposed=false;controller.effectGeneration=0;controller.liveGeneration=0;controller.liveRoot=null;controller.programId=0
    controller.cancelFields=()=>{};controller.flushFields=()=>{};controller.controller=null;controller.darkListener=null;controller.liveSurfaces=[];controller.stopPartsTimer=()=>{}
    controller.timers=new Map();controller.motionTriggers=new Map();controller.poseAnims=new Map();controller.sceneFrames=new Map();controller.stopSurfaceLoop=()=>{}
    controller.onStateSnapshot=encoded=>snapshots.push(JSON.parse(encoded))

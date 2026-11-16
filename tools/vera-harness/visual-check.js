@@ -93,6 +93,14 @@ function platformModule(name, mocks, suffix='') {
  },mod,mod.exports)
  return mod.exports
 }
+function effectModule(mocks) {
+ return platformModule('../runtime/EffectController', {
+  './trace/StageTrace':{StageTrace},
+  '../vera/VeraConsentStore':{consent:mocks.consent},
+  '../vera/VeraIntents':{runRawIntent:mocks.runRawIntent},
+  '../vera/VeraSdkBackend':{runSdkAdapter:mocks.runSdkAdapter}
+ })
+}
 function test(name, action) {
  if(runtimeMode&&!runtimeNames.has(name))return
  const records=[]
@@ -248,13 +256,13 @@ if (!baseline) {
    probe.aboutToDisappear();assert.equal(probe.disposed,true);assert.equal(probe.darkListener,null);assert.deepEqual(events,['change','stop','off:change'])
    change({matches:true});assert.equal(renders,1)
   })
-   function effectProbe() {
+   function effectProbe(askBeforeCalls=false) {
     const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-    const fields=['effectGeneration','liveGeneration','disposed','heldEffects','actor','traceOwner'].map(name=>{
+    const fields=['effectGeneration','liveGeneration','disposed','effectController','actor','traceOwner'].map(name=>{
      const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
      return field[0].replace('  private ','')
     }).join('\n')
-    const names=['actorOptions','createActor','invalidateEffects','load','dispatch','acceptEffects','runQueued','allowPending','refusePending','runEffect','notifyStateSnapshot','persistState']
+    const names=['actorOptions','createActor','invalidateEffects','load','dispatch','effectsController','localEffectRequest','acceptEffects','allowPending','refusePending','runEffect','notifyStateSnapshot','persistState']
     const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
     const compiled=ts.transpileModule('class Probe { static RENDERED=[]; '+fields+'\n'+body+' }',{compilerOptions:{target:ts.ScriptTarget.ES2020},reportDiagnostics:true})
     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'effect probe syntax')
@@ -269,10 +277,11 @@ if (!baseline) {
      platformHook()
      return promise
     }
-    const mocks={StageTrace,AppActor,scheduleCardRefresh:project=>events.push(['persist',project]),VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
+    const mocks={StageTrace,AppActor,scheduleCardRefresh:project=>events.push(['persist',project]),VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{has:()=>false,remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
+    Object.assign(mocks,effectModule(mocks),{ASK_BEFORE_CALLS:askBeforeCalls})
     const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
     probe=new Probe()
-    Object.assign(probe,{pending:null,programId:7,retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],persistKey:'fixture/version',seedState:'',stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},onStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
+    Object.assign(probe,{pending:null,programId:7,retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],persistKey:'fixture/version',seedState:'',stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},onStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},watchDarkMode(){events.push(['dark',this.disposed])},stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
     const bytecode=C.compileVeraSource(`
 @jsonable class AppState { count: number; }
 function init(): AppState { return {count: 0}; }
@@ -283,7 +292,9 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
     function observeDispatch() { probe.dispatch=(action,value)=>{assert(value instanceof V.VeraStringValue);delivered.push([action,value.value])} }
     return {probe,platform,events,executions,delivered,bytecode,load,observeDispatch,onPlatform(action){platformHook=action}}
    }
-   function hostEffect(id=1,kind='sdk',rawTarget='fixture.read') { return {id,kind,fn:'call',rawTarget,rawMode:'',values:new Map(),resultHandler:'answer'+id} }
+   function hostEffect(id=1,kind='sdk',rawTarget='fixture.read') { return {id,kind,fn:'call',rawTarget,rawMode:'foreground',values:new Map([['body','fixture payload'],['count','2']]),resultHandler:'answer'+id} }
+   function heldRequests(probe) { return probe.effectController.heldEffects.map(work=>work.effect) }
+   function seedEffects(probe) { probe.acceptEffects([hostEffect(3),hostEffect(2)]);assert.deepEqual(probe.pending,probe.localEffectRequest(hostEffect(3)));assert.deepEqual(heldRequests(probe),[probe.localEffectRequest(hostEffect(2))]) }
    async function settleEffect(call,rejected=false,text='answer') {
     if(rejected)call.reject(new Error(text));else call.resolve(text)
     await new Promise(resolve=>setImmediate(resolve))
@@ -321,7 +332,7 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
      const effect=hostEffect(1,kind,target), generation=f.probe.effectGeneration
      f.probe.runEffect(effect)
      assert.equal(f.platform.length,1);assert.equal(f.platform[0].kind,route)
-     assert.equal(f.platform[0].args[0],target);assert.equal(f.platform[0].args[1],effect.values)
+     assert.equal(f.platform[0].args[0],target);assert.deepEqual(f.platform[0].args[1],effect.values);assert.equal(f.platform[0].args.length,route==='intent'?3:2);if(route==='intent')assert.equal(f.platform[0].args[2],effect.rawMode)
      await settleEffect(f.platform[0],rejected,'current')
      assert.deepEqual(f.delivered,[['answer1',rejected?'error: current':'current']]);assert.equal(f.probe.effectGeneration,generation)
     }
@@ -346,21 +357,21 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
     assert.deepEqual(f.delivered,[['answer3','third'],['answer1','error: first'],['answer2','second']]);assert.equal(f.probe.effectGeneration,generation)
    })
    for(const mode of ['normal','empty','malformed','preview']) test('renderer effects: '+mode+' load invalidates queues and preserves UI identity rules', () => {
-    const f=effectProbe(), {probe}=f
+    const f=effectProbe(true), {probe}=f
     f.load()
      const actor=probe.actor, state=actor.snapshot(), root={fixture:true}, generation=probe.effectGeneration, programId=probe.programId
-     probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+     seedEffects(probe)
      let cleared=0
      const clear=actor.clearEffects.bind(actor)
      actor.clearEffects=()=>{cleared++;clear()}
      probe.liveRoot=root;probe.hasRoot=true;probe.previewOnly=mode==='preview'
      probe.vbc2=mode==='empty'?'':mode==='malformed'?'not valid bytecode':f.bytecode
      probe.stopAllTimers=()=>{
-      assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert(cleared>0)
+      assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(heldRequests(probe),[]);assert.equal(probe.pending,null);assert(cleared>0)
       assert.equal(probe.actor,actor);assert.equal(actor.snapshot(),state)
      }
      probe.load()
-     assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null)
+     assert.equal(probe.effectGeneration,generation+1);assert.deepEqual(heldRequests(probe),[]);assert.equal(probe.pending,null)
      assert.equal(probe.programId,programId+(mode==='preview'?0:1));assert.equal(probe.liveRoot,mode==='preview'?root:null);assert.equal(probe.hasRoot,mode==='preview')
      assert.equal(probe.actor,actor)
      if(mode==='empty') { assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'');assert.equal(probe.error,'') }
@@ -379,26 +390,26 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
     assert.deepEqual(f.delivered,[])
    })
    test('renderer effects: invalidation works with no host and does not change UI identity', () => {
-    const {probe}=effectProbe(), programId=probe.programId
+    const {probe}=effectProbe(true), programId=probe.programId
     assert.equal(probe.effectGeneration,0);assert.equal(probe.disposed,false)
     for(let generation=1;generation<=2;generation++) {
-     probe.heldEffects=[hostEffect()];probe.pending=hostEffect()
+     seedEffects(probe)
      probe.invalidateEffects()
-     assert.equal(probe.effectGeneration,generation);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);assert.equal(probe.actor,null);assert.equal(probe.programId,programId)
+     assert.equal(probe.effectGeneration,generation);assert.deepEqual(heldRequests(probe),[]);assert.equal(probe.pending,null);assert.equal(probe.actor,null);assert.equal(probe.programId,programId)
     }
    })
    test('renderer effects: disappear invalidates before timer and listener cleanup', () => {
-    const f=effectProbe(), {probe,events}=f
+    const f=effectProbe(true), {probe,events}=f
     f.load();events.length=0
      const actor=probe.actor, generation=probe.effectGeneration, programId=probe.programId
      let cleared=false
      const clear=actor.clearEffects.bind(actor)
      actor.clearEffects=()=>{cleared=true;clear()}
-     probe.heldEffects=[hostEffect(2)];probe.pending=hostEffect(3)
+     seedEffects(probe)
 
     probe.darkListener={off:event=>events.push(['darkOff',event])};probe.liveSurfaces=[{}]
     probe.stopAllTimers=()=>{
-     assert.equal(probe.disposed,true);assert.equal(probe.effectGeneration,generation+1);assert.equal(cleared,true);assert.equal(actor.ready(),true);assert.deepEqual(probe.heldEffects,[]);assert.equal(probe.pending,null);events.push(['stop'])
+     assert.equal(probe.disposed,true);assert.equal(probe.effectGeneration,generation+1);assert.equal(cleared,true);assert.equal(actor.ready(),true);assert.deepEqual(heldRequests(probe),[]);assert.equal(probe.pending,null);events.push(['stop'])
     }
     probe.aboutToDisappear()
     assert.equal(probe.programId,programId);assert.equal(probe.darkListener,null)
@@ -406,13 +417,16 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
      assert.deepEqual(events,[['stop'],['persist','fixture'],['darkOff','change']])
    })
    for(const method of ['dispatch','acceptEffects','runQueued','allowPending','refusePending','runEffect']) test('renderer effects: disposed '+method+' does no work', () => {
-    const f=effectProbe(), {probe,events,executions,platform}=f
-    f.load();const actor=probe.actor;probe.aboutToDisappear();events.length=0;executions.length=0
-     const effect=hostEffect(), held=[hostEffect(2)], queued=[hostEffect(3)], generation=probe.effectGeneration
-     probe.pending=effect;probe.heldEffects=held
-     if(method==='dispatch')probe.dispatch('tap',new V.VeraNumberValue(1));else if(method==='runEffect')probe.runEffect(effect);else if(method==='acceptEffects')probe.acceptEffects(queued);else probe[method]()
-     assert.deepEqual(executions,[]);assert.deepEqual(platform,[]);assert.deepEqual(events,[])
-     assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'');assert.equal(probe.pending,effect);assert.equal(probe.heldEffects,held);assert.deepEqual(held,[hostEffect(2)]);assert.deepEqual(queued,[hostEffect(3)]);assert.equal(probe.effectGeneration,generation)
+    const f=effectProbe(true), {probe,events,executions,platform}=f
+    f.load();seedEffects(probe)
+    const actor=probe.actor, controller=probe.effectController, pending=controller.pending, held=controller.heldEffects
+    const expectedHeld=[probe.localEffectRequest(hostEffect(2))]
+    probe.aboutToDisappear();events.length=0;executions.length=0
+    const effect=pending.effect, queued=[hostEffect(3)], generation=probe.effectGeneration
+    probe.pending=effect;controller.pending=pending;controller.heldEffects=held
+    if(method==='dispatch')probe.dispatch('tap',new V.VeraNumberValue(1));else if(method==='runEffect')probe.runEffect(effect);else if(method==='acceptEffects')probe.acceptEffects(queued);else if(method==='runQueued')controller.runQueued();else probe[method]()
+    assert.deepEqual(executions,[]);assert.deepEqual(platform,[]);assert.deepEqual(events,[])
+    assert.equal(actor.ready(),false);assert.equal(actor.snapshot(),'');assert.equal(probe.pending,effect);assert.equal(controller.heldEffects,held);assert.equal(controller.pending,pending);assert.deepEqual(held.map(work=>work.effect),expectedHeld);assert.deepEqual(queued,[hostEffect(3)]);assert.equal(probe.effectGeneration,generation)
    })
    test('renderer effects: active dispatch executes real actor VM and commits state', () => {
     const f=effectProbe(), {probe,executions,events}=f
@@ -424,15 +438,15 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
      assert.deepEqual(events,[['snapshot'],['reveal',true],['render'],['reveal',false],['persist','fixture']]);assert.equal(probe.error,'')
    })
    await testAsync('renderer effects: active queues drain, allow and refuse without losing replies', async () => {
-    const f=effectProbe(), {probe,platform,delivered,events}=f
+    const f=effectProbe(true), {probe,platform,delivered,events}=f
     f.load();f.observeDispatch()
-    const first=hostEffect(1), allowed={...hostEffect(2),ask:true}, refused={...hostEffect(3),ask:true}, last=hostEffect(4)
+    const first=hostEffect(1,'other'), allowed=hostEffect(2), refused=hostEffect(3), last=hostEffect(4,'other')
     probe.acceptEffects([first,allowed,refused,last])
-     assert.equal(platform.length,1);assert.equal(probe.pending,allowed);assert.deepEqual(probe.heldEffects,[refused,last])
+    assert.equal(platform.length,1);assert.deepEqual(probe.pending,probe.localEffectRequest(allowed));assert.deepEqual(heldRequests(probe),[refused,last].map(effect=>probe.localEffectRequest(effect)))
     probe.allowPending()
-    assert.equal(platform.length,2);assert.equal(probe.pending,refused);assert.deepEqual(probe.heldEffects,[last]);assert.equal(events.filter(event=>event[0]==='remember').length,1)
+    assert.equal(platform.length,2);assert.deepEqual(probe.pending,probe.localEffectRequest(refused));assert.deepEqual(heldRequests(probe),[probe.localEffectRequest(last)]);assert.deepEqual(events.filter(event=>event[0]==='remember'),[['remember',probe.stamp(),allowed.rawTarget]])
     probe.refusePending()
-    assert.equal(platform.length,3);assert.equal(probe.pending,null);assert.deepEqual(probe.heldEffects,[]);assert.deepEqual(delivered,[['answer3','declined by the person']])
+    assert.equal(platform.length,3);assert.equal(probe.pending,null);assert.deepEqual(heldRequests(probe),[]);assert.deepEqual(delivered,[['answer3','declined by the person']])
     for(const [index,call] of platform.entries())await settleEffect(call,false,'reply'+index)
     assert.deepEqual(delivered,[['answer3','declined by the person'],['answer1','reply0'],['answer2','reply1'],['answer4','reply2']])
    })
@@ -447,7 +461,7 @@ function view(state: AppState): ui.View { return ui.Text("body", ui.numberToStri
    })
     function surfaceProbe(route='displaySync') {
      const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-     const names=['disposed','effectGeneration','liveGeneration','heldEffects','actor','traceOwner','pageHidden','fieldEdits','surfaces','textTimers','liveSurfaces','surfaceSync','surfaceTimer','lastFrameAt','framing','frameCount','frameWork','frameWorst','frameSplit','frameReportAt']
+     const names=['disposed','effectGeneration','liveGeneration','effectController','actor','traceOwner','pageHidden','fieldEdits','surfaces','textTimers','liveSurfaces','surfaceSync','surfaceTimer','lastFrameAt','framing','frameCount','frameWork','frameWorst','frameSplit','frameReportAt']
      const fields=names.map(name=>{
       const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+','m'));assert(field,name)
       return field[0].replace('  private ','')
@@ -612,11 +626,11 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
        }
        function fieldProbe(sync=false,controller=null) {
       const renderer=fs.readFileSync(path.join(sourceRoot,'components/VeraPreview.ets'),'utf8')
-       const fields=['fieldEdits','fieldInputs','fieldActions','fieldMenus','surfaceInputs','resumingFieldActions','fieldActionsNeedResume','renderingDepth','liveGeneration','disposed','effectGeneration','heldEffects','actor','traceOwner','surfaces','surfaceSync','surfaceTimer','timers','timerConfigs','timerLastFire','ticking','backHandlerAction'].map(name=>{
+       const fields=['fieldEdits','fieldInputs','fieldActions','fieldMenus','surfaceInputs','resumingFieldActions','fieldActionsNeedResume','renderingDepth','liveGeneration','disposed','effectGeneration','effectController','actor','traceOwner','surfaces','surfaceSync','surfaceTimer','timers','timerConfigs','timerLastFire','ticking','backHandlerAction'].map(name=>{
         const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+(?:\\n    [^\\n]+)*','m'));assert(field,name)
         return field[0].replace('  private ','')
        }).join('\n')
-       const names=['fieldCurrent','markLiveNodeGeneration','isLiveNode','recordFieldInput','refreshFieldIssue','refreshFieldIssues','textFieldIssue','cancelField','cancelFields','fieldController','endFieldEditing','reconcileFields','changeField','commitField','flushFields','flushUserFields','finishField','actorOptions','createActor','invalidateEffects','load','renderView','handleAction','handleBoolAction','handleStringAction','fieldFormOf','pathTo','hasField','collectFieldDependencies','fieldActionState','fieldActionCurrent','releaseSurfaceAction','scheduleFieldActions','captureFieldAction','enqueueFieldAction','dispatchFieldAction','resumeFieldActions','dispatch','surfaceTouch','surfaceMove','stamp','persistState','notifyStateSnapshot','reconcileBackHandler','findBackHandlerAction','startTimer','stopTimer','runEffect']
+       const names=['fieldCurrent','markLiveNodeGeneration','isLiveNode','recordFieldInput','refreshFieldIssue','refreshFieldIssues','textFieldIssue','cancelField','cancelFields','fieldController','endFieldEditing','reconcileFields','changeField','commitField','flushFields','flushUserFields','finishField','actorOptions','createActor','invalidateEffects','load','renderView','handleAction','handleBoolAction','handleStringAction','fieldFormOf','pathTo','hasField','collectFieldDependencies','fieldActionState','fieldActionCurrent','releaseSurfaceAction','scheduleFieldActions','captureFieldAction','enqueueFieldAction','dispatchFieldAction','resumeFieldActions','dispatch','surfaceTouch','surfaceMove','stamp','persistState','notifyStateSnapshot','reconcileBackHandler','findBackHandlerAction','startTimer','stopTimer','effectsController','localEffectRequest','runEffect']
        const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear','onBackPressSignal','onResume','onPreviewOnlyChanged'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
        const sliderSource=renderer.slice(renderer.indexOf("} else if (node.kind === 'slider') {"),renderer.indexOf("} else if (node.kind === 'select') {"))
        const callback='sliderChange(node: LiveNode) { return '+declaration(sliderSource,'.onChange(').slice('.onChange('.length)+' }'
@@ -654,7 +668,8 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
        const handle=++nextHandle, timer={callback,at:now+delay}
        scheduled.set(handle,timer);history.set(handle,timer);return handle
       },clearTimeout(handle){scheduled.delete(handle)}}
-      const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks)), probe=new Probe()
+      Object.assign(mocks,effectModule({...mocks,consent:{has:()=>false,remember(){}}}),{ASK_BEFORE_CALLS:false})
+       const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks)), probe=new Probe()
        Object.assign(probe,{previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',pending:null,darkListener:null,liveSurfaces:[],destinationHidden:false,pageHidden:false,persistKey:'fixture/version',seedState:'',controller,
          onStateSnapshot(encoded){snapshots.push(encoded)},
         stopAllTimers(){for(const id of [...this.timers.keys()])this.stopTimer(id)},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){},acceptEffects(){},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},onBackHandlerChanged(){},reconcileSurfaces(){},paintSurfaces(){},paintSurface(){}})

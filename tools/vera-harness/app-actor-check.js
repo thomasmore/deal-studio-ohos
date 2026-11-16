@@ -1030,7 +1030,7 @@ test('view cadence boundary and surface edit gate defer without advancing save d
   assert.equal(p.actor.surfaceSave(now + 20000, false), 'DONE')
 })
 
-test('existing surface-save failure behavior: DONE and snapshot despite failed persistence; deadline advances', () => {
+test('failed surface save publishes no snapshot, retains deadline and retries immediately', () => {
   const p = probe()
   p.actor.initialize(programs.basic, options())
   p.actor.persistState()
@@ -1039,32 +1039,38 @@ test('existing surface-save failure behavior: DONE and snapshot despite failed p
   p.actor.frameHandlers(['frameA'], 16)
   p.reset()
   failure = 'rename'
-  assert.equal(p.actor.surfaceSave(now + 5000, false), 'DONE')
+  assert.equal(p.actor.surfaceSave(now + 5000, false), 'NOT_SAVED')
   failure = ''
-  assert.deepEqual(sequence(p), ['snapshot'])
-  assert.equal(stateOf(p.snapshots[0]).n, 11)
+  assert.deepEqual(sequence(p), [])
+  assert.equal(p.snapshots.length, 0)
+  assert.equal(count(p, 'save-attempt'), 1)
   assert.equal(count(p, 'saved'), 0)
   assert.equal(disk.get(stateFile()), saved)
   assert(p.events.some(e => e.type === 'log-error' && e.message.includes('save failed')))
   noErrors(p)
   p.reset()
+  assert.equal(p.actor.surfaceSave(now + 5000, false), 'DONE')
+  assert.deepEqual(sequence(p), ['save', 'saved', 'snapshot'])
+  assert.equal(stateOf(p.snapshots[0]).n, 11)
+  assert.equal(stateOf(store.loadState('project', 'version', programs.basic.stamp)).n, 11)
+  p.reset()
   assert.equal(p.actor.surfaceSave(now + 9999, false), 'NOT_DUE')
   assert.deepEqual(p.events, [])
   assert.equal(p.actor.surfaceSave(now + 10000, false), 'DONE')
   assert.deepEqual(sequence(p), ['save', 'saved', 'snapshot'])
-  assert.equal(stateOf(store.loadState('project', 'version', programs.basic.stamp)).n, 11)
 })
 
-test('ephemeral periodic snapshot has no IO; malformed persistent keys do not touch store', () => {
+test('ephemeral and malformed-key periodic saves return NOT_SAVED without snapshot or IO', () => {
   for (const opts of [options('LIVE_EPHEMERAL', ''), options('LIVE_PERSISTENT', ''), options('LIVE_PERSISTENT', 'invalid'), options('LIVE_PERSISTENT', '/version')]) {
     const p = probe()
     p.actor.initialize(programs.basic, opts)
     p.actor.beginSurfaceLoop(now)
     p.reset()
     p.actor.frameHandlers(['frameA'], 16)
-    assert.equal(p.actor.surfaceSave(now + 5000, false), 'DONE')
-    assert.equal(p.snapshots.length, 1)
-    assert.equal(stateOf(p.snapshots[0]).n, 11)
+    assert.equal(p.actor.surfaceSave(now + 5000, false), 'NOT_SAVED')
+    assert.equal(p.actor.surfaceSave(now + 5000, false), 'NOT_SAVED')
+    assert.equal(p.snapshots.length, 0)
+    assert.equal(p.state().n, 11)
     noIo(p)
   }
 })
@@ -1164,4 +1170,3 @@ try {
 }
 console.log(`app-actor-check: ${passed}/${tests.length} focused actor scenarios passed`)
 console.log('Scope: current AppActor public API, real compiler/VM/UI host/carry/ProjectStore, in-memory CoreFileKit; no InProcessHost/mailbox, ArkUI/device, network or model execution.')
-console.log('Compatibility: surfaceSave currently emits a snapshot and advances its deadline even when save fails; this differs from the spec success-only periodic snapshot rule.')

@@ -14,8 +14,6 @@ import { RuntimeValue, VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraO
 import { HostEffect, VeraUiNode, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
 import { veraStateStamp } from '../vera/VeraStateStamp'
 import { scheduleCardRefresh } from '../vera/FormUpdater'
-import { runRawIntent } from '../vera/VeraIntents'
-import { runSdkAdapter } from '../vera/VeraSdkBackend'
 import { LengthMetrics, mediaquery, matrix4 } from '@kit.ArkUI'
 
 import { catalogKinds } from '../vera/VeraUiCatalog'
@@ -23,7 +21,6 @@ import { iconPath, ICON_STROKE, ICON_VIEWPORT, ICON_ORIGIN } from '../vera/VeraI
 import { ResolvedTheme, resolveTheme, containerFill, toneFill, toneEdge, toneInk,
   textSize, textWeight, textInk, buttonFill, buttonInk, pathFill, densityPad,
   densityGap, spacerSize, readableInk } from '../vera/VeraTheme'
-import { consent } from '../vera/VeraConsentStore'
 import { LiveNode, toLive, reconcile, armReveal, markIconRoom } from './VeraLiveTree'
 import { MotionPose, motionPose, motionDuration, pivotPercent, poseMatrix, poseFromArray, multiplyMatrices, perspectiveMatrix,
   columnMajor, poseToPixels, samePose, animatedPose, TRANSFORM_DISTANCE, MOTION_BUDGET_MS } from '../vera/VeraMotion'
@@ -36,7 +33,8 @@ import { WorldBox, WorldPick, WorldGesture, playerOf } from './VeraWorld3D'
 import { SimEvent } from '../vera/VeraPhysics'
 import { StageTrace } from '../runtime/trace/StageTrace'
 import { AppActor, AppActorCallbacks } from '../runtime/AppActor'
-import { ProgramRef, AcquireOptions } from '../runtime/shared/Messages'
+import { ProgramRef, AcquireOptions, EffectRequest } from '../runtime/shared/Messages'
+import { EffectController, effectConsentKey, effectConsentTitle, effectConsentValues } from '../runtime/EffectController'
 
 /**
  * The rotation of every spinning shape on screen.
@@ -488,8 +486,8 @@ export struct VeraPreview {
    * @State because the dialog is part of the frame; the queue is not, because
    * nothing draws it.
    */
-  @State pending: HostEffect | null = null
-  private heldEffects: HostEffect[] = []
+  @State pending: EffectRequest | null = null
+  private effectController: EffectController | null = null
   private spinTimer: number = -1
   private motionClock: MotionClock = new MotionClock()
   private motionTimer: number = -1
@@ -641,7 +639,7 @@ export struct VeraPreview {
   private invalidateEffects(): void {
     this.cancelFields()
     this.effectGeneration += 1
-    this.heldEffects = []
+    if (this.effectController !== null) { this.effectController!.invalidate() }
     this.pending = null
     if (this.actor !== null) { this.actor!.clearEffects() }
   }
@@ -2200,169 +2198,69 @@ export struct VeraPreview {
    * A late answer to a screen that has gone is dropped rather than pushed into
    * a VM that is no longer running.
    */
+  private effectsController(): EffectController {
+    if (this.effectController === null) {
+      this.effectController = new EffectController({
+        askBeforeCalls: ASK_BEFORE_CALLS,
+        stamp: (): string => this.stamp(),
+        isCurrent: (): boolean => !this.disposed,
+        generation: (): number => this.effectGeneration,
+        traceOwner: this.traceOwner,
+        traceRequests: true,
+        onFailure: (_effect: EffectRequest | null, error: Error): void => {
+          console.error('VERA-EFFECT callback failed: ' + error.message)
+        },
+        onPending: (effect: EffectRequest | null): void => { this.pending = effect },
+        complete: (effect: EffectRequest, text: string): void => {
+          if (this.disposed || effect.vmGeneration !== this.effectGeneration) { return }
+          this.dispatchFieldAction(effect.resultHandler, new VeraStringValue(text), true, null, 'EFFECT_RESULT')
+        }
+      })
+    }
+    return this.effectController!
+  }
+
+  private localEffectRequest(effect: HostEffect): EffectRequest {
+    let params: string[] = []
+    effect.values.forEach((value: string, key: string): void => { params.push(key, value) })
+    return { appId: '', vmGeneration: this.effectGeneration, effectId: effect.id, kind: effect.kind,
+      rawTarget: effect.rawTarget, params: params, resultHandler: effect.resultHandler, mode: effect.rawMode }
+  }
+
   private acceptEffects(effects: HostEffect[]): void {
     if (this.disposed || effects.length === 0) { return }
-    for (let effect of effects) { this.heldEffects.push(effect) }
-    this.runQueued()
+    this.effectsController().accept(effects.map((effect: HostEffect): EffectRequest => this.localEffectRequest(effect)))
   }
 
-  /**
-   * Works through the queue until it is empty or something needs asking.
-   *
-   * One dialog at a time, and everything behind it waits: two dialogs at once
-   * is a person clicking through whichever is on top, which is the failure this
-   * whole mechanism exists to prevent.
-   */
-  private runQueued(): void {
-    if (this.disposed) { return }
-    while (this.heldEffects.length > 0) {
-      if (this.pending !== null) { return }
-      let effect = this.heldEffects.shift() as HostEffect
-      console.info('VERA-EFFECT id=' + effect.id.toString() + ' ' + effect.kind + '.' + effect.fn +
-        ' -> ' + effect.resultHandler)
-      if (this.needsConsent(effect)) {
-        StageTrace.request(this.traceOwner, effect.id, effect.rawTarget, effect.values, effect.resultHandler, effect.rawMode, this.effectGeneration)
-        console.info('VERA-CONSENT asking for ' + this.consentTitle(effect))
-        this.pending = effect
-        return
-      }
-      this.runEffect(effect)
-    }
+  private consentKey(effect: EffectRequest): string {
+    return effectConsentKey(effect)
   }
 
-  /**
-   * Whether this call is shown to the person before it runs.
-   *
-   * Reading something, opening a page or launching an app is not worth
-   * interrupting for -- the person asked for the app and can see what it did.
-   * Anything that changes something is, and an intent the catalogue never
-   * described always is: nobody has established what it does, so nobody can say
-   * it is safe.
-   */
-  private needsConsent(effect: HostEffect): boolean {
-    // Asking is off. Turn ASK_BEFORE_CALLS back on and every state-changing
-    // call is shown to the person again -- the sheet,
-    // the queue and the remembered grants are all still here and still work.
-    //
-    // What is lost while it is off is the only thing standing between a
-    // generated program and an intent nobody has checked: the phone accepts
-    // Pay and SendTextMessage as readily as OpenFlashlight, and the person
-    // sees neither. The log keeps the record -- VERA-INTENT-RAW carries the
-    // target and the payload of every call.
-    if (!ASK_BEFORE_CALLS) { return false }
-    // Nothing about an sdk.call is curated or risk-classified, so "ask every
-    // time" is the only posture that makes sense until it is
-    // (docs/selector-design.md).
-    if (effect.kind !== 'sdk') { return false }
-    // Already allowed, for this program and this call. The grant died with the
-    // previous version of the program: stamp() is the bytecode.
-    if (consent.has(this.stamp(), this.consentKey(effect))) { return false }
-    return true
+  private consentTitle(effect: EffectRequest): string {
+    return effectConsentTitle(effect)
   }
 
-  /** What a grant is about: the target address, as the program wrote it. */
-  private consentKey(effect: HostEffect): string {
+  private consentTarget(effect: EffectRequest): string {
     return effect.rawTarget
   }
 
-  /** What the dialog says this call is, in the person's words where there are any. */
-  private consentTitle(effect: HostEffect): string {
-    if (effect.kind === 'sdk') {
-      // sdk.call's two target shapes (VeraCompiler.buildStdSdkModule):
-      // slash-separated (an intent address) or dot-separated (an sdk entry).
-      let sep = effect.rawTarget.indexOf('/') >= 0 ? '/' : '.'
-      let parts = effect.rawTarget.split(sep)
-      return 'Run ' + parts[parts.length - 1]
-    }
-    return 'Run ' + effect.rawTarget
+  private consentValues(effect: EffectRequest): string {
+    return effectConsentValues(effect)
   }
 
-  /** The app the call goes to, by bundle name -- the one thing that is never in doubt. */
-  private consentTarget(effect: HostEffect): string {
-    return effect.rawTarget
-  }
-
-  /**
-   * Every value that will be sent, after translation, one per line.
-   *
-   * After translation because that is what the phone will receive: showing the
-   * program's own words would be showing something other than what happens.
-   */
-  private consentValues(effect: HostEffect): string {
-    let lines: string[] = []
-    effect.values.forEach((value: string, key: string) => { lines.push(key + ': ' + value) })
-    return lines.length > 0 ? lines.join('\n') : '(no parameters)'
-  }
-
-  /** The person allowed it: run it, then carry on with whatever was behind it. */
   private allowPending(): void {
-    if (this.disposed) { return }
-    let effect = this.pending
-    this.pending = null
-    if (effect !== null) {
-      console.info('VERA-CONSENT allowed ' + this.consentTarget(effect!))
-      // Remembered, so the same program asking the same thing again is not a
-      // question the person has to answer twice.
-      consent.remember(this.stamp(), this.consentKey(effect!))
-      this.runEffect(effect!, true)
-    }
-    this.runQueued()
+    if (this.disposed || this.effectController === null) { return }
+    this.effectController!.allowPending()
   }
 
-  /**
-   * The person refused: the program is told so through its own handler.
-   *
-   * Told, rather than left waiting -- a program that asked to send something
-   * and hears nothing back will show the person a screen that is quietly wrong.
-   */
   private refusePending(): void {
-    if (this.disposed) { return }
-    let effect = this.pending
-    this.pending = null
-    if (effect !== null) {
-      console.info('VERA-CONSENT refused ' + this.consentTarget(effect!))
-      StageTrace.emit(this.traceOwner, 'EFFECT_RESULT', { id: effect!.id, resultHandler: effect!.resultHandler, generation: this.effectGeneration, outcome: 'DECLINED' })
-      this.dispatchFieldAction(effect!.resultHandler, new VeraStringValue('declined by the person'), true, null, 'EFFECT_RESULT')
-    }
-    this.runQueued()
+    if (this.disposed || this.effectController === null) { return }
+    this.effectController!.refusePending()
   }
 
-  /** One effect, whichever host it belongs to, answered through its handler. */
-  private runEffect(effect: HostEffect, requestTraced: boolean = false): void {
+  private runEffect(effect: HostEffect): void {
     if (this.disposed) { return }
-    if (!requestTraced) { StageTrace.request(this.traceOwner, effect.id, effect.rawTarget, effect.values, effect.resultHandler, effect.rawMode, this.effectGeneration) }
-    let generation = this.effectGeneration
-    let answer: Promise<string>
-    if (effect.kind === 'sdk' && effect.rawTarget.indexOf('/') >= 0) {
-      // An intent-style target: it gets real dispatch through runRawIntent.
-      answer = runRawIntent(effect.rawTarget, effect.values, effect.rawMode)
-    } else if (effect.kind === 'sdk') {
-      // An sdk-style target: a real, curated adapter (VeraSdkBackend.ets) if
-      // one has been written for this exact target, the same honest stub as
-      // before otherwise. Most of the closed set this compiles against has
-      // no adapter yet -- that was never in scope for the selector work --
-      // but a target that does have one now really calls interface_sdk-js.
-      answer = runSdkAdapter(effect.rawTarget, effect.values)
-    } else {
-      answer = runSdkAdapter(effect.rawTarget, effect.values)
-    }
-    answer.then((text: string) => {
-      if (this.disposed || generation !== this.effectGeneration) {
-        StageTrace.emit(this.traceOwner, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation, outcome: 'DROPPED_STALE' })
-        return
-      }
-      StageTrace.emit(this.traceOwner, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation,
-        outcome: text.startsWith('declined') ? 'DECLINED' : text.startsWith('error') ? 'ERROR' : 'OK' })
-      this.dispatchFieldAction(effect.resultHandler, new VeraStringValue(text), true, null, 'EFFECT_RESULT')
-    }).catch((e: Error) => {
-      if (this.disposed || generation !== this.effectGeneration) {
-        StageTrace.emit(this.traceOwner, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation, outcome: 'DROPPED_STALE' })
-        return
-      }
-      StageTrace.emit(this.traceOwner, 'ERROR', { kind: 'EFFECT_RESULT' })
-      StageTrace.emit(this.traceOwner, 'EFFECT_RESULT', { id: effect.id, resultHandler: effect.resultHandler, generation: generation, outcome: 'ERROR' })
-      this.dispatchFieldAction(effect.resultHandler, new VeraStringValue('error: ' + e.message), true, null, 'EFFECT_RESULT')
-    })
+    this.effectsController().accept([this.localEffectRequest(effect)])
   }
 
   build() {
@@ -2382,7 +2280,7 @@ export struct VeraPreview {
   }
 
   @LocalBuilder
-  consentSheet(effect: HostEffect) {
+  consentSheet(effect: EffectRequest) {
     Column() {
       Column() {
         Text(this.consentTitle(effect))

@@ -33,18 +33,30 @@ export interface StageTraceRecord {
 export class StageTrace {
   private static active: boolean = false
   private static sessions: WeakMap<Object, number> = new WeakMap<Object, number>()
+  private static effectOwners: WeakMap<Object, Object> = new WeakMap<Object, Object>()
   private static nextSession: number = 0
   private static sink: ((record: StageTraceRecord) => void) | null = null
 
   static configure(enabled: boolean, sink?: (record: StageTraceRecord) => void): void {
     StageTrace.active = enabled
     StageTrace.sessions = new WeakMap<Object, number>()
+    StageTrace.effectOwners = new WeakMap<Object, Object>()
     StageTrace.nextSession = 0
     StageTrace.sink = sink === undefined ? null : sink
   }
 
   static enabled(): boolean {
     return StageTrace.active
+  }
+
+  static associateEffectOwner(request: Object, owner: Object): void {
+    if (!StageTrace.active) { return }
+    StageTrace.effectOwners.set(request, owner)
+  }
+
+  static effectOwner(request: Object): Object | undefined {
+    if (!StageTrace.active) { return undefined }
+    return StageTrace.effectOwners.get(request)
   }
 
   private static copyAttributes(source: StageTraceAttributes): StageTraceAttributes {

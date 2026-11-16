@@ -97,9 +97,9 @@ function devParameterProbe() {
   }
   return {p, toggles, calls, extracts}
 }
-function probe() {
+function probe(askBeforeCalls = false) {
   const V = loadVera('VeraInterpreter')
-  const fields = ['effectGeneration', 'liveGeneration', 'disposed', 'heldEffects', 'actor', 'traceOwner',
+  const fields = ['effectGeneration', 'liveGeneration', 'disposed', 'effectController', 'actor', 'traceOwner',
     'fieldEdits', 'fieldInputs', 'fieldMenus', 'fieldActions', 'surfaceInputs', 'resumingFieldActions', 'fieldActionsNeedResume', 'renderingDepth',
     'timers', 'timerConfigs', 'timerLastFire', 'ticking', 'surfaces', 'liveSurfaces', 'surfaceSync', 'surfaceTimer',
     'lastFrameAt', 'framing', 'frameSplit', 'pageHidden', 'spinTimer', 'spinPeriod', 'partsTimer',
@@ -112,7 +112,7 @@ function probe() {
     'persistState', 'markLiveNodeGeneration', 'isLiveNode', 'collectFieldDependencies',
     'captureFieldAction', 'dispatchFieldAction', 'enqueueFieldAction', 'resumeFieldActions', 'fieldActionCurrent',
     'releaseSurfaceAction', 'scheduleFieldActions', 'startTimer', 'stopTimer', 'stopAllTimers', 'stopSurfaceLoop',
-    'surfaceFrame', 'paintSurface', 'paintSurfaces', 'acceptEffects', 'runQueued', 'runEffect', 'allowPending',
+    'surfaceFrame', 'paintSurface', 'paintSurfaces', 'effectsController', 'localEffectRequest', 'acceptEffects', 'runEffect', 'allowPending',
     'refusePending', 'cancelField', 'cancelFields', 'refreshFieldIssue', 'fieldActionState', 'watchDarkMode']
   const methods = names.map(name => declaration('  private ' + name + '('))
     .concat(declaration('  onResume('), declaration('  onPreviewOnlyChanged(')).join('\n')
@@ -149,7 +149,7 @@ function probe() {
     stepsExecuted() { return 1 }
   }
   const platform = (...args) => new Promise((resolve, reject) => replies.push({args, resolve, reject}))
-  const mocks = {StageTrace, ...V, VirtualMachine: Machine, UiHostEnvironment: Host, consent: {remember() {}},
+  const mocks = {StageTrace, ...V, VirtualMachine: Machine, UiHostEnvironment: Host, consent: {has: () => false, remember() {}}, ASK_BEFORE_CALLS: askBeforeCalls,
     deserializeVbc2: value => { if (value === 'broken') throw Error('fixture bytecode'); return {functions: []} },
     decodeVeraUi: value => value, toLive: node => ({...node, children: [...node.children]}),
     reconcile: (live, node) => Object.assign(live, node), markIconRoom() {}, armReveal() {},
@@ -179,6 +179,19 @@ function probe() {
     return dependencies[id]
   }, actorModule, actorModule.exports, mocks.Date, mocks.console)
   mocks.AppActor = actorModule.exports.AppActor
+  const effectFile = path.join(sourceRoot, 'runtime/EffectController.ets')
+  const effectCode = ts.transpileModule(fs.readFileSync(effectFile, 'utf8'), {fileName: 'EffectController.ts',
+    compilerOptions: {target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true})
+  assert.equal((effectCode.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error).length, 0, 'effect controller syntax')
+  const effectModule = {exports: {}}, effectDependencies = {
+    './trace/StageTrace': {StageTrace}, '../vera/VeraConsentStore': {consent: mocks.consent},
+    '../vera/VeraIntents': {runRawIntent: platform}, '../vera/VeraSdkBackend': {runSdkAdapter: platform}
+  }
+  new Function('require', 'module', 'exports', 'console', effectCode.outputText)(id => {
+    assert(Object.hasOwn(effectDependencies, id), 'unexpected effect controller dependency ' + id)
+    return effectDependencies[id]
+  }, effectModule, effectModule.exports, mocks.console)
+  Object.assign(mocks, effectModule.exports)
   const Probe = new Function(...Object.keys(mocks), compiled.outputText + '\nconst VeraPreview = Probe; return Probe')(...Object.values(mocks))
   p = new Probe()
   Object.assign(p, {previewOnly: false, programId: 0, revision: 0, liveRoot: null, hasRoot: false, error: '',
@@ -186,7 +199,7 @@ function probe() {
     stamp: () => 'fixture-stamp', onStateSnapshot: encoded => snapshots.push(encoded),
     flushFields() {}, stopPartsTimer() {}, partPoses: () => [],
     reconcileTheme() {}, reconcileFields() {}, reconcileTimers() {}, reconcileSpin() {}, reconcileMotion() {},
-    reconcileBackHandler() {}, reconcileSurfaces() {}, countFrame() {}, needsConsent: () => false,
+    reconcileBackHandler() {}, reconcileSurfaces() {}, countFrame() {},
     dark: false, darkListener: null, t: () => ({}),
     getUIContext: () => ({vp2px: value => value, getMediaQuery: () => ({matchMediaSync() {
       if (faults.media) throw Error('fixture media')
@@ -613,10 +626,8 @@ async function main() {
     StageTrace.request = function (...args) { forwarded.push(args); return request.apply(this, args) }
     try {
       for (const allow of [true, false]) {
-        const records = capture(), f = probe(), {p, replies} = f
+        const records = capture(), f = probe(true), {p, replies} = f
         p.load(); records.length = 0; forwarded.length = 0
-        p.needsConsent = () => true; p.consentTitle = () => 'fixture'
-        p.consentTarget = () => 'fixture'; p.consentKey = () => 'fixture'
         const value = effect(); value.rawMode = 'foreground'
         f.deliverEffects([value])
         assert.equal(forwarded.length, 1)
@@ -713,20 +724,18 @@ async function main() {
     assert.equal(saves.length, 0)
   })
   await test('MOCKED consent queue blocks followers then routes out-of-order replies by effect identity', async () => {
-    const records = capture(), f = probe(), {p, replies, calls} = f
+    const records = capture(), f = probe(true), {p, replies, calls} = f
     p.load()
-    p.needsConsent = () => true; p.consentTitle = () => 'fixture'
-    p.consentTarget = () => 'fixture'; p.consentKey = () => 'fixture'
     const first = effect(41), second = effect(90), third = effect(103)
     first.rawMode = 'foreground'; second.rawMode = 'background'
     second.resultHandler = 'secondAnswer'; third.resultHandler = 'thirdAnswer'
     f.deliverEffects([first, second, third])
-    assert.equal(p.pending, first); assert.deepEqual(p.heldEffects, [second, third])
+    assert.deepEqual(p.pending, p.localEffectRequest(first)); assert.deepEqual(p.effectController.heldEffects.map(work => work.effect), [second, third].map(value => p.localEffectRequest(value)))
     assert.equal(replies.length, 0)
     p.allowPending()
-    assert.equal(p.pending, second); assert.equal(replies.length, 1)
+    assert.deepEqual(p.pending, p.localEffectRequest(second)); assert.equal(replies.length, 1)
     p.refusePending()
-    assert.equal(p.pending, third); assert.equal(replies.length, 1)
+    assert.deepEqual(p.pending, p.localEffectRequest(third)); assert.equal(replies.length, 1)
     p.allowPending()
     assert.equal(p.pending, null); assert.equal(replies.length, 2)
     replies[1].resolve('ok'); await settle()
