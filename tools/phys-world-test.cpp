@@ -506,6 +506,47 @@ void TestDrainBounded()
     Check(most <= cap && intact, "drain: never writes past its cap");
 }
 
+// The 8 s sleep cap belongs to each body. Long after the last kick, a body added in the air still
+// falls, and one that jitters for ever (kept awake here by a kinematic body pushing it) is capped.
+void TestSleepCap()
+{
+    vphys::PhysWorld w;
+    w.init(64, 0);
+    Floor(w);
+    int a = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    w.setPose(a, 0, 0.05f, 0, 0, 0, 0, 1);
+    w.setVelocity(a, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 60 * 10; i++) {
+        w.step(kDt, 1);
+    }
+    int b = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    w.setPose(b, 1, 1, 0, 0, 0, 0, 1);
+    for (int i = 0; i < 60; i++) {
+        w.step(kDt, 1);
+    }
+    float p[7];
+    w.readPose(b, p);
+    std::printf("      body added 10 s after the last kick: y = %.4f after 1 s\n", p[1]);
+    Check(p[1] < 0.1f, "sleep cap: a body added long after the last kick still falls");
+    // A body held awake by a sliding kinematic paddle: it is put to sleep once 8 s in a row pass.
+    vphys::PhysWorld k;
+    k.init(64, 0);
+    Floor(k);
+    int paddle = k.addBox(0.3f, 0.05f, 0.3f, vphys::kKinematic);
+    k.setPose(paddle, 0, 0.05f, 0, 0, 0, 0, 1);
+    int c = k.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    k.setPose(c, 0, 0.16f, 0, 0, 0, 0, 1);
+    int awakeSteps = 0;
+    for (int i = 0; i < 60 * 12; i++) {
+        float x = 0.05f * std::sin(i * kDt * 20.0f);
+        k.moveKinematic(paddle, x, 0.05f, 0, 0, 0, 0, 1, kDt);
+        k.step(kDt, 1);
+        awakeSteps += k.awakeDynamic();
+    }
+    std::printf("      on a shaking paddle: awake %d of %d steps\n", awakeSteps, 60 * 12);
+    Check(awakeSteps > 60 * 8 - 10, "sleep cap: a body pushed all along stays awake up to its cap");
+}
+
 }  // namespace
 
 int main()
@@ -518,6 +559,7 @@ int main()
     TestDiceFair();
     TestFloatCapacity();
     TestDrainBounded();
+    TestSleepCap();
     std::printf(g_failures ? "%d FAILED\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

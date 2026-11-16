@@ -667,8 +667,12 @@ export function specBounds(b: BodySpec): number[] {
  * fixed body, or on bodies that themselves rest, within REST_GAP, with their centre over what holds them up. Those
  * start asleep, so a wall or a stack the program built stands still until something hits it instead of settling -- and,
  * for a tall one, toppling -- on its own. A body built in the air, inside something, or thrown, starts awake.
+ *
+ * standing holds loose bodies from earlier applies that still stand where they were built, as [x, y, z] where they are
+ * now: a block added on top of a tower built in an earlier state rests on it as on one built with it.
  */
-export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set<string>): string[] {
+export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set<string>,
+  standing: Map<string, number[]> | null = null): string[] {
   let holders: number[][] = []
   let table = spec.table
   if (table !== null) {
@@ -679,6 +683,12 @@ export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set
   }
   for (let b of spec.bodies) {
     if (b.motion === 'static') { holders.push(specBounds(b)) }
+    let at = standing !== null && b.motion === 'loose' && !kicked.has(b.id) ? standing.get(b.id) : undefined
+    if (at !== undefined) {
+      let e = specBounds(b)
+      let d = [at[0] - b.position[0], at[1] - b.position[1], at[2] - b.position[2]]
+      holders.push([e[0] + d[0], e[1] + d[1], e[2] + d[2], e[3] + d[0], e[4] + d[1], e[5] + d[2]])
+    }
   }
   let floorTop = spec.floor !== null ? (table !== null ? -TABLE_TOP_THICKNESS : 0) : NaN
   let candidates: BodySpec[] = created.filter((b: BodySpec): boolean => b.motion === 'loose' && !kicked.has(b.id))
@@ -787,6 +797,8 @@ export class WorldSim {
   /** A step begun and not yet finished (an engine that overlaps steps), and its substeps. */
   private stepping: boolean = false
   private steppingSteps: number = 0
+  /** The poses in `poses` are from a step an apply finished early (see apply): the next frame writes them, not zero. */
+  private held: boolean = false
   private settlePending: boolean = false
   /** Since the kick: whether a step has seen the kicked world awake, steps taken, and simTime at the kick. */
   private woke: boolean = false
@@ -840,6 +852,7 @@ export class WorldSim {
     if (this.stepping) { this.engine.stepEnd() }
     this.stepping = false
     this.steppingSteps = 0
+    this.held = false
     this.engine.reset()
     this.index.clear()
     this.names = []
@@ -861,12 +874,21 @@ export class WorldSim {
 
   /** Bring the engine from the world it had to next, by the diff between them (diffWorld). */
   apply(diff: WorldDiff, next: WorldSpec): void {
+    // A step still running belongs to the world before this apply: finish it now, while its engine indices still name
+    // the bodies it moved (removing frees an index and creating takes it again) and before a kick restarts the count of
+    // steps since the kick. Its poses are kept for the next frame, less those of the bodies this apply removes.
+    if (this.stepping) {
+      this.finishStep()
+      this.held = true
+    }
     let first = this.spec === null
     if (first || diff.tableChanged || diff.floorChanged) { this.buildGround(next) }
-    for (let id of diff.remove) { this.removeBody(id) }
+    let freed = new Set<number>()
+    for (let id of diff.remove) { this.removeBody(id, freed) }
+    for (let b of diff.recreate) { this.removeBody(b.id, freed) }
+    if (this.held && freed.size > 0) { this.dropPoses(freed) }
     let created: BodySpec[] = []
     for (let b of diff.recreate) {
-      this.removeBody(b.id)
       this.createBody(b)
       created.push(b)
     }
@@ -897,7 +919,7 @@ export class WorldSim {
       }
       kicked.add(b.id)
     }
-    let resting = restingAtStart(next, created, kicked)
+    let resting = created.length > 0 ? restingAtStart(next, created, kicked, this.standing(next, created)) : []
     for (let id of resting) {
       let i = this.index.get(id)
       if (i !== undefined) { this.engine.sleep(i) }
@@ -906,6 +928,7 @@ export class WorldSim {
     if (kicked.size > 0) {
       // A new throw: whatever the last one had not yet told is superseded, and this one settles once, after its bodies
       // have been seen awake (see step).
+      this.events = this.events.filter((e: SimEvent): boolean => e.kind !== 'settled')
       this.kickSerial++
       this.lastKickBodies = kicked.size
       this.settlePending = true
@@ -931,12 +954,29 @@ export class WorldSim {
    * awake poses land in `poses`, and hits and settling become events.
    */
   step(elapsedMs: number, timeS: number): void {
-    this.poseCount = 0
-    this.stepMs = 0
-    // An engine that overlaps steps ran the last one while the frame was drawn: its poses, hits and settling are this
-    // frame's. The world shows one step behind the clock, a sixtieth of a second, and the UI thread spends none of it.
+    this.collect()
+    this.advance(elapsedMs, timeS)
+  }
+
+  /**
+   * The first half of a frame: what the step begun last did lands in `poses` and the events. An engine that overlaps
+   * steps ran it while the frame was drawn, so the world shows one step behind the clock, a sixtieth of a second, and
+   * the UI thread spends none of it. Between collect and advance no step runs: that is where the events go to the
+   * program, so a handler that changes the world is applied without waiting on the step thread.
+   */
+  collect(): void {
+    if (this.held) {
+      this.held = false
+    } else {
+      this.poseCount = 0
+      this.stepMs = 0
+    }
     if (this.stepping) { this.finishStep() }
-    if (this.spec === null || this.loose.length === 0) { return }
+  }
+
+  /** The second half of a frame: the kinematic bodies are moved and the next step begun (finished at once, or by collect). */
+  advance(elapsedMs: number, timeS: number): void {
+    if (this.stepping || this.spec === null || this.loose.length === 0) { return }
     this.carry += Math.min(SIM_MAX_ELAPSED_MS, Math.max(0, elapsedMs)) / 1000
     let n = Math.floor(this.carry / SIM_STEP_S + 1e-9)
     if (n <= 0) { return }
@@ -1144,9 +1184,38 @@ export class WorldSim {
     return this.random !== null ? this.random as RandomSource : seededRandom(fnv32(seed))
   }
 
-  private removeBody(id: string): void {
+  /** Loose bodies from earlier applies still standing as they were built, where they are now (see restingAtStart). */
+  private standing(next: WorldSpec, created: BodySpec[]): Map<string, number[]> {
+    let fresh = new Set<string>()
+    for (let b of created) { fresh.add(b.id) }
+    let out = new Map<string, number[]>()
+    for (let b of next.bodies) {
+      if (b.motion !== 'loose' || fresh.has(b.id)) { continue }
+      let i = this.index.get(b.id)
+      if (i === undefined || this.engine.readPose(i, this.one) !== 1 || knockedOver(b, this.one)) { continue }
+      out.set(b.id, [this.one[0], this.one[1], this.one[2]])
+    }
+    return out
+  }
+
+  /** Poses held from an early finish lose those of freed indices: the index may name a new body by the next frame. */
+  private dropPoses(freed: Set<number>): void {
+    let p = this.poses
+    let kept = 0
+    for (let k = 0; k < this.poseCount; k++) {
+      if (freed.has(Math.round(p[k * 8]))) { continue }
+      if (kept !== k) {
+        for (let j = 0; j < 8; j++) { p[kept * 8 + j] = p[k * 8 + j] }
+      }
+      kept++
+    }
+    this.poseCount = kept
+  }
+
+  private removeBody(id: string, freed: Set<number> | null = null): void {
     let i = this.index.get(id)
     if (i === undefined) { return }
+    if (freed !== null) { freed.add(i) }
     this.engine.remove(i)
     this.index.delete(id)
     this.setName(i, '')

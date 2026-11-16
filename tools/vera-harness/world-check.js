@@ -897,6 +897,65 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
       assert.equal(engine.begun - engine.ended, 1, 'one step in flight at the end of a frame, the rest collected')
       late.sim.reset()
       assert.equal(engine.begun, engine.ended, 'reset collects the step in flight')
+      // A frame is collect, then the program hears the events, then advance: in between no step runs, so a handler
+      // that changes the world is applied without waiting on the step thread.
+      {
+        const {sim, a, b} = dropped(engine)
+        sim.apply(S.diffWorld(a, b), b)
+        sim.step(FRAME_MS, 0)
+        assert.equal(engine.begun - engine.ended, 1, 'a step in flight after a frame')
+        sim.collect()
+        assert.equal(engine.begun, engine.ended, 'collect finishes it')
+        sim.advance(FRAME_MS, 1 / 60)
+        assert.equal(engine.begun - engine.ended, 1, 'advance begins the next')
+        sim.reset()
+      }
+      // An apply while a step runs finishes that step first, while the engine's indices still name its bodies: a
+      // knock it saw is not told of the body that takes the freed index in this apply.
+      {
+        class Contacting extends Overlapping {
+          constructor() { super(); this.fake = -1 }
+          drainContacts(out) {
+            if (this.fake < 0) return super.drainContacts(out)
+            out[0] = this.fake; out[1] = -1; out[2] = 5
+            this.fake = -1
+            return 1
+          }
+        }
+        const eng = new Contacting()
+        const sim = new P.WorldSim(eng)
+        const one = id => S.decodeScene(new VeraArrayValue([call('floor', 'surface'),
+          call('loose', call('box', id, 0, 0.05, 0, 0.1, 0.1, 0.1, 'ink'), 1)]))
+        const x = one('x')
+        const y = one('y')
+        sim.apply(S.diffWorld(null, x), x)
+        sim.step(FRAME_MS, 0)
+        let ix = -1
+        for (let i = 0; i < 16; i++) if (sim.idAt(i) === 'x') ix = i
+        assert.ok(ix >= 0, 'x has an index')
+        eng.fake = ix
+        sim.apply(S.diffWorld(x, y), y)
+        let iy = -1
+        for (let i = 0; i < 16; i++) if (sim.idAt(i) === 'y') iy = i
+        assert.equal(iy, ix, 'y took the index x freed (the case this guards)')
+        const told = []
+        for (let f = 1; f < 30; f++) { sim.step(FRAME_MS, f / 60); for (const e of sim.takeEvents()) if (e.kind === 'hit') told.push(e) }
+        assert.ok(told.every(e => e.body !== 'y' && !e.bodies.includes('y')), 'no hit names y: ' + JSON.stringify(told.map(e => e.body)))
+      }
+    }
+    // A block added on top of a tower built in an earlier state rests on it, as one built with it would.
+    {
+      const tower = n => S.decodeScene(new VeraArrayValue([call('floor', 'surface'),
+        ...Array.from({length: n}, (_, k) => call('loose', call('box', 'b' + k, 0, 0.05 + 0.1 * k, 0, 0.1, 0.1, 0.1, 'ink'), 1))]))
+      const sim = new P.WorldSim(new P.FakePhys())
+      const t3 = tower(3)
+      sim.apply(S.diffWorld(null, t3), t3)
+      assert.equal(sim.restingCount, 3, 'the tower is built resting')
+      for (let f = 0; f < 30; f++) sim.step(FRAME_MS, f / 60)
+      const t4 = tower(4)
+      sim.apply(S.diffWorld(t3, t4), t4)
+      assert.equal(sim.restingCount, 1, 'the block added on top later rests too')
+      assert.equal(sim.awake, 0, 'and nothing is awake')
     }
     // Five presses, each after the last settle (as on the phone): five settles, each delivered to the state of its own
     // throw, which then shows the faces it was told.

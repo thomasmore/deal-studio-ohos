@@ -298,6 +298,8 @@ export class WorldBox {
   private floorNodes: Node[] = []
   private serial: number = 0
   private timeS: number = 0
+  /** The elapsed time of the frame begun last, for advance. */
+  private frameMs: number = 0
   private carry: MotionCarry = new MotionCarry()
   private pose: CameraPose | null = null
   private width: number = 0
@@ -353,16 +355,18 @@ export class WorldBox {
   }
 
   /**
-   * One display frame, elapsedMs after the last: the orbiting and spinning bodies move to where they are now. Returns
-   * whether it wants more frames.
+   * The first half of one display frame, elapsedMs after the last: the orbiting and spinning bodies move to where they
+   * are now, and what the physics step begun last frame did lands on the nodes and in the events. No step runs until
+   * advance, so the events can go to the program (and its changes be applied) in between without waiting on one.
    */
-  frame(elapsedMs: number): boolean {
-    if (this.destroyed) { return false }
+  frame(elapsedMs: number): void {
+    if (this.destroyed) { return }
     this.timeS += elapsedMs / 1000
+    this.frameMs = elapsedMs
     this.writeKinematic()
     let sim = this.sim
     if (sim !== null) {
-      sim.step(elapsedMs, this.timeS)
+      sim.collect()
       this.stepMs += sim.stepMs
       this.awake = sim.awake
       this.mostContacts = Math.max(this.mostContacts, sim.mostContacts)
@@ -376,7 +380,12 @@ export class WorldBox {
         this.queue(e)
       }
     }
-    return this.needsFrames()
+  }
+
+  /** The second half of the frame: the next physics step begins, on its own thread, while the frame is drawn. */
+  advance(): void {
+    if (this.destroyed || this.retired || this.sim === null) { return }
+    (this.sim as WorldSim).advance(this.frameMs, this.timeS)
   }
 
   /** The poses of the bodies the engine moved this frame, and no others. */
@@ -458,8 +467,11 @@ export class WorldBox {
     // Dice thrown here draw from Math.random, so no two throws are alike (the host's checks seed them instead).
     let made = new WorldSim(engine, (): number => Math.random())
     made.reset()
+    // Only a trigger that changed in this apply throws. On the box's first apply (prev null) every non-zero trigger
+    // is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the dice by
+    // itself and overwrite the faces the state keeps.
     let full = diffWorld(null, next)
-    if (prev !== null) { full.kick = diff.kick }
+    full.kick = prev !== null ? diff.kick : []
     made.apply(full, next)
     this.sim = made
     this.noteKick(made)

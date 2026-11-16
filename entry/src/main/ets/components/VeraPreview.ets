@@ -1218,7 +1218,8 @@ export struct VeraPreview {
 
   /**
    * One frame for every world, then what they told the program -- hits, settling -- at most WORLD_EVENTS_PER_FRAME of it
-   * (the rest waits in each box for the next frame), each through the field-action queue as a tap's is. Every two seconds
+   * (the rest waits in each box for the next frame), each through the field-action queue as a tap's is, and only then
+   * the next physics step of each. Every two seconds
    * a VERA-WORLD line: frames, bodies, loose bodies awake, the ms spent writing poses and stepping the physics.
    */
   private tickWorlds(now: number, elapsed: number): void {
@@ -1244,7 +1245,10 @@ export struct VeraPreview {
         }
       }
     }
+    // Told between the end of each world's last step and the start of its next, so a handler that changes a world has
+    // it applied with no step running: the UI thread does not wait on the step thread for it.
     this.dispatchWorldEvents()
+    for (let box of Array.from(this.worlds.values())) { box.advance() }
     if (this.worldReportAt === 0) { this.worldReportAt = now }
     this.worldFrames += 1
     if (now - this.worldReportAt < 2000) { return }
@@ -1672,14 +1676,23 @@ export struct VeraPreview {
     if (inputs.size === 0 && this.surfaceInputs.get(node) === inputs) { this.surfaceInputs.delete(node) }
   }
 
-  /** The scene of a world node, made the first time it is asked for (reconcileWorlds makes it before the tree is drawn). */
-  private worldBox(node: LiveNode): WorldBox {
+  /**
+   * The scene of a world node, as reconcileWorlds made it before the tree was drawn. Only reconcileWorlds makes or
+   * retires one: a draw of a node it has already retired finds none here, and must not put a new box in the map that no
+   * reconcile would ever retire.
+   */
+  private worldOptions(node: LiveNode): SceneOptions | null {
     let box = this.worlds.get(node)
-    if (box === undefined) {
-      box = new WorldBox()
-      this.worlds.set(node, box)
-    }
-    return box
+    return box !== undefined ? box.options : null
+  }
+
+  /** The box of a node drawn with worldOptions non-null, in the same draw. */
+  private drawnWorld(node: LiveNode): WorldBox {
+    return this.worlds.get(node) as WorldBox
+  }
+
+  private worldBackdropReady(box: WorldBox): () => void {
+    return () => { box.backdropShown() }
   }
 
   private worldShown(box: WorldBox, shown: boolean): () => void {
@@ -1695,7 +1708,8 @@ export struct VeraPreview {
   }
 
   private worldArea(node: LiveNode, now: Area): void {
-    this.worldBox(node).setSize(Number(now.width), Number(now.height), this.getUIContext().vp2px(1))
+    let box = this.worlds.get(node)
+    if (box !== undefined) { box.setSize(Number(now.width), Number(now.height), this.getUIContext().vp2px(1)) }
     if ((node.style === 'fill' || node.style === 'full') && node !== this.fullWorld) {
       this.fitFill(node, Number(now.globalPosition.y), Number(now.height))
     }
@@ -5187,21 +5201,21 @@ export struct VeraPreview {
         })
     } else if (node.kind === 'world') {
       // The program describes this world (reconcileWorlds) and its box moves it; the tree only gives it a place.
-      if (this.worldBox(node).options !== null) {
+      if (this.worldOptions(node) !== null) {
         Stack({ alignContent: Alignment.TopStart }) {
           // What is behind the world, under the scene: the sky, its stars, the trails and the halos of glowing bodies
           // (WorldBox.paintBackdrop), which the scene, see-through then, lets through round its bodies. Empty otherwise.
-          Canvas(this.worldBox(node).backdrop)
+          Canvas(this.drawnWorld(node).backdrop)
             .width('100%')
             .height('100%')
             .hitTestBehavior(HitTestMode.Transparent)
-            .onReady(() => { this.worldBox(node).backdropShown() })
-          Component3D(this.worldBox(node).options as SceneOptions)
+            .onReady(this.worldBackdropReady(this.drawnWorld(node)))
+          Component3D(this.worldOptions(node) as SceneOptions)
             .width('100%')
             .height('100%')
             // The box drawn, not the node's box when the callback runs: a retired box has left the map by then.
-            .onAppear(this.worldShown(this.worldBox(node), true))
-            .onDisAppear(this.worldShown(this.worldBox(node), false))
+            .onAppear(this.worldShown(this.drawnWorld(node), true))
+            .onDisAppear(this.worldShown(this.drawnWorld(node), false))
             .onAreaChange((_old: Area, now: Area) => { this.worldArea(node, now) })
             .onTouch((event: TouchEvent) => { this.worldTouch(node, event) })
             // A drag that turns the camera, or flicks a body, is the world's, not the page's; otherwise the page scrolls through it.
@@ -5211,9 +5225,9 @@ export struct VeraPreview {
               return box !== undefined && (box.orbits() || (node.action.length > 0 && box.holdsDrag()))
                 ? GestureJudgeResult.CONTINUE : GestureJudgeResult.REJECT
             })
-          if (this.worldBox(node).note.length > 0) {
+          if (this.drawnWorld(node).note.length > 0) {
             // Not an error: the world is shown, it just does not move (a build without physics).
-            Text(this.worldBox(node).note)
+            Text(this.drawnWorld(node).note)
               .fontSize(12)
               .fontColor(this.t().inkSoft)
               .padding(8)

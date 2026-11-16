@@ -144,7 +144,6 @@ public:
         free_.clear();
         reported_.clear();
         lastActive_.clear();
-        simSinceVelocity_ = 0;
         contacts_.clear();
     }
 
@@ -197,6 +196,7 @@ public:
         s.home[3] = q.GetX(); s.home[4] = q.GetY(); s.home[5] = q.GetZ(); s.home[6] = q.GetW();
         BI().SetPositionAndRotation(s.id, JPH::RVec3(px, py, pz), q,
                                     s.kind == kStatic ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
+        s.awakeFor = 0;
     }
 
     // Mass applies to dynamic bodies only (inertia is rescaled with it).
@@ -216,7 +216,7 @@ public:
         }
     }
 
-    // Sets both velocities and wakes the body; restarts the 8 s sleep cap.
+    // Sets both velocities and wakes the body; restarts its 8 s sleep cap.
     void setVelocity(int i, float vx, float vy, float vz, float wx, float wy, float wz)
     {
         if (!Valid(i)) {
@@ -224,7 +224,7 @@ public:
         }
         BI().SetLinearAndAngularVelocity(bodies_[i].id, JPH::Vec3(vx, vy, vz), JPH::Vec3(wx, wy, wz));
         BI().ActivateBody(bodies_[i].id);
-        simSinceVelocity_ = 0;
+        bodies_[i].awakeFor = 0;
     }
 
     // Puts a dynamic body to sleep where it is, as if it had come to rest there: it stays put until
@@ -255,14 +255,21 @@ public:
             return;
         }
         system_->Update(dt, std::max(substeps, 1), temp_.get(), jobs_.get());
-        simSinceVelocity_ += dt;
         std::vector<int> moved;
         ApplyBound(moved);
-        if (simSinceVelocity_ > kSleepCapSeconds) {
-            for (size_t i = 0; i < bodies_.size(); i++) {
-                if (bodies_[i].alive && bodies_[i].kind == kDynamic) {
-                    BI().DeactivateBody(bodies_[i].id);
-                }
+        // The sleep cap is per body: one awake for kSleepCapSeconds in a row (jittering, or kept
+        // awake by a neighbour that never rests) is put to sleep. Its time restarts whenever it
+        // sleeps or is placed, created or kicked, so a new body or one woken by a push still moves.
+        for (size_t i = 0; i < bodies_.size(); i++) {
+            Slot &s = bodies_[i];
+            if (!s.alive || s.kind != kDynamic) {
+                continue;
+            }
+            if (!BI().IsActive(s.id)) {
+                s.awakeFor = 0;
+            } else if ((s.awakeFor += dt) > kSleepCapSeconds) {
+                BI().DeactivateBody(s.id);
+                s.awakeFor = 0;
             }
         }
         // Report what is active now, what was active a step ago (its final pose), and what was reset.
@@ -349,6 +356,7 @@ private:
         JPH::BodyID id;
         int kind = 0;
         bool alive = false;
+        float awakeFor = 0;  // seconds awake in a row, for the sleep cap
         float home[7] = {0, 0, 0, 0, 0, 0, 1};
     };
 
@@ -456,6 +464,7 @@ private:
         slot.id = body->GetID();
         slot.kind = kind;
         slot.alive = true;
+        slot.awakeFor = 0;
         const float home[7] = {0, 0, 0, 0, 0, 0, 1};
         std::copy(home, home + 7, slot.home);
         if (kind == kDynamic) {
@@ -504,7 +513,6 @@ private:
     std::vector<int> free_;
     std::vector<int> reported_;
     std::vector<int> lastActive_;
-    float simSinceVelocity_ = 0;
     float minY_ = -50.0f;
     float halfX_ = 100.0f;
     float halfZ_ = 100.0f;
