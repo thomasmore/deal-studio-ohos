@@ -40,6 +40,16 @@ export interface PhysEngine {
   moveKinematic(i: number, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number, dt: number): void
   /** Milliseconds the step took. */
   step(dt: number, substeps: number): number
+  /**
+   * Whether the engine can run a step while the caller goes on (stepBegin, then stepEnd a frame later). The native one
+   * can: the step runs on its own thread while the frame is drawn, and anything else the caller asks of the engine
+   * waits for it first.
+   */
+  overlaps(): boolean
+  /** Starts a step of dt seconds in substeps; an engine that does not overlap steps runs it here. */
+  stepBegin(dt: number, substeps: number): void
+  /** Waits for the step begun last and returns the milliseconds it took. */
+  stepEnd(): number
   /** Records of 8 floats [index, px, py, pz, qx, qy, qz, qw] for the bodies that moved in the last step; returns how many. */
   readAwake(out: Float32Array): number
   /** px, py, pz, qx, qy, qz, qw of one body; 1, or 0 when there is no such body. */
@@ -446,6 +456,15 @@ export class FakePhys implements PhysEngine {
     this.snap(b)
   }
 
+  private stepTook: number = 0
+  overlaps(): boolean { return false }
+  stepBegin(dt: number, substeps: number): void { this.stepTook = this.step(dt, substeps) }
+  stepEnd(): number {
+    let ms = this.stepTook
+    this.stepTook = 0
+    return ms
+  }
+
   step(dt: number, substeps: number): number {
     if (dt <= 0) { return 0 }
     let n = Math.max(1, Math.floor(substeps))
@@ -701,6 +720,27 @@ function kindOf(b: BodySpec): number {
   return PHYS_STATIC
 }
 
+/** How far a body must have moved, as a share of its smallest side, to count as knocked from where it was built. */
+const KNOCKED_MOVE: number = 0.5
+/** How far it must have turned, in degrees, to count as tipped over. */
+const KNOCKED_TURN_DEG: number = 25
+
+/**
+ * Whether a loose body at rest (pose [x, y, z, qx, qy, qz, qw]) no longer stands as it was built: moved more than half
+ * its smallest side from where it started, or turned more than KNOCKED_TURN_DEG. What "settled" tells for a body that is
+ * not a die, so a game of knocking things over can count what fell.
+ */
+export function knockedOver(b: BodySpec, pose: Float32Array): boolean {
+  let dx = pose[0] - b.position[0]
+  let dy = pose[1] - b.position[1]
+  let dz = pose[2] - b.position[2]
+  let side = Math.max(0.001, Math.min(b.dims[0], b.dims[1], b.dims[2]))
+  if (Math.sqrt(dx * dx + dy * dy + dz * dz) > side * KNOCKED_MOVE) { return true }
+  let q = quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2])
+  let dot = Math.abs(q[0] * pose[3] + q[1] * pose[4] + q[2] * pose[5] + q[3] * pose[6])
+  return 2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI > KNOCKED_TURN_DEG
+}
+
 /**
  * A world's physics: which body is which engine index, what a WorldDiff does to the engine, the fixed-step clock,
  * kinematic bodies along their orbits, and the events -- `hit` from the engine's contacts, `settled` once every loose
@@ -744,6 +784,9 @@ export class WorldSim {
   /** Loose bodies the last apply started asleep because they were built resting (restingAtStart). */
   restingCount: number = 0
 
+  /** A step begun and not yet finished (an engine that overlaps steps), and its substeps. */
+  private stepping: boolean = false
+  private steppingSteps: number = 0
   private settlePending: boolean = false
   /** Since the kick: whether a step has seen the kicked world awake, steps taken, and simTime at the kick. */
   private woke: boolean = false
@@ -794,6 +837,9 @@ export class WorldSim {
 
   /** Empty the engine and forget every body. */
   reset(): void {
+    if (this.stepping) { this.engine.stepEnd() }
+    this.stepping = false
+    this.steppingSteps = 0
     this.engine.reset()
     this.index.clear()
     this.names = []
@@ -887,6 +933,9 @@ export class WorldSim {
   step(elapsedMs: number, timeS: number): void {
     this.poseCount = 0
     this.stepMs = 0
+    // An engine that overlaps steps ran the last one while the frame was drawn: its poses, hits and settling are this
+    // frame's. The world shows one step behind the clock, a sixtieth of a second, and the UI thread spends none of it.
+    if (this.stepping) { this.finishStep() }
     if (this.spec === null || this.loose.length === 0) { return }
     this.carry += Math.min(SIM_MAX_ELAPSED_MS, Math.max(0, elapsedMs)) / 1000
     let n = Math.floor(this.carry / SIM_STEP_S + 1e-9)
@@ -908,8 +957,19 @@ export class WorldSim {
         this.engine.moveKinematic(i, p[0], p[1], p[2], q[0], q[1], q[2], q[3], dt)
       }
     }
-    this.stepMs = this.engine.step(dt, n)
+    this.engine.stepBegin(dt, n)
     this.simTime += dt
+    this.stepping = true
+    this.steppingSteps = n
+    if (!this.engine.overlaps()) { this.finishStep() }
+  }
+
+  /** What the step begun last did: the awake poses, the knocks, and whether a throw has settled. */
+  private finishStep(): void {
+    let n = this.steppingSteps
+    this.stepping = false
+    this.steppingSteps = 0
+    this.stepMs = this.engine.stepEnd()
     this.poseCount = Math.max(0, this.engine.readAwake(this.poses))
     this.collectHits()
     this.awake = this.engine.awakeDynamic()
@@ -937,8 +997,8 @@ export class WorldSim {
       let i = this.index.get(b.id)
       if (i === undefined) { continue }
       let value = 0
-      if (b.isDie && this.engine.readPose(i, this.one) === 1) {
-        value = topFace(this.one[3], this.one[4], this.one[5], this.one[6])
+      if (this.engine.readPose(i, this.one) === 1) {
+        value = b.isDie ? topFace(this.one[3], this.one[4], this.one[5], this.one[6]) : (knockedOver(b, this.one) ? 1 : 0)
       }
       e.bodies.push(b.id)
       e.values.push(value)

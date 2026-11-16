@@ -48,6 +48,12 @@ export const physMoveKinematic: (i: number, px: number, py: number, pz: number, 
  */
 export const physStep: (dt: number, substeps?: number) => number
 /**
+ * physStep on a thread of its own: returns at once. Every other function waits for it to finish first, so the world
+ * is never touched while it runs; physStepEnd waits for it and returns the milliseconds it took (0 if none ran).
+ */
+export const physStepBegin: (dt: number, substeps?: number) => void
+export const physStepEnd: () => number
+/**
  * Writes 8 floats per body that moved in the last step (awake, just fell asleep, or reset by the
  * bound) into out: index, px, py, pz, qx, qy, qz, qw. Returns the number of bodies written
  * (at most out.length / 8), or -1 if out is not a Float32Array.

@@ -21,6 +21,7 @@
 import { RuntimeValue, VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraArrayValue, VeraObjectValue,
   RuntimeTrap } from './VeraInterpreter'
 import { GfxParam, GfxFunction, GFX_ROLES } from './VeraGfx'
+import { SURFACE_PATTERNS, surfacePattern } from './VeraSurfaces'
 
 /** Class identities of the module's two types, as the compiler names them. */
 export const SCENE_THING: string = 'std/scene:Thing'
@@ -74,6 +75,15 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'the thing\'s starting rotation, in degrees about x, y and z: a tilted box, a fallen pillar'),
   new GfxFunction('glow', [thing()], 'thing',
     'the thing shines by itself and casts no shadow: a sun, a lamp, a light'),
+  new GfxFunction('paint', [thing(), str('pattern'), new GfxParam('color2', 'color')], 'thing',
+    'a ball\'s surface: pattern drawn in the ball\'s own colour and color2, so it reads as what it is -- ' +
+    SURFACE_PATTERNS.map((p: string[]): string => '"' + p[0] + '" ' + p[1]).join('; ') +
+    '. With scene.spin the pattern turns, so the ball is seen turning'),
+  new GfxFunction('rings', [thing(), num('inner'), num('outer'), color()], 'thing',
+    'flat rings round the thing\'s equator from radius inner to outer (metres from its centre), tilted and carried with it: ' +
+    'a ringed planet\'s rings (about 1.3 to 2.3 times its radius)'),
+  new GfxFunction('mark', [thing(), color()], 'thing',
+    'a thin ring round the thing that marks it, in the colour (the accent): the planet or body the person selected'),
   new GfxFunction('bounce', [thing(), num('restitution'), num('friction')], 'thing',
     'how the thing bounces (0 dead .. 1 rubber; 0.3 by default) and grips (0 ice .. 1 rubber; 0.6 by default)'),
 ]
@@ -134,6 +144,15 @@ export class SceneThing {
   ry: number = 0
   rz: number = 0
   glow: boolean = false
+  /** scene.paint: the surface pattern and its second colour ('' for a plain body). */
+  pattern: string = ''
+  color2: string = ''
+  /** scene.rings: inner and outer radius (0, 0 for none) and their colour. */
+  ringInner: number = 0
+  ringOuter: number = 0
+  ringColor: string = ''
+  /** scene.mark: the colour of the ring that marks the body ('' for none). */
+  mark: string = ''
 
   copy(): SceneThing {
     let t = new SceneThing()
@@ -143,6 +162,8 @@ export class SceneThing {
     t.motion = this.motion; t.mass = this.mass; t.restitution = this.restitution; t.friction = this.friction
     t.kick = this.kick; t.orbit = this.orbit; t.spinPeriodS = this.spinPeriodS
     t.rx = this.rx; t.ry = this.ry; t.rz = this.rz; t.glow = this.glow
+    t.pattern = this.pattern; t.color2 = this.color2
+    t.ringInner = this.ringInner; t.ringOuter = this.ringOuter; t.ringColor = this.ringColor; t.mark = this.mark
     return t
   }
 }
@@ -327,6 +348,40 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
       t.glow = true
       return wrap(t)
     }
+    case 'paint': {
+      let t = asBody(args, 'paint')
+      let pattern = asStr(args, 1)
+      if (!surfacePattern(pattern)) {
+        throw new RuntimeTrap('R0029', 'scene.paint has no pattern "' + pattern + '": use one of ' +
+          SURFACE_PATTERNS.map((p: string[]): string => '"' + p[0] + '"').join(', '))
+      }
+      if (t.kind !== 'sphere') {
+        throw new RuntimeTrap('R0029', 'scene.paint paints a sphere; "' + t.id + '" is a ' + t.kind)
+      }
+      t.pattern = pattern
+      t.color2 = asStr(args, 2)
+      return wrap(t)
+    }
+    case 'rings': {
+      let t = asBody(args, 'rings')
+      let inner = positive(asNum(args, 1, 'inner'), 'inner')
+      let outer = asNum(args, 2, 'outer')
+      let radius = Math.max(t.w, t.h, t.d) / 2
+      if (!(outer > inner) || inner <= radius * 0.9) {
+        throw new RuntimeTrap('R0029', 'scene.rings of "' + t.id + '" go from inner to outer, both beyond its radius ' +
+          radius.toString() + ' and outer more than inner; got ' + inner.toString() + ' to ' + outer.toString())
+      }
+      t.ringInner = inner
+      t.ringOuter = outer
+      t.ringColor = asStr(args, 3)
+      return wrap(t)
+    }
+    case 'mark': {
+      let t = asBody(args, 'mark')
+      let c = asStr(args, 1)
+      t.mark = c.length > 0 ? c : 'accent'
+      return wrap(t)
+    }
     case 'bounce': {
       let t = asBody(args, 'bounce')
       t.restitution = Math.max(0, Math.min(1, asNum(args, 1, 'restitution')))
@@ -402,6 +457,14 @@ export class BodySpec {
   spinPeriodS: number = 0
   glow: boolean = false
   isDie: boolean = false
+  /** scene.paint's pattern and second colour; '' for a plain body. */
+  pattern: string = ''
+  color2: string = ''
+  /** scene.rings: [inner, outer] in metres, or [] for none, and their colour. */
+  rings: number[] = []
+  ringColor: string = ''
+  /** scene.mark's colour, '' for none. */
+  mark: string = ''
 }
 
 export class WorldSpec {
@@ -428,6 +491,11 @@ function bodySpec(t: SceneThing): BodySpec {
   b.spinPeriodS = t.spinPeriodS
   b.glow = t.glow
   b.isDie = t.kind === 'die'
+  b.pattern = t.pattern
+  b.color2 = t.color2
+  b.rings = t.ringOuter > 0 ? [t.ringInner, t.ringOuter] : []
+  b.ringColor = t.ringColor
+  b.mark = t.mark
   return b
 }
 
@@ -554,8 +622,10 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
       continue
     }
     kept.add(b.id)
+    // A painted body's colours are in its mesh, so a new colour, pattern, rings or mark makes it again.
     if (old.shape !== b.shape || old.isDie !== b.isDie || !sameNumbers(old.dims, b.dims) || old.motion !== b.motion ||
-        old.mass !== b.mass) {
+        old.mass !== b.mass || old.pattern !== b.pattern || old.color2 !== b.color2 || !sameNumbers(old.rings, b.rings) ||
+        old.ringColor !== b.ringColor || old.mark !== b.mark || (b.pattern.length > 0 && old.color !== b.color)) {
       diff.recreate.push(b)
     } else {
       if (old.color !== b.color || old.glow !== b.glow || old.restitution !== b.restitution || old.friction !== b.friction) {
@@ -662,7 +732,8 @@ export function describeSceneForPrompt(): string {
     'swipe a drag that started on body (speed is how fast), hit bodies knocking together, told at most four times a second: ' +
     'bodies every body knocked since the last hit and values how hard each was knocked (m/s), body and other the hardest pair ' +
     'and speed its speed; settled every ' +
-    'loose body come to rest after a throw (bodies are the dice ids and values the face each shows, 1..6). body is "" for a tap on ' +
+    'loose body come to rest after a throw (bodies the ids; values the face each die shows, 1..6, and for any other body 1 when ' +
+    'it was knocked from where it was built, moved or tipped over, else 0). body is "" for a tap on ' +
     'empty space')
   lines.push('  Wrappers take a thing and return it changed, so they nest: scene.kick(scene.loose(scene.die("d1", 0, 0.5, 0, 0.3, "white"), 1), ' +
     'state.throws, 2, 3, 0, 2). Without loose, kick, orbit or spin a body never moves.')

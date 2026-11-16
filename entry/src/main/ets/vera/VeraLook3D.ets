@@ -179,6 +179,86 @@ export function tableColor(t: ResolvedTheme, color: string, dieColors: string[])
   return base
 }
 
+// ---------------------------------------------------------------- space: a world with neither table nor floor
+
+/** The colour of space behind a world with neither table nor floor (a solar system), whatever the theme. */
+export const SPACE_BACKGROUND: string = '#060a16'
+/** Ambient light in space with a sun in it: the night side of a planet is dark but still shows its colour. */
+export const SPACE_AMBIENT: number = 0.12
+/** The candela of each of the sun's spot lights (SPACE_SUN_SPOTS of them): a planet 2 m out is lit about as look B's sun lights. */
+export const SPACE_SUN_CANDELA: number = 70
+/** Spot lights in a glowing sun, looking out level along +x, +z, -x, -z: together a light that shines all round in the plane of the orbits. */
+export const SPACE_SUN_SPOTS: number = 4
+/** Their cones, in radians: full strength to 40 degrees off the axis, none past 50, so neighbours cross-fade at 45. */
+export const SPACE_SPOT_INNER: number = 0.70
+export const SPACE_SPOT_OUTER: number = 0.87
+/** Stars painted behind a world in space, and the ring points per orbit drawn. */
+export const SPACE_STARS: number = 1400
+export const ORBIT_RING_POINTS: number = 72
+
+/** Whether a world floats in space: no table and no floor. Space is dark, starry, its orbits drawn and its sun shines all round. */
+export function worldInSpace(spec: WorldSpec): boolean {
+  return spec.table === null && spec.floor === null
+}
+
+/**
+ * The directions of the stars, the same every time: [x, y, z, brightness 0..1, size 0..1] with x, y, z a unit vector,
+ * spread evenly over the sphere (a golden-angle spiral) and jittered by a fixed hash so they do not line up.
+ */
+export function starField(n: number): number[][] {
+  let out: number[][] = []
+  let golden = Math.PI * (3 - Math.sqrt(5))
+  let h = 0x9e3779b9
+  let next = (): number => {
+    h = Math.imul(h ^ (h >>> 15), 2246822519) >>> 0
+    h = Math.imul(h ^ (h >>> 13), 3266489917) >>> 0
+    h = (h ^ (h >>> 16)) >>> 0
+    return h / 4294967296
+  }
+  for (let i = 0; i < n; i++) {
+    let y = 1 - 2 * (i + 0.5) / n
+    let r = Math.sqrt(Math.max(0, 1 - y * y))
+    let a = i * golden + next() * 0.6
+    let jy = Math.max(-1, Math.min(1, y + (next() - 0.5) * 0.04))
+    let jr = Math.sqrt(Math.max(0, 1 - jy * jy))
+    out.push([Math.cos(a) * (r > 0 ? jr : 0), jy, Math.sin(a) * (r > 0 ? jr : 0), 0.25 + 0.75 * Math.pow(next(), 2.2), next()])
+  }
+  return out
+}
+
+/**
+ * The orbits to draw as rings: [cx, cy, cz, radius] for each orbit whose centre does not move itself (a planet's round
+ * the sun; a moon's round a moving planet is left out). An orbit is level (orbitPositions), so its ring is a circle in
+ * the plane y = cy. Rings of one radius round one centre are drawn once.
+ */
+export function orbitRings(spec: WorldSpec): number[][] {
+  let byId = new Map<string, BodySpec>()
+  for (let b of spec.bodies) { byId.set(b.id, b) }
+  let seen = new Set<string>()
+  let out: number[][] = []
+  for (let b of spec.bodies) {
+    let o = b.orbit
+    if (o === null || Math.abs(o.radius) < 1e-6) { continue }
+    let c = byId.get(o.centre)
+    if (c === undefined || c.orbit !== null) { continue }
+    let key = o.centre + ':' + Math.abs(o.radius).toFixed(4)
+    if (seen.has(key)) { continue }
+    seen.add(key)
+    out.push([c.position[0], c.position[1], c.position[2], Math.abs(o.radius)])
+  }
+  return out
+}
+
+/** The glowing bodies that do not move (a sun), where a halo is painted and a sun's light stands: [x, y, z, radius]. */
+export function worldSuns(spec: WorldSpec): number[][] {
+  let out: number[][] = []
+  for (let b of spec.bodies) {
+    if (!b.glow || b.orbit !== null || b.motion === 'loose') { continue }
+    out.push([b.position[0], b.position[1], b.position[2], Math.max(b.dims[0], b.dims[1], b.dims[2]) / 2])
+  }
+  return out
+}
+
 /** Whether something in the world glows: then the light follows the eye (LOOK_GLOW_AMBIENT). */
 export function worldGlows(spec: WorldSpec): boolean {
   for (let b of spec.bodies) { if (b.glow) { return true } }
@@ -287,7 +367,8 @@ export function worldBounds(spec: WorldSpec): number[] | null {
   for (let b of spec.bodies) { byId.set(b.id, b) }
   let spheres: number[][] = []
   for (let b of spec.bodies) {
-    let half = Math.sqrt(b.dims[0] * b.dims[0] + b.dims[1] * b.dims[1] + b.dims[2] * b.dims[2]) / 2
+    let half = Math.max(Math.sqrt(b.dims[0] * b.dims[0] + b.dims[1] * b.dims[1] + b.dims[2] * b.dims[2]) / 2,
+      b.rings.length === 2 ? b.rings[1] : 0)
     // An orbiting body may be anywhere on a ring round its centre, which may itself be anywhere on one: the chain's root
     // and the sum of the radii bound it.
     let at: BodySpec = b
@@ -355,7 +436,90 @@ export function defaultCamera(spec: WorldSpec, aspect: number): CameraPose {
   return pose
 }
 
-/** The camera the world is seen through: the program's, or the default one. */
+/** How much of the box's half-width and half-height a fitted world may fill: a little room round its edge. */
+const FIT_FILL: number = 0.92
+/** Points on a ring an orbit may take a body round, for fitting it in view. */
+const FIT_RING_POINTS: number = 24
+
+/**
+ * Points everything in the world stays inside wherever its orbits take it: the corners of a box round each body, a ring
+ * of points round the centre of each orbiting chain (orbits are level), the corners of the table's parts. Loose bodies
+ * count where they start.
+ */
+export function worldFitPoints(spec: WorldSpec): number[][] {
+  let byId = new Map<string, BodySpec>()
+  for (let b of spec.bodies) { byId.set(b.id, b) }
+  let points: number[][] = []
+  let cube = (c: number[], h: number[]): void => {
+    for (let i = 0; i < 8; i++) {
+      points.push([c[0] + ((i & 1) ? h[0] : -h[0]), c[1] + ((i & 2) ? h[1] : -h[1]), c[2] + ((i & 4) ? h[2] : -h[2])])
+    }
+  }
+  for (let b of spec.bodies) {
+    let half = Math.max(Math.sqrt(b.dims[0] * b.dims[0] + b.dims[1] * b.dims[1] + b.dims[2] * b.dims[2]) / 2,
+      b.rings.length === 2 ? b.rings[1] : 0)
+    let at: BodySpec = b
+    let reach = 0
+    let steps = 0
+    while (steps < spec.bodies.length) {
+      let o = at.orbit
+      if (o === null) { break }
+      reach += Math.abs(o.radius)
+      let centre = byId.get(o.centre)
+      if (centre === undefined) { break }
+      at = centre
+      steps++
+    }
+    if (reach <= 0) {
+      // A body set square is its own box (a flat disc is not a ball as wide as it); a turned or spinning one, the box round its ball.
+      let square = b.spinPeriodS === 0 && b.rings.length === 0 && b.rotation[0] === 0 && b.rotation[1] === 0 && b.rotation[2] === 0
+      cube(b.position, square ? [b.dims[0] / 2, b.dims[1] / 2, b.dims[2] / 2] : [half, half, half])
+      continue
+    }
+    let r = reach + half
+    for (let i = 0; i < FIT_RING_POINTS; i++) {
+      let a = 2 * Math.PI * i / FIT_RING_POINTS
+      let x = at.position[0] + r * Math.cos(a)
+      let z = at.position[2] + r * Math.sin(a)
+      points.push([x, at.position[1] + half, z])
+      points.push([x, at.position[1] - half, z])
+    }
+  }
+  if (spec.table !== null) {
+    for (let part of tableParts(spec.table as TableSpec)) {
+      cube([part[0], part[1], part[2]], [part[3] / 2, part[4] / 2, part[5] / 2])
+    }
+  }
+  return points
+}
+
+/**
+ * How far from look along the direction to the eye the eye must stand for every point to fall inside a box of this
+ * aspect (width / height), seen through a vertical field of view fov. A point at depth q + D along the view, off it by x
+ * across and y up, fits when |x| <= (q + D) tan(fov/2) aspect and |y| <= (q + D) tan(fov/2): one bound on D per point.
+ */
+export function fitDistance(eye: number[], look: number[], points: number[][], aspect: number, fov: number): number {
+  let pose = new CameraPose()
+  pose.eye = eye
+  pose.look = look
+  let basis = cameraBasis(pose)
+  let tanY = Math.tan(fov / 2) * FIT_FILL
+  let tanX = tanY * (aspect > 0 ? aspect : 1)
+  let need = 0
+  for (let p of points) {
+    let d = sub3(p, look)
+    let q = dot3(d, basis[0])
+    need = Math.max(need, Math.abs(dot3(d, basis[1])) / tanX - q, Math.abs(dot3(d, basis[2])) / tanY - q)
+  }
+  return need
+}
+
+/**
+ * The camera the world is seen through: the program's, or the default one. The program's camera keeps where it looks
+ * from and at, but stands back as far as it takes for the whole world to fit the box: a camera written for a wide view
+ * would otherwise cut off the outer planets on a tall phone screen. It never comes nearer than the program put it, and
+ * a camera facing away from the world is left as written.
+ */
 export function worldCamera(spec: WorldSpec, aspect: number): CameraPose {
   if (spec.camera === null) { return defaultCamera(spec, aspect) }
   let c = spec.camera as CameraSpec
@@ -364,8 +528,20 @@ export function worldCamera(spec: WorldSpec, aspect: number): CameraPose {
   pose.look = [c.lookX, c.lookY, c.lookZ]
   pose.orbit = c.orbit
   let d = sub3(pose.eye, pose.look)
+  let distance = Math.sqrt(dot3(d, d))
   let bounds = worldBounds(spec)
-  planes(pose, Math.sqrt(dot3(d, d)), bounds !== null ? bounds[3] : 1)
+  // Only a camera that looks at the world is fitted: stepping back would bring a world behind the eye into view and hide
+  // a camera pointed the wrong way, which the play check tells the model about (P0002).
+  let facing = bounds !== null && distance > 1e-6 && dot3(sub3([bounds[0], bounds[1], bounds[2]], pose.eye), d) < 0
+  if (facing) {
+    let need = fitDistance(pose.eye, pose.look, worldFitPoints(spec), aspect, pose.fov)
+    if (need > distance) {
+      let k = need / distance
+      pose.eye = [pose.look[0] + d[0] * k, pose.look[1] + d[1] * k, pose.look[2] + d[2] * k]
+      distance = need
+    }
+  }
+  planes(pose, distance, bounds !== null ? bounds[3] : 1)
   return pose
 }
 

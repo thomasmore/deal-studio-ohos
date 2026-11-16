@@ -18,33 +18,49 @@ Describe the world; never animate it:
 
 The shape of the program:
 - view(state) returns ui.AppTheme(preset, "", [ui.Column("default", [ui.Header(...), ui.World("default", 0, "build",
-  "onWorld"), ui.Text(...) with the result, ui.Button(...) for what the person does])]). Use style "fill" for a world
-  that should take the whole screen below the header. The result -- the dice total, the planet tapped, the hits --
-  is a ui.Text under the world, not drawn in it.
+  "onWorld"), ui.Text(...) with the result, ui.Button(...) for what the person does])]). The result -- the dice total,
+  the planet tapped, the hits -- is a ui.Text under the world, not drawn in it.
+- Choose the World's style from the request. "full" when the world is the app, something to watch and explore -- a
+  solar system, a simulation, a scene to turn round, or whenever full screen or immersive is asked for: it opens over
+  the whole screen with the Header's title small in its corner and the text of the ui.Text after it as a caption over
+  its bottom -- no buttons: those are on the normal screen, a tap on the corner button away. So the main thing of a
+  full world is done by touching the world (tap a planet to name it, drag to turn the view), its result is one short
+  ui.Text("body", ...) line, and Buttons are extras (speed, reset). Keep the Header all the same: it names the app,
+  and is shown in full on the normal screen. "fill" for a game played with the controls under it (dice, knocking a wall
+  over): the world takes the screen between the Header and them. "default" for a small world among other content.
+  Every world has a corner button that opens it full screen and back, so the person can always choose.
 - onWorld(state: AppState, e: scene.Event): AppState hears the world: e.kind is "tap" (a finger on e.body, "" for empty
   space), "swipe" (a flick of e.body; e.x, e.z its direction along the floor, e.speed how fast), "hit" (knocks, told at most
   four times a second: e.bodies every body knocked since the last hit, e.values how hard each was knocked in m/s, e.body
   knocked into e.other the hardest of them at e.speed; count e.bodies.length() or keep the hardest, nothing more) or
-  "settled" (every loose body at rest after a throw; e.bodies the ids, e.values the face each die shows, 0 for a body
-  that is not a die). Return the state unchanged for the kinds it does not use: then nothing is built or drawn again.
+  "settled" (every loose body at rest after a throw; e.bodies the ids, e.values the face each die shows, and for a body
+  that is not a die 1 when it was knocked from where it was built -- moved or tipped over -- and 0 when it still
+  stands). Nothing else is told: not where a body is, not whether it left the table. Score from these (hits, faces,
+  blocks knocked over), and count a settled body once, from that event, not from hits. Return the state unchanged for
+  the kinds it does not use: then nothing is built or drawn again.
 - A Button does the main thing too (Throw, Shoot, Build again), so the app works without knowing where to tap.
 
 Scale, units and placement:
 - Units are metres and y is up; the floor or the table top is y = 0. A die is about 0.16, a toy block 0.1, a ball 0.1 to
-  0.2 across; a table for dice is about 1.2 by 0.9. Planets are not to scale: a sun of radius 0.6, planets 0.05 to 0.2,
-  orbits 1 to 4 apart, periods of a few seconds to a minute.
+  0.2 across; a table for dice is about 1.2 by 0.9. Planets are not to scale: a sun of radius 0.5, planets of radius
+  0.1 to 0.25, orbits 0.9 to 3.5 from the sun and never further (a phone screen is narrow: a wider system is shown
+  small), periods of a few seconds to a minute.
 - A body of height h stands on the ground at y = h / 2. Bodies never start inside one another or under y = 0: a row of
-  cubes of side s is s apart, a stack is s higher each level. Loose bodies start over the table or floor, near x = 0,
+  cubes of side s is s apart, a stack is s higher each level. Dice and balls are not a wall: start them about 1.5
+  sides apart, so they read as separate things before the first throw. Loose bodies start over the table or floor, near x = 0,
   z = 0; with a table, inside its width and depth.
 - Every body has an id of its own (ids built with ui.numberToString in loops), at most 300 bodies; a wall or a pile
   of about 100 loose bodies is plenty.
+- There are no lines, rings or outlines in 3D: a cylinder is a solid disc, so never draw an orbit's path or a ring
+  with one. A world in space (no table, no floor) is shown dark and starry, its orbits drawn as faint rings and its
+  glowing sun lighting each planet's day side, all by the host: never add stars, a dark backdrop or ring bodies.
 - Colours: theme roles (accent, warning, danger, surface, ink ...) or "#rrggbb". Give dice white or one strong colour,
   planets their own colours, a stack two alternating colours.
 
 The camera: scene.camera(x, y, z, lookX, lookY, lookZ, orbit) stands back from the bodies and above them, looking at
 their middle: for a scene about s metres across, about 2 s away and 1 to 1.5 s up. Dice on a 1.2 m table: (0, 1.25,
-0.85) looking at (0, 0, 0). A wall 1 m wide: (1.6, 1.0, 2.2) looking at (0, 0.4, 0). A solar system 8 m across: (0, 4.5, 8)
-looking at the sun. orbit true lets a drag on empty space turn the view, good for a model to look round; false for dice.
+0.85) looking at (0, 0, 0). A wall 1 m wide: (1.6, 1.0, 2.2) looking at (0, 0.4, 0). A solar system: (0, 7, 5)
+looking at the sun, from high up so the orbits use the tall screen. orbit true lets a drag on empty space turn the view, good for a model to look round; false for dice.
 Leave the camera out and the host frames everything.
 
 Kinds of 3D app:
@@ -54,11 +70,20 @@ Kinds of 3D app:
   the total and the faces; show "Rolling..." while state.throws is ahead of the throw last read.
 - Knocking things over: a scene.floor, a wall, a tower or dominoes of loose boxes standing on each other, and a ball
   thrown at it by scene.kick from a Button (a new id per shot, so each shot is a fresh ball where it is written). "Build
-  again" adds 1 to state.round so every block comes back under new ids.
+  again" adds 1 to state.round so every block comes back under new ids. On "settled", the blocks knocked over are the
+  e.values that are 1 among the blocks' ids (leave out the ball's); that is the score of the shot.
 - Falling and stacking: loose bodies made in the air over the floor fall when they are created; a Button adds one more
   (a count in the state, its id carrying the count).
-- Orbits: no floor or table (the world floats in space), a scene.glow sun, each planet scene.spin(scene.orbit(sphere,
-  "sun", radius, periodS, phaseDeg), dayS), a moon orbiting its planet. A tap names the planet (e.body) in the state.
+- Orbits: no floor or table (the world floats in space), a scene.glow sun, each planet scene.orbit(scene.spin(...,
+  dayS), "sun", radius, periodS, phaseDeg), a moon orbiting its planet. Make every body look like what it is with
+  scene.paint: choose the pattern by the kind of surface it has (seas and land, a gas giant's bands or great storm,
+  craters, rock, polar ice, thick cloud) and give its colours. A real star, planet or moon has its real colours and
+  surface as you know them, whatever palette the design names; invented colours are for made-up worlds. Give a ringed
+  planet scene.rings (1.3 to 2.3 times its radius). Spin each planet once every few seconds so its surface is seen
+  turning, and give a real planet its real axial tilt with scene.turn(thing, 0, 0, degrees) inside the spin:
+  spin(turn(paint(sphere(...), pattern, colour2), 0, 0, tilt), dayS). Wrap the planet the person tapped
+  (state.selected === its id) in scene.mark(thing, "accent") -- never recolour it, its colours say what it is -- and
+  the Text says its name and facts.
 - A single 3D object to look at or turn: a static box or sphere with scene.spin, an orbiting camera, and Buttons that
   change its colour or size in the state.
 

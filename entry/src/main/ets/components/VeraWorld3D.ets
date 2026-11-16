@@ -27,17 +27,66 @@
 
 import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, GeometryDefinition, CubeGeometry, SphereGeometry, CylinderGeometry,
   PlaneGeometry, Material, MaterialType, MetallicRoughnessMaterial, UnlitMaterial, Vec2, Vec3, Vec4, Quaternion, Node, Geometry,
-  MeshResource, EnvironmentBackgroundType, PostProcessSettings, RaycastResult, RaycastParameters, Color } from '@kit.ArkGraphics3D'
+  MeshResource, EnvironmentBackgroundType, PostProcessSettings, RaycastResult, RaycastParameters, Color, SpotLight, CustomGeometry,
+  PrimitiveTopology } from '@kit.ArkGraphics3D'
 import { WorldSpec, BodySpec, WorldDiff, diffWorld, orbitPositions } from '../vera/VeraScene'
+import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
 import { PhysEngine, WorldSim, SimEvent } from '../vera/VeraPhysics'
 import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physRemove, physSetPose,
-  physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physStep, physReadAwake, physReadPose, physDrainContacts,
+  physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose, physDrainContacts,
   physAwakeDynamic } from 'libphys.so'
 import { ResolvedTheme } from '../vera/VeraTheme'
 import { LOOK_SUN_INTENSITY, LOOK_SUN_POSITION, LOOK_SUN_TARGET, sunFor, LOOK_SHADOWS, LOOK_AMBIENT, LOOK_FOV, LOOK_FLOOR_ROLE,
   LOOK_TABLE_ROLE, LOOK_PIP_ROLE, LOOK_BACKGROUND_ROLE, TABLE_TOP_THICKNESS, PIP_RADIUS, lookLinear, lookColorKey, quatXYZ,
   lookAtQuat, CameraPose, worldCamera, orbitEye, tableParts, floorSize, pipLayout, floorColor, tableColor, worldGlows,
-  LOOK_GLOW_AMBIENT, floorGain, floorBaseLinear, linearHex, FLOOR_ROUGHNESS, FLOOR_METALLIC, FLOOR_SPECULAR, projectPoint, metresPerVp, floorDirection } from '../vera/VeraLook3D'
+  LOOK_GLOW_AMBIENT, floorGain, floorBaseLinear, linearHex, FLOOR_ROUGHNESS, FLOOR_METALLIC, FLOOR_SPECULAR, projectPoint, metresPerVp, floorDirection,
+  SPACE_BACKGROUND, SPACE_AMBIENT, SPACE_SUN_CANDELA, SPACE_SUN_SPOTS, SPACE_SPOT_INNER, SPACE_SPOT_OUTER, SPACE_STARS, ORBIT_RING_POINTS,
+  worldInSpace, starField, orbitRings, worldSuns, lookRgba, srgbToLinear } from '../vera/VeraLook3D'
+
+/** A SurfaceMesh as the kit's geometry: its colours turned from sRGB to the linear values a vertex colour is. */
+function customGeometry(m: SurfaceMesh): CustomGeometry {
+  let g = new CustomGeometry()
+  g.topology = PrimitiveTopology.TRIANGLE_LIST
+  let vertices: Vec3[] = []
+  let normals: Vec3[] = []
+  let colors: Color[] = []
+  for (let i = 0; i < m.positions.length; i += 3) {
+    vertices.push({ x: m.positions[i], y: m.positions[i + 1], z: m.positions[i + 2] })
+    normals.push({ x: m.normals[i], y: m.normals[i + 1], z: m.normals[i + 2] })
+    colors.push({ r: srgbToLinear(m.colors[i]), g: srgbToLinear(m.colors[i + 1]), b: srgbToLinear(m.colors[i + 2]), a: 1 })
+  }
+  g.vertices = vertices
+  g.normals = normals
+  g.colors = colors
+  g.indices = m.indices
+  return g
+}
+
+/**
+ * Painted spheres already worked out, by everything that decides their colours: marking a planet or drawing its world
+ * again makes the body again, and its surface (noise at every vertex) should not be worked out again with it.
+ */
+const PAINTED: Map<string, CustomGeometry> = new Map<string, CustomGeometry>()
+const PAINTED_KEEP: number = 48
+
+function paintedGeometry(b: BodySpec, theme: ResolvedTheme): CustomGeometry {
+  let c1 = lookRgba(theme, b.color, 'ink')
+  let c2 = lookRgba(theme, b.color2.length > 0 ? b.color2 : b.color, 'ink')
+  let key = [b.id, b.pattern, (b.dims[0] / 2).toFixed(4), c1.join(','), c2.join(',')].join('|')
+  let known = PAINTED.get(key)
+  if (known !== undefined) { return known }
+  let made = customGeometry(paintedSphere(b.dims[0] / 2, b.pattern, c1, c2, surfaceSeed(b.id)))
+  if (PAINTED.size >= PAINTED_KEEP) { PAINTED.delete(PAINTED.keys().next().value as string) }
+  PAINTED.set(key, made)
+  return made
+}
+
+/** The stars of every world in space: the same sky each time. */
+const STARS: number[][] = starField(SPACE_STARS)
+/** How far off a star is drawn, in metres: far enough that walking the camera round a solar system does not move it. */
+const STAR_DISTANCE: number = 500
+/** A sun's halo on screen, as a multiple of its radius there. */
+const HALO_SCALE: number = 2.6
 
 /** Bodies made per frame while a world fills in. */
 const BATCH: number = 20
@@ -89,6 +138,10 @@ class NativePhys implements PhysEngine {
     physMoveKinematic(i, px, py, pz, qx, qy, qz, qw, dt)
   }
   step(dt: number, substeps: number): number { return physStep(dt, substeps) }
+  /** The step runs on the library's own thread while the frame is drawn (phys_stepper.h). */
+  overlaps(): boolean { return true }
+  stepBegin(dt: number, substeps: number): void { physStepBegin(dt, substeps) }
+  stepEnd(): number { return physStepEnd() }
   readAwake(out: Float32Array): number { return physReadAwake(out) }
   readPose(i: number, out: Float32Array): number { return physReadPose(i, out) }
   drainContacts(out: Float32Array): number { return physDrainContacts(out) }
@@ -198,6 +251,17 @@ export class WorldBox {
   private light: Light | null = null
   private env: Environment | null = null
   private glows: boolean = false
+  /**
+   * A world with neither table nor floor: dark, starry, its orbits drawn, and lit from its sun. The backdrop is a canvas
+   * over the scene (touches pass through it) with the orbit rings, the stars and each sun's halo, painted when the
+   * camera, the box or the world changes -- not per frame: nothing in it moves by itself.
+   */
+  space: boolean = false
+  readonly backdrop: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true))
+  private backdropReady: boolean = false
+  /** The sun's spot lights in space (SPACE_SUN_SPOTS), made the first time a world needs them. */
+  private spots: Light[] = []
+  private spotsMade: boolean = false
   private sim: WorldSim | null = null
   /** The sim's kickSerial when last looked at, and Date.now() when that throw was applied (for the VERA-WORLD lines). */
   private kickSeen: number = 0
@@ -404,13 +468,16 @@ export class WorldBox {
     this.events = kept
   }
 
-  /** The box Component3D was laid out in, in vp, and px per vp; a world with the default camera is framed again for it. */
+  /**
+   * The box Component3D was laid out in, in vp, and px per vp. The world is framed again for it: the default camera fits
+   * the box, and the program's stands back if the world no longer fits (worldCamera).
+   */
   setSize(width: number, height: number, density: number): void {
     this.density = density > 0 ? density : 1
     if (Math.abs(width - this.width) < 1 && Math.abs(height - this.height) < 1) { return }
     this.width = width
     this.height = height
-    if (this.applied !== null && this.applied.camera === null && this.cam !== null) { this.resetCamera(this.applied) }
+    if (this.applied !== null && this.cam !== null) { this.resetCamera(this.applied) } else { this.paintBackdrop() }
   }
 
   appeared(): void {
@@ -736,10 +803,18 @@ export class WorldBox {
     this.applyPhysics(prev, diff, next)
     let glows = worldGlows(next)
     let glowsChanged = glows !== this.glows
-    if (glowsChanged) {
+    let space = worldInSpace(next)
+    let spaceChanged = space !== this.space
+    this.space = space
+    if (space && worldSuns(next).length > 0 && !this.spotsMade) {
+      await this.makeSpots()
+      if (this.destroyed) { return }
+    }
+    if (glowsChanged || spaceChanged) {
       this.glows = glows
       this.writeLight()
     }
+    if (spaceChanged && !themeChanged) { this.writeBackground(theme) }
     this.showing = next
     this.showingMoves = hasKinematic(next)
     if (themeChanged) {
@@ -764,7 +839,8 @@ export class WorldBox {
     let recolour: BodySpec[] = themeChanged ? next.bodies.filter((b: BodySpec): boolean => !fresh.has(b.id)) : diff.material
     for (let b of recolour) {
       let known = this.bodies.get(b.id)
-      if (known === undefined) { continue }
+      // A painted ball's colours are its mesh's (diffWorld makes it again when they change).
+      if (known === undefined || (b.shape === 'sphere' && b.pattern.length > 0)) { continue }
       let material = await this.material(b.color, b.glow, theme, 'ink')
       if (this.destroyed) { return }
       this.paint(known.node, material)
@@ -798,12 +874,18 @@ export class WorldBox {
     this.applied = next
     this.appliedTheme = theme
     this.writeKinematic()
+    // A sun moved or came, a ring was added: the light and the backdrop follow the world as applied.
+    if (this.space) {
+      this.writeLight()
+      this.paintBackdrop()
+    }
   }
 
   private writeBackground(theme: ResolvedTheme): void {
     if (this.cam === null) { return }
-    let c = lookLinear(theme, LOOK_BACKGROUND_ROLE, LOOK_BACKGROUND_ROLE)
-    let clear: Color = { r: c[0], g: c[1], b: c[2], a: 1 }
+    // In space the scene is clear and the backdrop under it paints space, its stars and rings, so the bodies hide them.
+    let c = this.space ? lookLinear(theme, SPACE_BACKGROUND, LOOK_BACKGROUND_ROLE) : lookLinear(theme, LOOK_BACKGROUND_ROLE, LOOK_BACKGROUND_ROLE)
+    let clear: Color = { r: this.space ? 0 : c[0], g: this.space ? 0 : c[1], b: this.space ? 0 : c[2], a: this.space ? 0 : 1 }
     this.cam.clearColor = clear
   }
 
@@ -884,9 +966,12 @@ export class WorldBox {
     if (rf === null || this.destroyed) { return }
     this.serial++
     let name = 'b' + this.serial.toString()
-    let material = await this.material(b.color, b.glow, theme, 'ink')
+    // A painted ball carries its colours in its vertices, under a white material; anything else is one colour.
+    let painted = b.shape === 'sphere' && b.pattern.length > 0
+    let material = painted ? await this.vertexMaterial(b.glow) : await this.material(b.color, b.glow, theme, 'ink')
     if (this.destroyed) { return }
-    let node = await this.node(rf, name, this.shapeOf(b), material)
+    let geometry: GeometryDefinition = painted ? paintedGeometry(b, theme) : this.shapeOf(b)
+    let node = await this.node(rf, name, geometry, material)
     if (this.destroyed) { return }
     let entry = new BodyNode(b, node)
     this.place(entry, b)
@@ -901,6 +986,38 @@ export class WorldBox {
     this.bodies.set(b.id, entry)
     this.byName.set(name, b.id)
     if (b.isDie) { await this.addPips(rf, entry, theme) }
+    if (b.rings.length === 2) {
+      await this.addRing(rf, entry, flatRing(b.rings[0], b.rings[1], lookRgba(theme, b.ringColor, 'surface'), 1, surfaceSeed(b.id)))
+    }
+    if (b.mark.length > 0) {
+      let r = Math.max(b.dims[0], b.dims[1], b.dims[2]) / 2
+      let out = b.rings.length === 2 ? b.rings[1] : r
+      // Wide enough to see round a small planet: at least 3 cm of ring, a little way out from it.
+      let inner = out * 1.25
+      await this.addRing(rf, entry, flatRing(inner, inner + Math.max(0.03, out * 0.3), lookRgba(theme, b.mark, 'accent'), 0, 0))
+    }
+  }
+
+  /** A ring as a child of its body, so it goes, tilts and turns with it: unlit, so its colour holds edge-on to the sun. */
+  private async addRing(rf: SceneResourceFactory, entry: BodyNode, mesh: SurfaceMesh): Promise<void> {
+    let material = await this.vertexMaterial(true)
+    if (this.destroyed) { return }
+    this.serial++
+    let ring = await this.node(rf, 'r' + this.serial.toString(), customGeometry(mesh), material)
+    if (this.destroyed || this.bodies.get(entry.spec.id) !== entry) { return }
+    entry.node.children.append(ring)
+    entry.names.push(ring.name)
+    this.byName.set(ring.name, entry.spec.id)
+  }
+
+  /** The white material a vertex-coloured mesh is drawn with: lit, or unlit for a glowing ball and for rings. */
+  private vertexMaterial(unlit: boolean): Promise<Material> {
+    let key = unlit ? 'vertex:unlit' : 'vertex:lit'
+    let known = this.materials.get(key)
+    if (known !== undefined) { return known }
+    let made = this.makeMaterial(key, [1, 1, 1, 1], unlit, false)
+    this.materials.set(key, made)
+    return made
   }
 
   /** Small dark spheres on the die's faces, children of it, so they turn with it. Faces as pipLayout. */
@@ -1031,6 +1148,91 @@ export class WorldBox {
     cam.farPlane = pose.far
     // The sun keeps its place beside the camera, so shadows stay in view as the camera turns.
     this.writeLight()
+    this.paintBackdrop()
+  }
+
+  /** The sun's spot lights, off until writeLight puts them in a sun. Without shadows: four shadow maps would cost the frame. */
+  private async makeSpots(): Promise<void> {
+    this.spotsMade = true
+    let rf = this.rf
+    if (rf === null) { return }
+    for (let k = 0; k < SPACE_SUN_SPOTS; k++) {
+      let light = await rf.createLight({ name: 'sunspot' + k.toString() }, LightType.SPOT)
+      if (this.destroyed) { return }
+      let spot = light as SpotLight
+      spot.innerAngle = SPACE_SPOT_INNER
+      spot.outerAngle = SPACE_SPOT_OUTER
+      spot.shadowEnabled = false
+      spot.enabled = false
+      spot.intensity = 0
+      this.spots.push(spot)
+    }
+  }
+
+  /** The backdrop canvas is on screen and can be painted. */
+  backdropShown(): void {
+    this.backdropReady = true
+    this.paintBackdrop()
+  }
+
+  /**
+   * Space's backdrop, over the scene: the orbit rings (faint, so a planet crossing one still reads), the stars (each a
+   * direction, drawn where it lands far off, so they wheel with the camera and never move with the planets), and a halo
+   * round each sun. Cleared and left empty for a world on a table or a floor.
+   */
+  paintBackdrop(): void {
+    if (!this.backdropReady || this.width <= 0 || this.height <= 0) { return }
+    let ctx = this.backdrop
+    ctx.clearRect(0, 0, this.width, this.height)
+    let spec = this.applied !== null ? this.applied : this.showing
+    let pose = this.pose
+    if (!this.space || spec === null || pose === null) { return }
+    let w = this.width
+    let h = this.height
+    ctx.globalAlpha = 1
+    ctx.fillStyle = SPACE_BACKGROUND
+    ctx.fillRect(0, 0, w, h)
+    for (let star of STARS) {
+      let p = [pose.eye[0] + star[0] * STAR_DISTANCE, pose.eye[1] + star[1] * STAR_DISTANCE, pose.eye[2] + star[2] * STAR_DISTANCE]
+      let at = projectPoint(pose, w, h, p)
+      if (at === null || at[0] < 0 || at[1] < 0 || at[0] > w || at[1] > h) { continue }
+      ctx.globalAlpha = star[3]
+      ctx.fillStyle = '#ffffff'
+      ctx.beginPath()
+      ctx.arc(at[0], at[1], 0.35 + star[4] * star[3] * 1.0, 0, 2 * Math.PI)
+      ctx.fill()
+    }
+    ctx.globalAlpha = 1
+    ctx.strokeStyle = 'rgba(190, 205, 255, 0.22)'
+    ctx.lineWidth = 1
+    for (let ring of orbitRings(spec)) {
+      ctx.beginPath()
+      let open = false
+      for (let i = 0; i <= ORBIT_RING_POINTS; i++) {
+        let a = 2 * Math.PI * i / ORBIT_RING_POINTS
+        let at = projectPoint(pose, w, h, [ring[0] + ring[3] * Math.cos(a), ring[1], ring[2] - ring[3] * Math.sin(a)])
+        if (at === null) {
+          open = false
+          continue
+        }
+        if (open) { ctx.lineTo(at[0], at[1]) } else { ctx.moveTo(at[0], at[1]) }
+        open = true
+      }
+      ctx.stroke()
+    }
+    for (let sun of worldSuns(spec)) {
+      let at = projectPoint(pose, w, h, [sun[0], sun[1], sun[2]])
+      if (at === null) { continue }
+      let r = sun[3] / Math.max(1e-6, metresPerVp(pose, h, at[2]))
+      let halo = ctx.createRadialGradient(at[0], at[1], r * 0.85, at[0], at[1], r * HALO_SCALE)
+      halo.addColorStop(0, 'rgba(255, 214, 120, 0.55)')
+      halo.addColorStop(0.35, 'rgba(255, 190, 90, 0.18)')
+      halo.addColorStop(1, 'rgba(255, 170, 60, 0)')
+      ctx.fillStyle = halo
+      ctx.beginPath()
+      ctx.arc(at[0], at[1], r * HALO_SCALE, 0, 2 * Math.PI)
+      ctx.fill()
+    }
   }
 
   /**
@@ -1041,6 +1243,30 @@ export class WorldBox {
     let light = this.light
     let env = this.env
     if (light === null || env === null) { return }
+    // In space with a sun, the sun is the light: its spots shine out all round from where it stands, so each planet has
+    // a day side towards it and a night side away, and the camera's light is off.
+    let suns = this.space && this.applied !== null ? worldSuns(this.applied) :
+      (this.space && this.showing !== null ? worldSuns(this.showing) : [])
+    let fromSun = suns.length > 0 && this.spots.length > 0
+    for (let k = 0; k < this.spots.length; k++) {
+      let spot = this.spots[k]
+      spot.enabled = fromSun
+      spot.intensity = fromSun ? SPACE_SUN_CANDELA : 0
+      if (!fromSun) { continue }
+      let at = suns[0]
+      let a = k * 2 * Math.PI / this.spots.length
+      let target = [at[0] + Math.cos(a), at[1], at[2] + Math.sin(a)]
+      spot.position = v3(at[0], at[1], at[2])
+      spot.rotation = quat(lookAtQuat([at[0], at[1], at[2]], target, [0, 1, 0]))
+    }
+    light.enabled = !fromSun
+    light.intensity = fromSun ? 0 : LOOK_SUN_INTENSITY
+    if (fromSun) {
+      let dim: Vec4 = { x: SPACE_AMBIENT, y: SPACE_AMBIENT, z: SPACE_AMBIENT, w: 1 }
+      env.indirectDiffuseFactor = dim
+      env.indirectSpecularFactor = dim
+      return
+    }
     let ambient = this.glows ? LOOK_GLOW_AMBIENT : LOOK_AMBIENT
     let amb: Vec4 = { x: ambient, y: ambient, z: ambient, w: 1 }
     env.indirectDiffuseFactor = amb

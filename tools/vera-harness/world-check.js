@@ -370,9 +370,77 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
   assert.ok(diceCam.eye[1] > diceCam.look[1], 'and looks down on it')
   const empty = L.defaultCamera(world([]), 1)
   assert.ok(empty.eye.every(Number.isFinite) && empty.near > 0 && empty.far > empty.near, 'an empty world still has a camera')
-  // The program's own camera is used as written.
-  const mine = L.worldCamera(solar, 1)
-  assert.deepEqual([mine.eye, mine.look, mine.orbit], [[0, 4.5, 8], [0, 0, 0], true])
+  // The program's own camera is used as written when the world fits it: the dice on a wide box.
+  const mine = L.worldCamera(dice, 1.5)
+  assert.deepEqual([mine.eye, mine.look, mine.orbit], [[0, 1.25, 0.85], [0, 0, 0], false])
+  assert.equal(L.worldCamera(solar, 1).orbit, true, 'a fitted camera still orbits')
+  // On a tall box it keeps its direction and look point but stands back until every orbit fits (a generated solar
+  // system on the phone lost Neptune off the side); every body is then in view wherever its orbit takes it.
+  for (const aspect of [0.6, 0.45]) {
+    const tall = L.worldCamera(solar, aspect)
+    assert.deepEqual(tall.look, [0, 0, 0], 'the look point stays')
+    const k = tall.eye[0] === 0 && tall.eye[2] !== 0 ? tall.eye[2] / 8 : NaN
+    near(tall.eye[1] / 4.5, k, 1e-9, 'the direction stays')
+    assert.ok(k > 1, 'a tall box moves the camera back, aspect ' + aspect)
+    for (const t of [0, 7, 40]) {
+      const at = S.orbitPositions(solar, t)
+      sees(tall, aspect, solar.bodies.map(b => { const p = at.get(b.id) || b.position; return [p[0], p[1], p[2], Math.hypot(...b.dims) / 2] }),
+        'the fitted camera, aspect ' + aspect + ', t=' + t)
+    }
+  }
+  // Never nearer than written: a camera far back already stays where it is.
+  const far = Object.assign(Object.create(Object.getPrototypeOf(solar)), solar,
+    {camera: Object.assign(Object.create(Object.getPrototypeOf(solar.camera)), solar.camera, {x: 0, y: 40, z: 70})})
+  assert.deepEqual(L.worldCamera(far, 0.5).eye, [0, 40, 70], 'a camera already far enough is left alone')
+  // Space: a world with neither table nor floor. Its rings are the orbits round a centre that does not move (the moon's
+  // round a moving planet is left out), its suns the glowing bodies that stand still, its stars an even, fixed sky.
+  assert.equal(L.worldInSpace(solar), true); assert.equal(L.worldInSpace(dice), false); assert.equal(L.worldInSpace(cubes), false)
+  const rings = L.orbitRings(solar)
+  const planets = solar.bodies.filter(b => b.orbit !== null && b.orbit.centre === 'Sun')
+  assert.equal(rings.length, new Set(planets.map(b => Math.abs(b.orbit.radius).toFixed(4))).size, 'one ring per planet orbit')
+  assert.ok(rings.every(r => r[0] === 0 && r[2] === 0 && r[3] > 0), 'round the sun at the origin')
+  assert.ok(!rings.some(r => Math.abs(r[3] - 0.2) < 1e-9), 'no ring for the moon round the moving Earth')
+  assert.deepEqual(L.worldSuns(solar).map(s => s.slice(0, 3)), [[0, 0, 0]], 'the sun is the one sun')
+  assert.deepEqual(L.worldSuns(dice), [])
+  const stars = L.starField(220)
+  assert.equal(stars.length, 220); assert.deepEqual(L.starField(220), stars, 'the same sky every time')
+  assert.ok(stars.every(st => Math.abs(Math.hypot(st[0], st[1], st[2]) - 1) < 1e-9 && st[3] > 0 && st[3] <= 1), 'unit directions, visible')
+  assert.ok(stars.filter(st => st[1] > 0).length > 90 && stars.filter(st => st[1] < 0).length > 90, 'spread over the whole sphere')
+  // scene.paint, rings and mark: carried to the body, checked, and any change to them makes the body again.
+  {
+    const earth = (pattern, extra = x => x) => world([extra(call('paint', call('sphere', 'e', 0, 0, 0, 0.2, '#1f5fa8'), pattern, '#3f8a3a'))])
+    const e = earth('continents').bodies[0]
+    assert.deepEqual([e.pattern, e.color2, e.rings, e.mark], ['continents', '#3f8a3a', [], ''])
+    traps(() => earth('marble'), 'R0029', /no pattern "marble".*"continents"/, 'an unknown pattern names the ones there are')
+    traps(() => world([call('paint', call('box', 'b', 0, 0, 0, 1, 1, 1, 'ink'), 'bands', 'ink')]), 'R0029', /paints a sphere/)
+    const saturn = world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, '#f0e0b0'), 0.26, 0.46, '#d8c8a0')]).bodies[0]
+    assert.deepEqual([saturn.rings, saturn.ringColor], [[0.26, 0.46], '#d8c8a0'])
+    traps(() => world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, 'ink'), 0.1, 0.4, 'ink')]), 'R0029', /beyond its radius/)
+    traps(() => world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, 'ink'), 0.4, 0.3, 'ink')]), 'R0029', /outer more than inner/)
+    assert.equal(world([call('mark', call('sphere', 'm', 0, 0, 0, 0.1, 'ink'), '')]).bodies[0].mark, 'accent', 'a mark is the accent by default')
+    const a = earth('continents'), b = earth('continents', t => call('mark', t, 'accent'))
+    assert.deepEqual(S.diffWorld(a, b).recreate.map(x => x.id), ['e'], 'marking a painted ball makes it again')
+    const recoloured = world([call('paint', call('sphere', 'e', 0, 0, 0, 0.2, '#ffd166'), 'continents', '#3f8a3a')])
+    assert.deepEqual(S.diffWorld(a, recoloured).recreate.map(x => x.id), ['e'], 'a painted ball\'s colour is in its mesh')
+    assert.deepEqual(S.diffWorld(a, earth('continents')).recreate, [], 'the same paint changes nothing')
+    // Rings count in the world's size, so the camera fits them.
+    const ringed = world([call('camera', 0, 0.2, 1, 0, 0, 0, false), call('rings', call('sphere', 's', 0, 0, 0, 0.1, 'ink'), 0.15, 0.6, 'ink')])
+    assert.ok(L.worldBounds(ringed)[3] >= 0.6, 'rings widen the bounds')
+    const V = loadVera('VeraSurfaces')
+    const sph = V.paintedSphere(1, 'continents', [0.12, 0.37, 0.66], [0.25, 0.54, 0.23], 7)
+    assert.equal(sph.positions.length, sph.colors.length); assert.equal(sph.indices.length, V.SURFACE_LON * (V.SURFACE_LAT - 1) * 6)
+    const tones = new Set()
+    for (let i = 0; i < sph.colors.length; i += 3) tones.add(sph.colors[i + 2] > 0.9 ? 'ice' : sph.colors[i + 2] > sph.colors[i + 1] ? 'sea' : 'land')
+    assert.deepEqual([...tones].sort(), ['ice', 'land', 'sea'], 'continents has sea, land and polar ice')
+    for (let i = 0; i < sph.indices.length; i += 3) {
+      const P = k => sph.positions.slice(sph.indices[i + k] * 3, sph.indices[i + k] * 3 + 3)
+      const [A, B, C] = [P(0), P(1), P(2)], u = B.map((v, k) => v - A[k]), w = C.map((v, k) => v - A[k])
+      const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]]
+      if (n[0] * A[0] + n[1] * A[1] + n[2] * A[2] <= 0) { assert.fail('a sphere triangle faces inward at ' + i) }
+    }
+    assert.deepEqual(V.paintedSphere(1, 'craters', [0.6, 0.6, 0.6], [0.4, 0.4, 0.4], 3).colors,
+      V.paintedSphere(1, 'craters', [0.6, 0.6, 0.6], [0.4, 0.4, 0.4], 3).colors, 'one id, one surface')
+  }
   // A drag circles the eye round the look point at the same distance, and the tilt stays within its limits.
   const eye2 = L.orbitEye([0, 4.5, 8], [0, 0, 0], 0.7, 0.2, -1.45, 1.45)
   near(Math.hypot(...eye2), Math.hypot(0, 4.5, 8), 1e-9, 'same distance after a drag')
@@ -583,7 +651,7 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
   {
     const steps = []
     const fake = new P.FakePhys()
-    const spy = new Proxy(fake, {get: (o, k) => typeof o[k] === 'function' ? (...a) => { if (k === 'step') steps.push(a); return o[k](...a) } : o[k]})
+    const spy = new Proxy(fake, {get: (o, k) => typeof o[k] === 'function' ? (...a) => { if (k === 'stepBegin') steps.push(a); return o[k](...a) } : o[k]})
     const sim = new P.WorldSim(spy)
     const w = S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', call('sphere', 'm', 0, 1, 0, 0.1, 'ink'), 1)]))
     sim.apply(S.diffWorld(null, w), w)
@@ -623,7 +691,14 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     const {spec: wall} = run('world-cubes')
     assert.ok(knocked(wall) >= 3, 'cubes in the wall were knocked out of place: ' + knocked(wall))
     assert.ok(hits.length <= Math.ceil(4 * 60 / 60 / P.HIT_INTERVAL_S) + 1, 'at most four hits a second: ' + hits.length + ' in 4 s')
-    console.log('world-check: the shot told ' + hits.length + ' hits of ' + total + ' bodies knocked and moved ' + knocked(wall) + ' cubes (FakePhys)')
+    // "settled" tells, for each body that is not a die, whether it was knocked from where it was built.
+    const settle = log.filter(e => e.kind === 'settled').pop()
+    assert.ok(settle !== undefined, 'the shot settles')
+    const over = settle.bodies.filter((id, k) => settle.values[k] === 1)
+    assert.ok(settle.values.every(v => v === 0 || v === 1), 'a box tells 0 or 1: ' + settle.values)
+    assert.ok(over.length >= 3 && over.length < settle.bodies.length, 'some cubes were knocked over, not all: ' + over.length)
+    console.log('world-check: the shot told ' + hits.length + ' hits of ' + total + ' bodies knocked and moved ' + knocked(wall) +
+      ' cubes, ' + over.length + ' knocked over at settle (FakePhys)')
   }
   {
     // The rate, with an engine that reports nine pairs hard every step (and one too soft).
@@ -724,6 +799,38 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
       for (let f = 0; f < 10 * 60; f++) { sim.step(FRAME_MS, f / 60); for (const e of sim.takeEvents()) if (e.kind === 'settled') settles.push(e.kick) }
       assert.deepEqual(settles, [2], 'two throws in quick succession settle once, for the second')
     }
+    {
+      // An engine that overlaps steps (the native one: the step runs on its own thread while the frame is drawn) is read
+      // a frame late. The same throw then settles once, a frame later, on the same faces, and nothing is lost.
+      class Overlapping extends P.FakePhys {
+        constructor() { super(); this.begun = 0; this.ended = 0 }
+        overlaps() { return true }
+        stepBegin(dt, n) { this.begun++; super.stepBegin(dt, n) }
+        stepEnd() { this.ended++; return super.stepEnd() }
+      }
+      const throwOnce = engine => {
+        const {sim, a, b} = dropped(engine)
+        sim.apply(S.diffWorld(a, b), b)
+        const settles = []
+        let poses = 0
+        for (let f = 0; f < 10 * 60; f++) {
+          sim.step(FRAME_MS, f / 60)
+          poses += sim.poseCount
+          for (const e of sim.takeEvents()) if (e.kind === 'settled') settles.push([f, e.kick, e.values.join(',')])
+        }
+        return {settles, poses, sim}
+      }
+      const plain = throwOnce(new P.FakePhys())
+      const engine = new Overlapping()
+      const late = throwOnce(engine)
+      assert.equal(late.settles.length, 1, 'one settle, overlapping: ' + JSON.stringify(late.settles))
+      assert.deepEqual(late.settles.map(x => x.slice(1)), plain.settles.map(x => x.slice(1)), 'the same kick and faces as stepping in place')
+      assert.equal(late.settles[0][0], plain.settles[0][0] + 1, 'told one frame later')
+      assert.ok(late.poses > 0 && Math.abs(late.poses - plain.poses) <= 8, 'the same poses written: ' + late.poses + ' vs ' + plain.poses)
+      assert.equal(engine.begun - engine.ended, 1, 'one step in flight at the end of a frame, the rest collected')
+      late.sim.reset()
+      assert.equal(engine.begun, engine.ended, 'reset collects the step in flight')
+    }
     // Five presses, each after the last settle (as on the phone): five settles, each delivered to the state of its own
     // throw, which then shows the faces it was told.
     {
@@ -744,6 +851,18 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
       assert.deepEqual(seen, settles.map(e => [e.kick, e.values[0] + e.values[1]]), 'each settle ends its own throw, and the program shows its faces')
       assert.equal(state().fields.get('read').value, 5)
     }
+  }
+  // knockedOver: moved more than half the smallest side, or turned more than 25 degrees, from how it was built.
+  {
+    const b = {position: [0, 0.05, 0], dims: [0.1, 0.1, 0.1], rotation: [0, 0, 0]}
+    const pose = (x, y, z, deg) => { const h = deg * Math.PI / 360; return new Float32Array([x, y, z, Math.sin(h), 0, 0, Math.cos(h)]) }
+    assert.equal(P.knockedOver(b, pose(0, 0.05, 0, 0)), false, 'where it was built')
+    assert.equal(P.knockedOver(b, pose(0.04, 0.05, 0, 0)), false, 'nudged 4 cm')
+    assert.equal(P.knockedOver(b, pose(0.06, 0.05, 0, 0)), true, 'pushed 6 cm')
+    assert.equal(P.knockedOver(b, pose(0, 0.05, 0, 20)), false, 'leaning 20 degrees')
+    assert.equal(P.knockedOver(b, pose(0, 0.05, 0, 90)), true, 'on its side')
+    const turned = {position: [0, 0.05, 0], dims: [0.1, 0.1, 0.1], rotation: [90, 0, 0]}
+    assert.equal(P.knockedOver(turned, pose(0, 0.05, 0, 90)), false, 'built on its side and still so')
   }
   // A wall built resting stands still until hit: a hundred cubes, five seconds, nothing moves and nothing knocks.
   {

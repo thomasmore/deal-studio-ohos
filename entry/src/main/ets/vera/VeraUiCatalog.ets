@@ -152,7 +152,7 @@ export const STYLE_SETS: Map<string, string[]> = new Map<string, string[]>([
   // surface: default is as wide as its column and as tall as its proportions; fill also runs to the bottom of the screen.
   ['surface', ['default', 'fill', 'clear', 'cover']],
   // world: default is a box `height` tall (0 = square); fill runs to the bottom of the screen.
-  ['world', ['default', 'fill']],
+  ['world', ['default', 'fill', 'full']],
   ['snackbar', ['default', 'success', 'warning', 'danger']],
   ['sparkline', ['default', 'accent', 'success', 'warning', 'danger']],
 ])
@@ -268,7 +268,10 @@ export const CATALOG: ComponentSpec[] = [
     '',
     'For anything solid in 3D: dice, a cube, bodies that fall, roll, bounce and knock into each other, planets circling a sun. ' +
     'Not for flat games or drawings (ui.Surface) or a card that flips (ui.Transform). height is the box\'s height in points ' +
-    '(0 = as tall as it is wide); style fill runs it to the bottom of the screen. build names function build(state: AppState): ' +
+    '(0 = as tall as it is wide); style fill runs it to the bottom of the screen, above what comes after it; style full opens it ' +
+    'over the whole screen, the title of its Header in the corner and the Texts in its column as a caption over its bottom, the Buttons ' +
+    'left for the normal screen (the person goes back and to full screen again from its corner): for a world to look at, a solar ' +
+    'system or a simulation, worked by touching the world. build names function build(state: AppState): ' +
     'scene.Thing[] that describes the whole world -- camera, table or floor, bodies -- and is called only when the state changes, ' +
     'never per frame: there is no frame function, and the program never moves a body itself. A loose body is moved by physics; ' +
     'an orbit or a spin by the host; a kick throws a loose body each time its trigger number changes. event names function ' +
@@ -280,9 +283,11 @@ export const CATALOG: ComponentSpec[] = [
     'world add 1 to state.throws; on e.kind === "settled" add up e.values into state.total and show it in a ui.Text (also say ' +
     '"rolling" while state.throws is ahead of the throw last read). Cubes: a wall of loose boxes of side 0.1 (y = 0.05, 0.15, ... ' +
     'so they stand on each other, not inside) on a scene.floor, and a ball kicked at it from a Button. Solar system: no floor, ' +
-    'scene.glow(scene.sphere("sun", 0, 0, 0, 0.6, "#ffcc33")), each planet scene.spin(scene.orbit(scene.sphere("earth", 0, 0, 0, ' +
-    '0.12, "#3d7be0"), "sun", 2.2, 12, 0), 2) with periods in proportion, the moon orbiting "earth", and scene.camera(0, 4, 7, ' +
-    '0, 0, 0, true) so a drag turns the view; a tap names the planet (e.body) in state and a ui.Text shows it.'),
+    'a glowing painted sun, each planet painted as what it is (scene.paint, its real colours) and turning on its tilted axis, ' +
+    'scene.orbit(scene.spin(scene.turn(scene.paint(scene.sphere(id, 0, 0, 0, r, colour), pattern, colour2), 0, 0, tilt), dayS), ' +
+    '"sun", radius, periodS, phaseDeg) with periods in proportion and orbits within 3.5, moons orbiting their planets, style full ' +
+    'and scene.camera(0, 7, 5, 0, 0, 0, true) so a drag turns the view; a tap names the planet (e.body) in state, scene.mark ' +
+    'marks it and a ui.Text shows it.'),
   new ComponentSpec('ListItem', 'listitem',
     [style('listitem'), new PropSpec('text', 'string'), new PropSpec('label', 'string'),
       new PropSpec('value', 'string'), new PropSpec('action', 'string'),

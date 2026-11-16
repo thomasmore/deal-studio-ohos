@@ -85,11 +85,15 @@ export const SURFACE_CLASSIFY_PROMPT: string = [
   'they do; score, lives, levels and how the game gets harder; how a round starts and ends; the look, with 4 to 6 hex',
   'colours; portrait (360 by 640) unless landscape clearly suits it better. A named game means its genre and mechanics:',
   'describe your own take, never its levels, characters, names or artwork.',
-  'When engine is "world", design describes the scene instead, at most 10 lines: the table or floor (or none, for space),',
-  'the bodies with their sizes in metres and their colours, what moves by itself (orbits, spins), what a tap, a swipe and',
-  'each button do (throw, shoot, add one, build again), and what the screen shows from what the world tells (the faces',
-  'of the dice and their total, hits, the planet tapped). Nothing moves frame by frame in the program: physics and the',
-  'host move the bodies.',
+  'When engine is "world", design describes the scene instead, at most 10 lines: the table (about 1.2 by 0.9: a bigger',
+  'one makes every body small) or floor, or none for space; the bodies with their sizes in metres and their colours (a die',
+  '0.16, a block 0.1; a sun of radius 0.5, planets of radius 0.1 to 0.25, orbits at most 3.5 from the sun, for the phone',
+  'screen is narrow), a real body (a real star, planet or moon) in its real colours and surface as you know them --',
+  'the design\'s own colours are for made-up worlds and the screen round them; what moves by itself (orbits, spins); what a tap, a swipe and each button do (throw, shoot, add one,',
+  'build again; there is no pinch or zoom, a drag on empty space only turns the view, and there are no lines or orbit',
+  'rings to show or hide); and what the screen shows from what the world tells: the faces of the dice and their total,',
+  'hits, the blocks knocked over, the planet tapped (it never tells where a body is or whether it left the table).',
+  'Nothing moves frame by frame in the program: physics and the host move the bodies.',
   'When surface is "part", scene is one or two plain sentences: what the picture shows, what moves or is touched, what',
   'sets it moving, and what it decides or changes on the screen. title and design are "".',
   'When surface is "none", title, design and scene are "".',
@@ -131,7 +135,9 @@ export function parseSurfaceBrief(text: string): SurfaceBrief | null {
     let engine = raw['engine']
     brief.engine = brief.kind === SURFACE_WHOLE && typeof engine === 'string' && (engine as string).trim().toLowerCase() === ENGINE_WORLD ?
       ENGINE_WORLD : ENGINE_FLAT
-    if (brief.kind === SURFACE_WHOLE && brief.design.length === 0) { return null }
+    // A game needs its design; a 3D world can be written from the request and the world guide alone (the plan model
+    // has answered "world" with an empty design, and refusing it sent a solar system to the 2D composer).
+    if (brief.kind === SURFACE_WHOLE && brief.design.length === 0 && brief.engine !== ENGINE_WORLD) { return null }
     if (brief.kind === SURFACE_PART && brief.scene.length === 0) { return null }
     return brief
   } catch (e) {
@@ -254,7 +260,8 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
   let world = brief.engine === ENGINE_WORLD
   let system = world ? worldLanguage(host.language, host.worldGuide) : surfaceLanguage(host.language, host.surfaceGuide)
   let check: (source: string) => string = world ? checkWorldProgram : checkSurfaceProgram
-  let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + brief.design +
+  let design = brief.design.length > 0 ? brief.design : 'None given: design the scene yourself from the request.'
+  let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + design +
     '\n\nWrite the complete program for it on one ' + (world ? 'ui.World' : 'ui.Surface') + '. Output the source only.'
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
     checkAgent(host)

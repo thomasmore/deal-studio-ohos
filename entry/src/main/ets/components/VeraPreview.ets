@@ -34,6 +34,7 @@ import { displaySync } from '@kit.ArkGraphics2D'
 import { decodeGfx, paintGfx, pointerValue, gfxFit, gfxToSurface, gfxNaturalHeight, GfxOp } from '../vera/VeraGfx'
 import { TimerFace, timerFace } from '../widget/CardModel'
 import { decodeScene, sceneEventValue } from '../vera/VeraScene'
+import { worldInSpace } from '../vera/VeraLook3D'
 import { WorldBox, WorldPick, WorldGesture } from './VeraWorld3D'
 import { SimEvent } from '../vera/VeraPhysics'
 
@@ -155,6 +156,13 @@ const SURFACE_MAX_ELAPSED_MS: number = 100
  * state, a build and a view refresh. Hits come at most four a second already (HIT_INTERVAL_S).
  */
 const WORLD_EVENTS_PER_FRAME: number = 4
+
+/** "#rrggbb" as "#aarrggbb" with this alpha (0..255); any other colour as it is. */
+function withAlpha(color: string, alpha: number): string {
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) { return color }
+  let a = Math.max(0, Math.min(255, Math.round(alpha))).toString(16)
+  return '#' + (a.length < 2 ? '0' + a : a) + color.substring(1)
+}
 
 /** Whether a handler gave back the state it was given: the same value, or one that encodes the same (a small state, cheap). */
 function sameState(a: RuntimeValue, b: RuntimeValue): boolean {
@@ -439,6 +447,24 @@ export struct VeraPreview {
   private rootScroller: Scroller = new Scroller()
   private rootTop: number = 0
   private rootHeight: number = 0
+  /** Where the program's content column sits and how tall it is with its bottom padding, in vp: what a "fill" box leaves under it. */
+  private contentTop: number = 0
+  private contentHeight: number = 0
+  /** Each "fill" surface or world and where it last was ([top, height] in vp), so it is fitted again when what is under it changes. */
+  private fillBoxes: Map<LiveNode, number[]> = new Map<LiveNode, number[]>()
+  private fillRefit: boolean = false
+  /**
+   * The world drawn over the whole program, or null: its corner button opened it, or its style "full" did when the
+   * program started. Its Header is left out and the program's other things -- the result, the buttons -- float over its
+   * bottom; the corner button brings the normal screen back.
+   */
+  private fullWorld: LiveNode | null = null
+  /** Bumped whenever fullWorld changes: a LiveNode (@ObservedV2) cannot be @State, so this redraws the frame instead. */
+  @State fullWorldEpoch: number = 0
+  /** Whether the full-screen world is in space (dark): its title is then drawn light. Set when its scene is described. */
+  @State fullWorldSpace: boolean = false
+  /** The program whose "full" world has been opened: closing it is the person's choice, kept until the program changes. */
+  private fullOpenedFor: number = -1
   /** How tall the snackbars drawn over the bottom of the window are, in vp: the content ends that far above it (programFrame). */
   @State snackSpace: number = 0
   private currentState: RuntimeValue | null = null
@@ -1148,6 +1174,14 @@ export struct VeraPreview {
         this.worlds.delete(node)
       }
     }
+    if (this.fullWorld !== null && found.indexOf(this.fullWorld!) < 0) { this.setFullWorld(null) }
+    if (this.fullOpenedFor !== this.programId && !this.embedded && !this.previewOnly) {
+      let full = found.find((node: LiveNode): boolean => node.style === 'full')
+      if (full !== undefined) {
+        this.fullOpenedFor = this.programId
+        this.setFullWorld(full)
+      }
+    }
     if (found.length === 0 || this.vm === null || this.currentState === null || this.disposed) { return }
     let theme = this.t()
     for (let node of found) {
@@ -1160,6 +1194,7 @@ export struct VeraPreview {
       try {
         if (this.host !== null) { this.host!.effectsAllowed = false }
         let spec = decodeScene(this.vm!.execute(node.label, [this.currentState!]))
+        if (node === this.fullWorld && worldInSpace(spec) !== this.fullWorldSpace) { this.fullWorldSpace = worldInSpace(spec) }
         let key = JSON.stringify(spec)
         if (key !== box.key || theme !== box.theme) {
           box.key = key
@@ -1544,11 +1579,7 @@ export struct VeraPreview {
     let box = this.surfaceBox(node)
     box.width = Number(now.width)
     box.height = Number(now.height)
-    if ((node.style === 'fill' || node.style === 'cover') && !this.embedded && this.rootHeight > 0) {
-      let want = Math.max(160, this.rootTop + this.rootHeight - this.snackSpace - Number(now.globalPosition.y))
-      // A whole vp, for the same reason viewportWidth is guarded: a re-layout a fraction different would write again.
-      if (Math.abs(want - node.layoutHeight) >= 1) { node.layoutHeight = want }
-    }
+    if (node.style === 'fill' || node.style === 'cover') { this.fitFill(node, Number(now.globalPosition.y), Number(now.height)) }
     this.paintSurface(node)
   }
 
@@ -1657,16 +1688,111 @@ export struct VeraPreview {
   /** How tall a world is drawn, in vp: its height, or as tall as it is wide for 0; fill runs to the bottom of the window as a surface's does. */
   private worldHeight(node: LiveNode): number {
     let width = this.viewportWidth > 0 ? this.viewportWidth : 360
-    if (node.style === 'fill' && !this.embedded && node.layoutHeight > 0) { return node.layoutHeight }
+    if (node === this.fullWorld && this.rootHeight > 0) { return this.rootHeight }
+    if ((node.style === 'fill' || node.style === 'full') && !this.embedded && node.layoutHeight > 0) { return node.layoutHeight }
     return node.minimum > 0 ? node.minimum : width
   }
 
   private worldArea(node: LiveNode, now: Area): void {
     this.worldBox(node).setSize(Number(now.width), Number(now.height), this.getUIContext().vp2px(1))
-    if (node.style === 'fill' && !this.embedded && this.rootHeight > 0) {
-      let want = Math.max(160, this.rootTop + this.rootHeight - this.snackSpace - Number(now.globalPosition.y))
-      if (Math.abs(want - node.layoutHeight) >= 1) { node.layoutHeight = want }
+    if ((node.style === 'fill' || node.style === 'full') && node !== this.fullWorld) {
+      this.fitFill(node, Number(now.globalPosition.y), Number(now.height))
     }
+  }
+
+  private setFullWorld(node: LiveNode | null): void {
+    if (node === this.fullWorld) { return }
+    this.fullWorld = node
+    this.fullWorldEpoch++
+  }
+
+  /** The title of the Header beside a full-screen world, which full screen leaves out: '' when there is none. */
+  private fullWorldTitle(world: LiveNode): string {
+    let parent = this.liveRoot !== null ? this.parentOf(this.liveRoot!, world) : null
+    if (parent === null) { return '' }
+    let header = parent.children.find((child: LiveNode): boolean => child.kind === 'header')
+    return header !== undefined ? header.text : ''
+  }
+
+  /** The caption over a full-screen world: the text of the plain Texts beside it in its column, the result line(s). */
+  private fullWorldCaption(world: LiveNode): string[] {
+    let parent = this.liveRoot !== null ? this.parentOf(this.liveRoot!, world) : null
+    if (parent === null) { return [] }
+    return parent.children.filter((child: LiveNode): boolean => child.kind === 'text' && child.text.trim().length > 0)
+      .map((child: LiveNode): string => child.text.trim())
+  }
+
+  private parentOf(at: LiveNode, child: LiveNode): LiveNode | null {
+    for (let c of at.children) {
+      if (c === child) { return at }
+      let found = this.parentOf(c, child)
+      if (found !== null) { return found }
+    }
+    return null
+  }
+
+  /** The corner button of a world: full screen, or back to the normal screen from it. */
+  @Builder
+  worldFullButton(node: LiveNode) {
+    Row() {
+      Button({ type: ButtonType.Circle }) {
+        SymbolGlyph($r(this.fullWorldEpoch >= 0 && node === this.fullWorld ? 'sys.symbol.arrow_down_right_and_arrow_up_left' :
+          'sys.symbol.arrow_up_left_and_arrow_down_right'))
+          .fontSize(16)
+          .fontColor([this.t().ink])
+      }
+      .width(36)
+      .height(36)
+      .backgroundColor(this.t().surface)
+      .opacity(0.9)
+      .onClick(() => { this.setFullWorld(node === this.fullWorld ? null : node) })
+    }
+    .width('100%')
+    // The left corner: on the Generate screen the page's own buttons sit over the right one.
+    .justifyContent(FlexAlign.Start)
+    .padding(8)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * A "fill" surface or world takes the window from its top down, less what the program puts under it -- a result line,
+   * a row of buttons -- so that stays on screen instead of being pushed below it. What is under it is the content
+   * column's bottom less the box's: growing the box moves both, so it settles in one pass. With something under it the
+   * box also leaves the room the host keeps over the bottom (bottomRoom), as the content does; a box that is last on the
+   * screen runs under that, as it always has.
+   */
+  private fitFill(node: LiveNode, top: number, height: number): void {
+    if (this.embedded || this.rootHeight <= 0) { return }
+    this.fillBoxes.set(node, [top, height])
+    let under = 0
+    if (this.contentHeight > 0) {
+      let padding = this.snackbarRoom() + this.bottomRoom
+      under = Math.max(0, this.contentTop + this.contentHeight - padding - (top + height))
+      if (under >= 1) { under += this.bottomRoom }
+    }
+    let want = Math.max(160, this.rootTop + this.rootHeight - this.snackSpace - top - under)
+    // A whole vp, for the same reason viewportWidth is guarded: a re-layout a fraction different would write again.
+    if (Math.abs(want - node.layoutHeight) >= 1) { node.layoutHeight = want }
+  }
+
+  /**
+   * The content column moved or changed height: what sits under each "fill" box may have, so fit them again -- after
+   * the layout pass's other callbacks, so each box's place is from the same pass as the column's and a box that grew
+   * is not counted twice (once in the column, once as stale room under itself).
+   */
+  private contentArea(now: Area): void {
+    this.contentTop = Number(now.globalPosition.y)
+    this.contentHeight = Number(now.height)
+    if (this.fillBoxes.size === 0 || this.fillRefit) { return }
+    this.fillRefit = true
+    setTimeout(() => {
+      this.fillRefit = false
+      if (this.disposed) { return }
+      for (let entry of Array.from(this.fillBoxes.entries())) {
+        if (!this.isLiveNode(entry[0])) { this.fillBoxes.delete(entry[0]); continue }
+        this.fitFill(entry[0], entry[1][0], entry[1][1])
+      }
+    }, 0)
   }
 
   /**
@@ -1694,9 +1820,9 @@ export struct VeraPreview {
     }
     let gesture: WorldGesture | null = box.touchUp(touch.id, touch.x, touch.y)
     if (gesture === null || this.previewOnly || node.action.length === 0) { return }
-    console.info('VERA-WORLD event ' + gesture.kind + ' body=' + gesture.body + ' speed=' + gesture.speed.toFixed(2))
     let action = node.action
     if (gesture.kind === 'swipe') {
+      console.info('VERA-WORLD event swipe body=' + gesture.body + ' speed=' + gesture.speed.toFixed(2))
       this.dispatchFieldAction(action, sceneEventValue('swipe', gesture.body, '', gesture.x, 0, gesture.z, gesture.speed, [], []),
         true, node)
       return
@@ -1711,6 +1837,8 @@ export struct VeraPreview {
         console.info('VERA-WORLD event dropped kind=tap reason=changed-during-pick')
         return
       }
+      // Logged once the ray is cast: before it, the body is not known yet.
+      console.info('VERA-WORLD event tap body=' + pick.body)
       this.dispatchFieldAction(action, sceneEventValue('tap', pick.body, '', pick.x, pick.y, pick.z, 0, [], []), true, node)
     }).catch((e: Error) => {
       console.warn('VERA-WORLD pick failed: ' + e.message)
@@ -2262,6 +2390,46 @@ export struct VeraPreview {
             }
             .width('100%')
             .padding({ bottom: this.snackbarRoom() })
+          } else if (this.fullWorldEpoch >= 0 && this.fullWorld !== null && this.isLiveNode(this.fullWorld!)) {
+            // One world over the whole program, nothing to press but the world itself: the program's lines of text (what
+            // was tapped, the result) are a caption over its bottom, and its buttons wait on the normal screen.
+            Stack({ alignContent: Alignment.Bottom }) {
+              this.renderNode(this.fullWorld!, 'root')
+              Column({ space: 2 }) {
+                ForEach(this.fullWorldCaption(this.fullWorld!), (line: string) => {
+                  Text(line)
+                    .fontSize(15)
+                    .fontFamily(this.textFamily())
+                    .fontColor(this.fullWorldSpace ? '#E8ECF8' : this.t().ink)
+                    .textAlign(TextAlign.Center)
+                    .maxLines(2)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .textShadow({ radius: 6, color: this.fullWorldSpace ? '#C0000000' : '#00000000', offsetX: 0, offsetY: 1 })
+                }, (line: string, index: number) => index.toString() + ':' + line)
+              }
+              .width('100%')
+              .padding({ left: 24, right: 24, bottom: 16 + this.snackbarRoom() + this.bottomRoom })
+              .hitTestBehavior(HitTestMode.Transparent)
+              // The app's name, which the Header gave and full screen leaves out, beside the corner button.
+              if (this.fullWorldTitle(this.fullWorld!).length > 0) {
+                Text(this.fullWorldTitle(this.fullWorld!))
+                  .fontSize(15)
+                  .fontWeight(600)
+                  .fontFamily(this.textFamily())
+                  .fontColor(this.fullWorldSpace ? '#E8ECF8' : this.t().ink)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .position({ x: 56, y: 16 })
+                  .width('70%')
+                  .hitTestBehavior(HitTestMode.Transparent)
+              }
+            }
+            .width('100%')
+            .height('100%')
+            .onAreaChange((_old: Area, now: Area) => {
+              this.rootTop = Number(now.globalPosition.y)
+              this.rootHeight = Number(now.height)
+            })
           } else {
             Scroll(this.rootScroller) {
               Column() {
@@ -2273,6 +2441,7 @@ export struct VeraPreview {
               // Room under the content for the snackbars, so the last rows can be scrolled out from under them, and for
               // what the host lays over the corner.
               .padding({ bottom: this.snackbarRoom() + this.bottomRoom })
+              .onAreaChange((_old: Area, now: Area) => { this.contentArea(now) })
             }
             .width('100%')
             .height('100%')
@@ -4987,6 +5156,13 @@ export struct VeraPreview {
       // The program describes this world (reconcileWorlds) and its box moves it; the tree only gives it a place.
       if (this.worldBox(node).options !== null) {
         Stack({ alignContent: Alignment.TopStart }) {
+          // Space under the scene: its colour, stars, orbit rings and the sun's halo (WorldBox.paintBackdrop), which the
+          // scene, clear in space, lets through round its bodies. Empty on a table or floor, where the scene is opaque.
+          Canvas(this.worldBox(node).backdrop)
+            .width('100%')
+            .height('100%')
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onReady(() => { this.worldBox(node).backdropShown() })
           Component3D(this.worldBox(node).options as SceneOptions)
             .width('100%')
             .height('100%')
@@ -5009,6 +5185,9 @@ export struct VeraPreview {
               .fontColor(this.t().inkSoft)
               .padding(8)
               .hitTestBehavior(HitTestMode.Transparent)
+          }
+          if (!this.embedded && !this.previewOnly) {
+            this.worldFullButton(node)
           }
         }
         .width('100%')

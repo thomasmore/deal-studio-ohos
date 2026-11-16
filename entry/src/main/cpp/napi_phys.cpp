@@ -7,6 +7,7 @@
 #include <napi/native_api.h>
 
 #ifndef PHYS_STUB
+#include "phys_stepper.h"
 #include "phys_world.h"
 
 #include <chrono>
@@ -53,6 +54,22 @@ vphys::PhysWorld &World()
     return *w;
 }
 
+// The thread a step runs on (physStepBegin / physStepEnd). Never destroyed either: its thread would be joined from a
+// static destructor at exit.
+vphys::StepRunner &Stepper()
+{
+    static vphys::StepRunner *s = new vphys::StepRunner();
+    return *s;
+}
+
+// The world as it is once any step in flight has finished: every function but the step's own goes through this, so
+// the world is never touched while the step thread runs.
+vphys::PhysWorld &Idle()
+{
+    Stepper().wait();
+    return World();
+}
+
 // The float array behind a Float32Array argument, or null; *length is how many floats may be
 // written to it (vphys::FloatCapacity: not napi_get_typedarray_info's length, which is in bytes on
 // OpenHarmony).
@@ -89,103 +106,113 @@ napi_value PhysInit(napi_env env, napi_callback_info info)
     int maxBodies = argc > 0 ? I(0, 0) : 2048;
     unsigned hw = std::thread::hardware_concurrency();
     int threads = argc > 1 ? I(0, 1) : (hw > 2 ? static_cast<int>(std::min(3u, hw - 1)) : 0);
-    World().init(maxBodies <= 0 ? 2048 : maxBodies, threads);
-    return Num(env, World().ready() ? (threads > 0 ? threads : 1) : 0);
+    Idle().init(maxBodies <= 0 ? 2048 : maxBodies, threads);
+    return Num(env, Idle().ready() ? (threads > 0 ? threads : 1) : 0);
 }
-napi_value PhysReset(napi_env env, napi_callback_info) { World().reset(); return nullptr; }
+napi_value PhysReset(napi_env env, napi_callback_info) { Idle().reset(); return nullptr; }
 napi_value PhysSetGravity(napi_env env, napi_callback_info info)
 {
     ARGS(1);
-    World().setGravity(F(0, 0));
+    Idle().setGravity(F(0, 0));
     return nullptr;
 }
 napi_value PhysSetBound(napi_env env, napi_callback_info info)
 {
     ARGS(3);
-    World().setBound(F(0, 0), F(0, 1), F(0, 2));
+    Idle().setBound(F(0, 0), F(0, 1), F(0, 2));
     return nullptr;
 }
 napi_value PhysAddBox(napi_env env, napi_callback_info info)
 {
     ARGS(4);
-    return Num(env, World().addBox(F(0, 0), F(0, 1), F(0, 2), I(0, 3)));
+    return Num(env, Idle().addBox(F(0, 0), F(0, 1), F(0, 2), I(0, 3)));
 }
 napi_value PhysAddSphere(napi_env env, napi_callback_info info)
 {
     ARGS(2);
-    return Num(env, World().addSphere(F(0, 0), I(0, 1)));
+    return Num(env, Idle().addSphere(F(0, 0), I(0, 1)));
 }
 napi_value PhysAddCylinder(napi_env env, napi_callback_info info)
 {
     ARGS(3);
-    return Num(env, World().addCylinder(F(0, 0), F(0, 1), I(0, 2)));
+    return Num(env, Idle().addCylinder(F(0, 0), F(0, 1), I(0, 2)));
 }
 napi_value PhysRemove(napi_env env, napi_callback_info info)
 {
     ARGS(1);
-    World().remove(I(0, 0));
+    Idle().remove(I(0, 0));
     return nullptr;
 }
 napi_value PhysSetPose(napi_env env, napi_callback_info info)
 {
     ARGS(8);
-    World().setPose(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6), F(0, 7));
+    Idle().setPose(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6), F(0, 7));
     return nullptr;
 }
 napi_value PhysSetMaterial(napi_env env, napi_callback_info info)
 {
     ARGS(4);
-    World().setMaterial(I(0, 0), F(0, 1), F(0, 2), F(0, 3));
+    Idle().setMaterial(I(0, 0), F(0, 1), F(0, 2), F(0, 3));
     return nullptr;
 }
 napi_value PhysSetVelocity(napi_env env, napi_callback_info info)
 {
     ARGS(7);
-    World().setVelocity(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6));
+    Idle().setVelocity(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6));
     return nullptr;
 }
 napi_value PhysSleep(napi_env env, napi_callback_info info)
 {
     ARGS(1);
-    World().sleep(I(0, 0));
+    Idle().sleep(I(0, 0));
     return nullptr;
 }
 napi_value PhysMoveKinematic(napi_env env, napi_callback_info info)
 {
     ARGS(9);
-    World().moveKinematic(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6), F(0, 7), F(0, 8));
+    Idle().moveKinematic(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6), F(0, 7), F(0, 8));
     return nullptr;
 }
 napi_value PhysStep(napi_env env, napi_callback_info info)
 {
     ARGS(2);
     auto t0 = std::chrono::steady_clock::now();
-    World().step(F(0, 0), argc > 1 ? I(0, 1) : 1);
+    Idle().step(F(0, 0), argc > 1 ? I(0, 1) : 1);
     auto t1 = std::chrono::steady_clock::now();
     return Num(env, std::chrono::duration<double, std::milli>(t1 - t0).count());
 }
+// The step on its own thread: begin returns at once, end waits for it and returns the milliseconds it took.
+napi_value PhysStepBegin(napi_env env, napi_callback_info info)
+{
+    ARGS(2);
+    float dt = F(0, 0);
+    int substeps = argc > 1 ? I(0, 1) : 1;
+    Stepper().begin([dt, substeps] { World().step(dt, substeps); });
+    return nullptr;
+}
+napi_value PhysStepEnd(napi_env env, napi_callback_info) { return Num(env, Stepper().end()); }
 napi_value PhysReadAwake(napi_env env, napi_callback_info info)
 {
     ARGS(1);
     size_t len;
     float *out = argc > 0 ? FloatArray(env, argv[0], &len) : nullptr;
-    return Num(env, out ? World().readAwake(out, static_cast<int>(len / 8)) : -1);
+    return Num(env, out ? Idle().readAwake(out, static_cast<int>(len / 8)) : -1);
 }
 napi_value PhysReadPose(napi_env env, napi_callback_info info)
 {
     ARGS(2);
     size_t len;
     float *out = argc > 1 ? FloatArray(env, argv[1], &len) : nullptr;
-    return Num(env, out && len >= 7 && World().readPose(I(0, 0), out) ? 1 : 0);
+    return Num(env, out && len >= 7 && Idle().readPose(I(0, 0), out) ? 1 : 0);
 }
 napi_value PhysDrainContacts(napi_env env, napi_callback_info info)
 {
     ARGS(1);
     size_t len;
     float *out = argc > 0 ? FloatArray(env, argv[0], &len) : nullptr;
-    return Num(env, out ? World().drainContacts(out, static_cast<int>(len / 3)) : -1);
+    return Num(env, out ? Idle().drainContacts(out, static_cast<int>(len / 3)) : -1);
 }
-napi_value PhysAwakeDynamic(napi_env env, napi_callback_info) { return Num(env, World().awakeDynamic()); }
+napi_value PhysAwakeDynamic(napi_env env, napi_callback_info) { return Num(env, Idle().awakeDynamic()); }
 
 #define HANDLER(name) name
 
@@ -209,6 +236,8 @@ napi_value Register(napi_env env, napi_value exports)
         D("physSleep", PhysSleep),
         D("physMoveKinematic", PhysMoveKinematic),
         D("physStep", PhysStep),
+        D("physStepBegin", PhysStepBegin),
+        D("physStepEnd", PhysStepEnd),
         D("physReadAwake", PhysReadAwake),
         D("physReadPose", PhysReadPose),
         D("physDrainContacts", PhysDrainContacts),

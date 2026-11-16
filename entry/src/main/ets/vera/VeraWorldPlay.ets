@@ -39,8 +39,9 @@ export const CODE_NO_SETTLE: string = 'P0006'
 export const CODE_RESULT_UNREAD: string = 'P0007'
 export const CODE_NO_WORLD: string = 'P0008'
 
-/** The box the world is seen in on a phone about 360 vp wide: square by default, its height when given, tall when it fills. */
+/** The box the world is seen in on a phone about 360 vp wide: square by default, its height when given, tall when it fills, the whole screen when full. */
 function boxSize(node: VeraUiNode): number[] {
+  if (node.style === 'full') { return [360, 720] }
   if (node.style === 'fill') { return [360, 560] }
   return [360, node.minimum > 0 ? node.minimum : 360]
 }

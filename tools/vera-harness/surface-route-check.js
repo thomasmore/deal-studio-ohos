@@ -54,6 +54,8 @@ for (const p of ['帮我创建一张吃药卡，提醒我每天吃药', '西湖�
 assert.equal(S.parseSurfaceBrief('{"surface": true, "title": "T", "design": "D"}').design, 'D')
 assert.equal(S.parseSurfaceBrief('noise {"surface": false, "title": "", "design": ""} noise').kind, S.SURFACE_NONE)
 assert.equal(S.parseSurfaceBrief('{"surface": true, "title": "T", "design": ""}'), null, 'a game with no design is not an answer')
+assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "world", "title": "T", "design": ""}').engine, S.ENGINE_WORLD,
+  'a 3D world with no design is still one: the world guide and the request are enough')
 assert.equal(S.parseSurfaceBrief('not json'), null)
 // The engine: world only for a whole app that says so, flat otherwise.
 assert.equal(S.parseSurfaceBrief('{"surface": "whole", "title": "T", "design": "D"}').engine, S.ENGINE_FLAT, 'no engine is flat')
