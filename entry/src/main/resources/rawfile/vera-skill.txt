@@ -113,7 +113,6 @@ Add only content that serves the request. Do not invent summary figures or statu
 There is no node budget, so do not count nodes. Nest at most 8 levels deep, with at most 20 children per container.
 
 Clock -- time. All functions return a number:
-  time.atLocalTime(day, minutes)  Unix milliseconds for a local day number and minutes 0..1439; handles daylight-saving offsets
   time.nowMillis()       Unix milliseconds
   time.nowSeconds()      Unix seconds, with one-second resolution
   time.millisOfDay()     milliseconds since local midnight

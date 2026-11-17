@@ -258,19 +258,6 @@ function invokeStdTime(name: string, args: RuntimeValue[]): RuntimeValue {
       return new VeraNumberValue(now.getTime())
     case 'nowSeconds':
       return new VeraNumberValue(Math.floor(now.getTime() / 1000))
-    case 'atLocalTime': {
-      let day = asWhole(args[0])
-      let minute = asWhole(args[1])
-      if (Math.abs(day) > 1000000 || minute < 0 || minute >= 1440) {
-        throw new RuntimeTrap('R0009', 'atLocalTime expects a day in -1000000..1000000 and minutes in 0..1439')
-      }
-      let date = new Date(day * 86400000)
-      // Convert the local calendar date, not an offset added to today's midnight: DST days are not always 24 hours.
-      let at = new Date(0)
-      at.setFullYear(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
-      at.setHours(Math.floor(minute / 60), minute % 60, 0, 0)
-      return new VeraNumberValue(at.getTime())
-    }
     case 'daysSinceEpoch':
       // Local midnights, not UTC: a dose taken at 23:30 belongs to that day for
       // the person holding the phone.

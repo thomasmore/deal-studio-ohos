@@ -974,9 +974,13 @@ export function composeFragments(specAt: (FragmentSpec | null)[], globalValues: 
     let pane = paneOf.indexOf(i)
     if (tabbed && pane >= 0 && block.length > 0) {
       let name = 'pane' + pane.toString()
-      block = 'let ' + name + ': ui.View[] = [];\n' + block.split('sections.push(').join(name + '.push(')
+      let paneId = 'tabPane' + pane.toString()
+      functionBlocks.push('function c_view_' + paneId + '(state: AppState): ui.View {\n  let ' + name + ': ui.View[] = [];\n' +
+        block.split('sections.push(').join(name + '.push(') + '\n  return ui.Screen("' + paneId + '", ' + name + ');\n}')
+      block = 'let ' + name + ': ui.View = ui.Column("default", []);\nif (state.' + TAB_FIELD + ' === ' + pane.toString() +
+        ') { ' + name + ' = c_view_' + paneId + '(state); }'
       tabNames.push(paneLabel(spec, tabNames))
-      tabPanes.push('ui.Column("default", ' + name + ')')
+      tabPanes.push(name)
     }
     if (spec.viewFirst && pane < 0) { firstBlocks.push(block) } else { viewBlocks.push(block) }
   }

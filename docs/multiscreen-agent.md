@@ -1,108 +1,50 @@
-# Shared-state multi-screen generation
+# Shared-state multi-view generation
 
-The first multi-screen agent path is implemented on the existing one-module runtime. This is a bounded first cut, **not a functional-quality sign-off**: generated apps can compile and navigate while still missing a requested action's UI control.
+Generate and Chat share one optional view plan, one writer chain and one VM/AppState. This extends existing state-driven navigation and Chat tabs; it does not introduce a router or per-view store.
 
-## Current demo-sized follow-up
+## Planning and presentation
 
-The follow-up stays generic: a writer rule that requested actions need controls, a small check for declared AppState mutations with no control/caller reference, and shared-app ownership context in the existing verifier. No new pipeline stage, router, per-app template, or validation framework.
+`NeedsPlan.ets` retains stable need IDs, `uses` ownership references, `screens`, `startScreen` and `transitions`. Each collection has one owner; several views can present or edit the same records. `NeedsChoose.ets` hands multi-view plans to the writer before the lossy one-list/one-clock projection, preserving clarification answers and filtering unasked needs.
 
-Final-build native generation, one measured pass per prompt:
+- `presentation: "pages"` (default): list/detail/editor navigation.
+- `presentation: "tabs"`: peer views; Chat adds compact presentation instructions.
+- Ordinary single-view plans retain the existing parts/catalogue route.
 
-| Case | Active | Result |
-| --- | ---: | --- |
-| Notes, two screens | 10.99 s | Built, one planning turn and one writer |
-| Shopping, related lists | 12.31 s | Built, one planning turn and one writer |
-| Medicines, three screens | 26.39 s | Not built after three writer/repair turns; existing semantic verifier rejected editor Cancel/Back behavior |
+A conservative English-pattern guard detects explicit detail/editor navigation described in needs without screen metadata. It returns a diagnostic through the existing bounded planning retries. It is not a universal intent classifier. Recognized multi-view failures do not fall through to flat generation in either entry point.
 
-The medicines failure is preserved, not silently retried. The earlier prompt-only and intermediate follow-ups remain separate under `demo-follow-up/` and `demo-final-check/`; these are not replacements for the original first pass.
+## Writing and runtime
 
-Real compiler/VM replay of the two accepted **new** sources verifies actual UI bindings: notes Save, edit, Cancel and Delete; shopping per-list ownership, toggle/count propagation, list deletion preserving the other list, and item removal. Native replay of the exact new notes source verifies create → Save → editor with Delete control → Delete → Back → empty list. **Rough edge:** Delete leaves the editor open; Back is needed to see the updated list. No claim that every generated action or navigation path is correct.
+The existing classes/fields/functions/view contribution format produces shared `c_` state and handlers, `C_` record classes, and `c_view_<id>` functions returning `ui.Screen`. One host AppTheme wraps only the active screen. Navigation, stable record selection and isolated editor drafts are ordinary state transitions; Save commits, Cancel/Back discard drafts.
 
-Current checks: **38 app-plan checks**, the same 16 existing suites, and a native in-place build with **0 diagnostics**. Saved-project index unchanged. Evidence: `/home/mbolshov/vera-benchmarks/20261116-175339-multiscreen-agent/demo-check/`, especially `flow-check.json` and `native-check.json`.
+The writer has at most three attempts and a screen-scaled output budget capped at 16,000 tokens. Requested actions require actual controls. A small bytecode-reference check catches unreferenced AppState-mutating handlers; it is not full action coverage.
 
-This is a demo-scoped review candidate, not a product-quality sign-off. Remaining observed break: heuristic semantic verification can still reject a multi-screen editor. No further machinery was added to chase this result.
+Existing Chat block-to-tabs composition is retained, with named Screen panes constructed only when selected. Labels, selected state and callbacks stay unchanged. These compositions retain their composition records; declared shared apps do not have flat records.
 
-## Deterministic reachability gate (subsequent local change)
+See [runtime contract](multiscreen-runtime.md) for native identity and teardown behavior.
 
-`VeraReachability.ets` now drives fresh VM state through the actual decoded UI. A bounded breadth-first search fills visible fields and executes enabled controls with their rendered payloads. Each declared screen must be observed through `view()`; directly invoking a `c_view_*` function is not evidence of reachability. `smokeRun` returns missing-screen diagnostics through the existing writer/repair/refinement validation paths. No additional model stage or model-authored test journey.
+## Validation and repairs
 
-The reported book-lending bug is reproduced: stored `"loan-1"` becomes row payload `0`, and the details view is never reached. The check rejects that exact generated source. A disposable host-only copy using a numeric-compatible ID passes with a concrete fill → Add → row-tap witness. The user's phone app and record were not modified.
+`smokeRun` checks named views with empty/missing selections, one active Screen/AppTheme, content and bounded handler taps. `VeraReachability.ets` additionally starts from disposable `init()` state, fills visible inputs and explores enabled rendered callbacks with their actual payloads. A view passes only after `view()` displays it; direct view-function calls or injected navigation state do not count.
 
-Run `node tools/vera-harness/reachability-check.js /path/app.vera` (with the existing `VERA_TYPESCRIPT_PATH` environment). JSON includes reached/missing screens, witness paths, observations and search limits; exit 1 means repair is needed. Bare invocation runs regressions. The clock and traversal order are fixed; branches are deep-cloned and external effects are never executed. Bounds are 192 states, 768 actions, depth 16 and 2M aggregate VM steps checked between calls, with 100K steps per call. This is a deterministic acceptance gate, not proof of impossibility: unusual input requirements or external prerequisites can produce a missing-witness diagnostic.
+The search freezes time, deep-clones branches, respects inactive tabs and never executes external effects. Bounds: 192 queued states, 768 actions, depth 16, 64 KiB state keys, and 2M aggregate VM steps checked between calls (100K per call). Missing paths return observations and witness paths to the existing repair loop. Exhaustion means **no witness found**, not proof of impossibility; unusual input or external prerequisites can fail the gate.
 
-Generation instructions in the language skill, UI catalogue and shared-app contract also require new date drafts to initialize and reset to `time.daysSinceEpoch()`, rather than `0` (1 January 1970). Editing preserves the stored date, including intentional epoch dates. This is prompt guidance, not renderer coercion or a guarantee that every model output complies.
+Refinement validation carries pre-edit named-view identities, preventing accidental flattening. Local Generate asks before intentional view removal; Chat/server refinements preserve views conservatively.
 
-These changes are later than the benchmarked PR build; earlier measurements do not include them. Both changes were built with 0 diagnostics and installed in place on the phone, preserving app identity and first-install time. Host validation: 11 reachability regressions, 40 app-plan checks and 19 other suites. The book-ID bug is rejected and a corrected disposable host copy passes; six historical multi-screen sources also pass. No successful live LLM repair caused by this gate has yet been demonstrated: the observed phone retry chose the legacy single-screen path and bypassed the gate. The gate requires declared/inferred named screens; navigation hidden in a flat single-screen composition is not covered.
+Date-generation instructions initialize/reset new date drafts to `time.daysSinceEpoch()`, not `0` (1 January 1970). Editing preserves stored dates. This is prompt guidance, not renderer coercion or a migration.
 
-## Implementation
+## Host checks
 
-- `NeedsPlan.ets` adds stable need IDs, `uses` references, optional `screens`, `startScreen` and `transitions` to the existing planning reply. There is no extra planning round solely to discover screens. IDs, ownership references, starting screen, transitions and reachability are checked locally. A bare declared record owner is normalized to `owner.id`; invalid/non-string references are rejected.
-- `NeedsChoose.ets` preserves blocking questions, the effective clarified request and `dropUnasked`. A multi-screen plan is handed off **before** lossy flat `Sketch` projection and flat part selection. `ComposeResult.appPlan` and `ScreenPlan.appPlan` retain the full relationships. Widgets and one-screen requests retain the existing path.
-- `VeraAgent.ets`, `AgentHole.ets`, `AgentCustom.ets` and `AgentAppContract.ets` reuse one existing contribution format: classes, fields, functions and active view. One shared `AppState` owns the records; `c_view_<screenId>` functions render them, ordinary handlers navigate, and isolated drafts commit only on domain Save. Stable record IDs, immutable updates and one active native `ui.Screen` are required. The host adds exactly one AppTheme and no duplicate outer header.
-- The writer has at most three attempts, with a screen-scaled token limit capped at 16,000. It is one shared writer chain, not a complete pipeline per screen. There is no separate VM/store/router and no compulsory layout or PillPal template.
-- `VeraSmoke.ets` and `AgentRepair.ets` validate the declared named views, initial/empty selection, starting identity, one active Screen/AppTheme, content and already-bounded handler taps. Repairs retain the declared plan. `VeraBuildRoute.ets` refuses the whole-hole fallback after a recognized app plan has failed (`appPlanFailed`). These are bounded structural/runtime checks, not exhaustive behavior or semantic coverage.
-- `VeraAppRefine.ets`, Generate and Chat carry the **pre-edit generated `c_view_` identities** into refinement checks instead of deriving requirements only from the replacement. Local Generate refinement asks the person before accepting screen removal. Chat and server refinements conservatively preserve these identities. App plans do not get a flat composition record, so structural block refinement cannot silently erase their relationships.
+With `VERA_TYPESCRIPT_PATH` set to the SDK TypeScript module:
 
-## Independent review and regression fixes
+```bash
+node tools/vera-harness/app-plan-check.js
+node tools/vera-harness/reachability-check.js
+node tools/vera-harness/multiscreen-check.js
+node tools/vera-harness/template-run-check.js
+node tools/vera-harness/chat-prompt-check.js
+node tools/vera-harness/reachability-check.js /path/app.vera
+```
 
-The focused read-only review found two MEDIUM issues: an editor that became empty only when activated could pass; and generic refinement could delete views and thereby disable candidate-only inference. Both reproductions now have regression coverage and fixes. Active content is checked after navigation, and refinement checks retain pre-edit screen identities. The original review remains unchanged at `/tmp/vera-multiscreen-agent-review.md`; this is the implementer's disposition, not a second independent review.
+The last command prints JSON and exits 1 when a path is missing. Tests use the real compiler/VM with mocked model/phone boundaries. They include payload mismatch, planning/repair feedback, compact pages/tabs, broken legacy tabs and refinement preservation. Native runtime checks are separate from generated-app functional correctness.
 
-At the initial review-fix stage, `app-plan-check.js` passed 35 checks with the real compiler/VM and mocked model, selector and phone effects (38 in the current demo follow-up). Sixteen other host suites passed: needs-plan, needs-choose, agent, plan, hole, parts, compose, merge, align-agent, smoke, multiscreen, pillpal, state-carry, live-widget, scene-hole and surface-route. The final native build reported Status ok / Diagnostics 0 and installed in place with unchanged app identity and first-install time.
-
-## Measurement method
-
-Eight prompts were frozen before the first pass. Three pilot cases were measured once; resume skipped them and measured the other five. All failures/retries remain in their original traces. The first pass used the initial agent build. A single explicitly labeled notes follow-up used the final parser/review fixes; it does not replace the original result.
-
-Active time excludes recorded clarification waits; there were none in this subset. Token counts include every reported DeepSeek turn and retry. **They are partial**: TypeSafe usage is unavailable. Cached tokens are part of input; the ratio is cached/input, not the fraction of cached requests. Provider caches were not cleared. This small, heterogeneous, one-pass subset does not establish variance, linear scaling or a causal speedup.
-
-## Frozen first pass
-
-All eight reached pipeline acceptance, which is not functional correctness. Four of five multi-screen requests used the intended shared-plan handoff. Medicines exhausted three plans and used the old whole-hole fallback: its source contains three Screen branches, but it lacks the preserved app plan/named-view contract. The final route now blocks that fallback after a recognized failed app plan. The medicines case was not regenerated on the final build.
-
-| Case | Observed route | Active, s | Reported calls |
-| --- | --- | --- | --- |
-| Notes, inline | Existing single-screen | 2.71 | 1 |
-| Notes, 2 screens | Shared app | 22.35 | 4 |
-| Notes, 3 screens | Shared app | 14.83 | 3 |
-| Books, 3 screens | Shared app | 28.50 | 4 |
-| Shopping, related lists | Shared app | 39.43 | 4 |
-| Medicines, 3 screens | Legacy whole-hole fallback | 48.10 | 4 |
-| BMI calculation | Existing single-screen | 2.61 | 1 |
-| Savings calculation | Existing single-screen | 2.83 | 1 |
-
-## Reported tokens per prompt (partial)
-
-| Case | Input | Cached (ratio) | Output |
-| --- | --- | --- | --- |
-| Notes, inline | 3,302 | 512 (15.5%) | 95 |
-| Notes, 2 screens | 31,019 | 6,400 (20.6%) | 4,167 |
-| Notes, 3 screens | 32,095 | 22,272 (69.4%) | 2,998 |
-| Books, 3 screens | 33,222 | 25,344 (76.3%) | 5,537 |
-| Shopping, related lists | 33,119 | 25,344 (76.5%) | 7,602 |
-| Medicines, 3 screens | 28,215 | 23,424 (83.0%) | 8,987 |
-| BMI calculation | 3,317 | 3,072 (92.6%) | 283 |
-| Savings calculation | 3,322 | 3,072 (92.5%) | 401 |
-
-## Separate follow-up: two-screen notes
-
-Same exact prompt, final build: **12.31 s**, one planning turn and one shared code-writing turn; input **24,251**, cached **17,152 (70.7%)**, output **2,333** (partial usage). Original: **22.35 s**, three planning turns and one writer. This confirms the two-call path on this one run, not a controlled latency claim. Offline replay also accepts all three original medicines planning replies with the final record normalization; that is parser evidence, not a native rerun.
-
-## Exact single-screen baseline matches
-
-The two identical upstream-main prompts retained one planning call and no code writer. BMI: **2.217 → 2.611 s**; savings: **2.331 → 2.830 s**. Reported input grew by 239 tokens in each; output remained 283 and 401 tokens respectively. These runs do not show a single-screen speed improvement. Host replay verifies the displayed initial results: BMI 22.2; savings $3,900 remaining and 10 months.
-
-## Initial-run functional evidence and gaps (historical)
-
-- **Native, final notes follow-up source, ephemeral proof:** empty editor, draft entry, Cancel without committing, fresh reopened editor, Save, edit/Cancel, committed edit, system Back and fresh editor after Back. Nine recorded stages. No saved project was created or changed. Delete was not native-tested.
-- **Native, original shopping source:** empty state, two lists, first-list item and isolated second-list item. Four stages were captured. The collector timed out later; native checked-state and shared-count confirmation were not completed and are not claimed.
-- **Real compiler/VM replay:** all eight original sources plus the follow-up pass bounded smoke. The shopping source preserves list/item ownership; ticking A changes its remaining count to zero while B stays one; direct list-removal handler invocation preserves B and its item. This last check is a direct host function call, not evidence of a working native removal control.
-- **Known functional omissions:** the final generated notes source declares `c_delete` but never binds it to a UI control. The original shopping source likewise declares `c_removeList` without a UI binding. Both requests explicitly asked for deletion. Therefore these apps are **not fully functionally complete**, despite pipeline acceptance. The current bounded gate does not prove requested-action coverage or UI reachability. A generic action-to-control coverage check is the next focused quality task; no shopping- or pill-specific framework has been added to hide this gap.
-- Initial/empty view checks are not an exhaustive navigation graph proof. Async races, persistence across process restart, all requested behaviors in books/medicines, and calendar/notification effects were not established by this subset. Medicine prompts explicitly excluded calendar reminders/notifications.
-
-## Evidence and safety
-
-Evidence root: `/home/mbolshov/vera-benchmarks/20261116-175339-multiscreen-agent`.
-
-Original `runs/*` and manifests are preserved; `follow-up/` contains its own source/HAP hashes and result. `native/notes/` and `native/shopping/` hold native layouts/screenshots; `replay-check.json` separates host evidence from native checks. The saved-project index hash is unchanged and the USB VPN was verified connected after testing. No uninstall, data clear, saved-project overwrite or benchmark force-stop was used. No credentials or raw traces were published. The existing remote baseline metrics page was not modified.
-
-See [the offline results sheet](multiscreen-agent-results.html), [the agent route](agent.md), [runtime contract](multiscreen-runtime.md), and `tools/vera-harness/app-plan-check.js`.
+The PR's earlier 180-prompt benchmark measured commit `c33174b`, before reachability/date/unification changes. It is not a benchmark of the current head, nor functional validation. Known limitations include planner omissions outside the structural guard, bounded search, and imperfect semantic verification. See [agent route](agent.md) for the surrounding pipeline.

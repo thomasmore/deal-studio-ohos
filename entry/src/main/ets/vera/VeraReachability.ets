@@ -15,7 +15,7 @@ const MAX_STATE_SIZE: number = 65536
 /** Freeze the clock too: two runs of the same bytecode must explore the same states. */
 class ReachHost extends UiHostEnvironment {
   invoke(module: string, name: string, args: RuntimeValue[], awaited: boolean): RuntimeValue {
-    if (module === 'std/time' && name !== 'atLocalTime') {
+    if (module === 'std/time') {
       switch (name) {
         case 'nowMillis': return new VeraNumberValue(1767268800000)
         case 'nowSeconds': return new VeraNumberValue(1767268800)

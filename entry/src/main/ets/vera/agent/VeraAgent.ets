@@ -177,9 +177,9 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
   // The full app plan has not entered the one-list/one-clock composer. One module, one state and one writer call chain.
   if (composed.appPlan !== null) {
     let app = composed.appPlan!
-    if (request.widget) { result.ms = Date.now() - started; return result }
     let plan = new ScreenPlan()
     plan.appPlan = app
+    plan.widget = request.widget
     plan.prompt = request.prompt
     plan.globals.set('__HEADER_STYLE__', 'none')
     plan.globals.set('__TITLE__', typeof app.base['title'] === 'string' ? app.base['title'] as string : 'App')
