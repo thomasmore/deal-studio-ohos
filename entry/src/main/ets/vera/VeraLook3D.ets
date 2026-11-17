@@ -17,6 +17,7 @@
 import { ResolvedTheme } from './VeraTheme'
 import { gfxColor } from './GfxPaint'
 import { WorldSpec, BodySpec, CameraSpec, TableSpec, SkySpec } from './VeraScene'
+import { quatXYZ as shapesQuatXYZ } from './VeraShapes'
 
 /** The sun: a directional light this bright (the kit's default of 1 does practically nothing), from here, at the origin. */
 export const LOOK_SUN_INTENSITY: number = 14
@@ -295,24 +296,9 @@ export function worldGlows(spec: WorldSpec): boolean {
 
 // ---------------------------------------------------------------- rotations
 
-/** Degrees about x, then y, then z (as VeraMotion.poseMatrix) as a quaternion [x, y, z, w]: q = qz * qy * qx. */
+/** Degrees about x, then y, then z as a quaternion [x, y, z, w]; the one in VeraShapes, which the scene's parts need too. */
 export function quatXYZ(degX: number, degY: number, degZ: number): number[] {
-  let hx = degX * Math.PI / 360
-  let hy = degY * Math.PI / 360
-  let hz = degZ * Math.PI / 360
-  let cx = Math.cos(hx)
-  let sx = Math.sin(hx)
-  let cy = Math.cos(hy)
-  let sy = Math.sin(hy)
-  let cz = Math.cos(hz)
-  let sz = Math.sin(hz)
-  // qy * qx
-  let w1 = cy * cx
-  let x1 = cy * sx
-  let y1 = sy * cx
-  let z1 = -sy * sx
-  // qz * (qy * qx)
-  return [cz * x1 - sz * y1, cz * y1 + sz * x1, cz * z1 + sz * w1, cz * w1 - sz * z1]
+  return shapesQuatXYZ(degX, degY, degZ)
 }
 
 function sub3(a: number[], b: number[]): number[] { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }

@@ -133,6 +133,13 @@ function view(state: AppState): ui.View {
   const earth = planet('earth', 0.15, 1.6, 12) + '\n  things.push(scene.orbit(scene.sphere("moon", 0, 0, 0, 0.05, "#cccccc"), "earth", 0.28, 3, 0));'
   refused(orrery(venus + '\n  ' + earth), CODE_ORBITS_CROSS, /"venus" \(orbit 1\.2\) and "earth" \(orbit 1\.6\).*reach 0\.47/, 'a moon through the next planet')
   refused(orrery(planet('mercury', 0.1, 0.5, 6)), CODE_ORBITS_CROSS, /"mercury" orbits "sun" at 0\.5, inside it/, 'an orbit inside its sun')
+  // Bodies sharing one orbit and one period never gain on each other: spaced round it they play (a generated ring of
+  // triangles, 2026-11-17); too close round it, or at one radius with different periods, they still meet.
+  const ring = (phases, periods) => phases.map((ph, k) =>
+    `things.push(scene.orbit(scene.sphere("p${k}", 0, 0, 0, 0.15, "#888888"), "sun", 1, ${periods[k]}, ${ph}));`).join('\n  ')
+  assert.equal(play(orrery(ring([0, 120, 240], [10, 10, 10]))), '', 'three spaced round one orbit play')
+  refused(orrery(ring([0, 10], [10, 10])), CODE_ORBITS_CROSS, /"p\d" \(orbit 1\) and "p\d" \(orbit 1\).*start 0\.3 apart/, 'too close round one orbit')
+  refused(orrery(ring([0, 180], [10, 14])), CODE_ORBITS_CROSS, /pass through each other/, 'one orbit, two speeds')
 }
 refused(swap(dice, 'scene.die("d1", -0.2, 0.3, 0.1', 'scene.die("d1", -0.2, -0.3, 0.1'), CODE_OUT_OF_WORLD, /below the table top/, 'a die under the table')
 refused(swap(dice, 'scene.die("d1", -0.2, 0.3, 0.1', 'scene.die("d1", 2, 0.3, 0.1'), CODE_OUT_OF_WORLD, /outside the table/, 'a die off the table')

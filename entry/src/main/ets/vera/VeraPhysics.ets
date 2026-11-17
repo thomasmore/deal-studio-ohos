@@ -11,6 +11,7 @@
  */
 
 import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, orbitPositions, topFace } from './VeraScene'
+import { pointBounds, PartRecords, PART_RECORD, addPartRecords } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
 
 /** Body kinds, as the native library numbers them. */
@@ -31,6 +32,8 @@ export interface PhysEngine {
   addBox(hx: number, hy: number, hz: number, kind: number): number
   addSphere(r: number, kind: number): number
   addCylinder(r: number, halfHeight: number, kind: number): number
+  /** A body of convex parts, records of PART_RECORD floats and the hulls' points (VeraShapes.PartRecords); -1 if refused. */
+  addParts(records: Float32Array, points: Float32Array, kind: number): number
   remove(i: number): void
   setPose(i: number, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number): void
   setMaterial(i: number, mass: number, restitution: number, friction: number): void
@@ -267,6 +270,30 @@ export class FakePhys implements PhysEngine {
   addBox(hx: number, hy: number, hz: number, kind: number): number { return this.add(kind, hx, hy, hz, false) }
   addSphere(r: number, kind: number): number { return this.add(kind, r, r, r, true) }
   addCylinder(r: number, halfHeight: number, kind: number): number { return this.add(kind, r, halfHeight, r, false) }
+  /** Stood in for by the box round its parts, about its origin: the shape itself is the native engine's (tools/phys-world-test.cpp). */
+  addParts(records: Float32Array, points: Float32Array, kind: number): number {
+    let n = Math.floor(records.length / PART_RECORD)
+    if (n === 0) { return -1 }
+    let reach = 0.0001
+    let half: number[] = [reach, reach, reach]
+    let used = 0
+    for (let k = 0; k < n; k++) {
+      let o = k * PART_RECORD
+      let type = records[o]
+      // How far the part reaches from its own centre, then from the body's origin, along each axis (a bound, not exact).
+      let r = type === 0 ? Math.hypot(records[o + 8], records[o + 9], records[o + 10]) : type === 1 ? records[o + 8]
+        : type === 2 ? Math.hypot(records[o + 8], records[o + 9]) : 0
+      if (type === 3) {
+        let m = records[o + 11]
+        for (let j = 0; j < m; j++) {
+          r = Math.max(r, Math.hypot(points[used + 3 * j], points[used + 3 * j + 1], points[used + 3 * j + 2]))
+        }
+        used += m * 3
+      }
+      for (let c = 0; c < 3; c++) { half[c] = Math.max(half[c], Math.abs(records[o + 1 + c]) + r) }
+    }
+    return this.add(kind, half[0], half[1], half[2], false)
+  }
 
   private valid(i: number): boolean {
     return i >= 0 && i < this.bodies.length && this.bodies[i].alive
@@ -724,6 +751,20 @@ export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set
   return resting
 }
 
+/** What the physics is given for a shape, a hull or a group: its convex parts, each where it sits in the body. */
+export function bodyRecords(b: BodySpec): PartRecords {
+  let out = new PartRecords()
+  if (b.shape !== 'group') {
+    addPartRecords(out, b.shape, b.dims, b.points, 0, 0, 0, [0, 0, 0, 1])
+    return out
+  }
+  for (let p of b.parts) {
+    addPartRecords(out, p.shape, p.dims, p.points, p.position[0], p.position[1], p.position[2],
+      quatXYZ(p.rotation[0], p.rotation[1], p.rotation[2]))
+  }
+  return out
+}
+
 function kindOf(b: BodySpec): number {
   if (b.motion === 'loose') { return PHYS_DYNAMIC }
   if (b.motion === 'kinematic') { return PHYS_KINEMATIC }
@@ -1162,6 +1203,9 @@ export class WorldSim {
       i = this.engine.addSphere(b.dims[0] / 2, kind)
     } else if (b.shape === 'cylinder') {
       i = this.engine.addCylinder(b.dims[0] / 2, b.dims[1] / 2, kind)
+    } else if (b.shape === 'shape' || b.shape === 'hull' || b.shape === 'group') {
+      let parts = bodyRecords(b)
+      i = this.engine.addParts(new Float32Array(parts.records), new Float32Array(parts.points), kind)
     } else {
       i = this.engine.addBox(b.dims[0] / 2, b.dims[1] / 2, b.dims[2] / 2, kind)
     }

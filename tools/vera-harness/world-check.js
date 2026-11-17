@@ -25,7 +25,9 @@ const traps = (fn, code, re, msg) => assert.throws(fn, e => e.trapCode === code 
 const thingArg = 'scene.box("t", 0, 0.5, 0, 1, 1, 1, "accent")'
 const calls = S.SCENE_FUNCTIONS.map((f, i) => {
   const args = f.params.filter(p => !p.optional).map(p => p.kind === 'number' ? '1' : p.kind === 'color' ? '"accent"'
-    : p.kind === 'boolean' ? 'true' : p.kind === 'thing' ? thingArg : p.name === 'id' ? '"b' + i + '"' : '"t"')
+    : p.kind === 'boolean' ? 'true' : p.kind === 'thing' ? thingArg : p.kind === 'thing[]' ? '[' + thingArg + ']'
+    : p.kind === 'number[]' ? '[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]'
+    : p.name === 'id' ? '"b' + i + '"' : '"t"')
   return `let v${i}: scene.Thing = scene.${f.name}(${args.join(', ')});`
 })
 const program = (buildBody, extra = '', world = 'ui.World("default", 0, "build", "")') => `
@@ -942,6 +944,99 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
         for (let f = 1; f < 30; f++) { sim.step(FRAME_MS, f / 60); for (const e of sim.takeEvents()) if (e.kind === 'hit') told.push(e) }
         assert.ok(told.every(e => e.body !== 'y' && !e.bodies.includes('y')), 'no hit names y: ' + JSON.stringify(told.map(e => e.body)))
       }
+    }
+    // Bodies of any shape: scene.shape (an outline, a sheet unless scene.thick) and scene.hull (3D points) are centred on their points' box,
+    // their dims are that box, they go to the engine as convex pieces, and new points make the body again.
+    {
+      const nums = a => new VeraArrayValue(a.map(v => new VeraNumberValue(v)))
+      const tri = [0.1, 0.1, 0.3, 0.1, 0.2, 0.3]
+      const w = S.decodeScene(new VeraArrayValue([call('table', 1.2, 0.9, 'surface'),
+        call('loose', call('thick', call('shape', 't', 0, 0.3, 0, nums(tri), 'accent'), 0.04), 1),
+        call('hull', 'p', 0.4, 0, 0, nums([-0.1, 0, -0.1, 0.1, 0, -0.1, 0.1, 0, 0.1, -0.1, 0, 0.1, 0, 0.15, 0]), 'warning')]))
+      const t = w.bodies.find(b => b.id === 't')
+      const p = w.bodies.find(b => b.id === 'p')
+      assert.equal(t.shape, 'shape')
+      assert.deepEqual(t.dims.map(v => +v.toFixed(6)), [0.2, 0.04, 0.2], 'a shape is as big as its outline and as thick as h')
+      assert.deepEqual(t.position.map(v => +v.toFixed(6)), [0.2, 0.3, 0.2], 'and stands where its outline\'s box is centred')
+      assert.deepEqual(p.dims.map(v => +v.toFixed(6)), [0.2, 0.15, 0.2], 'a hull is as big as its points')
+      assert.deepEqual(p.position.map(v => +v.toFixed(6)), [0.4, 0.075, 0], 'and centred on them')
+      class Counting extends P.FakePhys {
+        constructor() { super(); this.parts = [] }
+        addParts(records, points, kind) { this.parts.push([records.length / 12, points.length]); return super.addParts(records, points, kind) }
+      }
+      const eng = new Counting()
+      const sim = new P.WorldSim(eng)
+      sim.apply(S.diffWorld(null, w), w)
+      assert.deepEqual(eng.parts, [[1, 18], [1, 15]], 'one convex part each: ' + JSON.stringify(eng.parts))
+      assert.ok(sim.poseOf('t') !== null && sim.poseOf('p') !== null, 'both are in the engine')
+      const moved = S.decodeScene(new VeraArrayValue([call('table', 1.2, 0.9, 'surface'),
+        call('loose', call('thick', call('shape', 't', 0, 0.3, 0, nums([0.1, 0.1, 0.3, 0.1, 0.25, 0.3]), 'accent'), 0.04), 1),
+        call('hull', 'p', 0.4, 0, 0, nums([-0.1, 0, -0.1, 0.1, 0, -0.1, 0.1, 0, 0.1, -0.1, 0, 0.1, 0, 0.15, 0]), 'warning')]))
+      assert.deepEqual(S.diffWorld(w, moved).recreate.map(b => b.id), ['t'], 'new points make the body again')
+      const refuse = (fn, args, re) => assert.throws(() => call(fn, ...args), e => re.test(e.message), fn + ' refused: ' + re)
+      refuse('shape', ['x', 0, 0, 0, nums([0, 0, 1, 1, 1, 0, 0, 1]), 'ink'], /cross/)
+      refuse('shape', ['x', 0, 0, 0, nums([0, 0, 1, 0]), 'ink'], /at least 3/)
+      refuse('thick', [call('shape', 'x', 0, 0, 0, nums(tri), 'ink'), 0], /more than 0/)
+      refuse('thick', [call('box', 'x', 0, 0, 0, 1, 1, 1, 'ink'), 0.1], /takes a scene.shape/)
+      // Without thick a shape is a flat sheet: a hundredth of its larger side thick, a millimetre at least.
+      const sheet = S.decodeScene(new VeraArrayValue([call('shape', 's', 0, 0, 0, nums(tri), 'ink')])).bodies[0]
+      assert.ok(Math.abs(sheet.dims[1] - 0.002) < 1e-12, 'a 20 cm sheet is 2 mm thick: ' + sheet.dims[1])
+      const chip = S.decodeScene(new VeraArrayValue([call('shape', 'c', 0, 0, 0, nums([0, 0, 0.02, 0, 0, 0.02]), 'ink')])).bodies[0]
+      assert.equal(chip.dims[1], 0.001, 'a 2 cm sheet is 1 mm thick')
+      refuse('hull', ['x', 0, 0, 0, nums([0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1]), 'ink'], /one plane/)
+      // A wrapper takes them as it takes any body.
+      assert.doesNotThrow(() => call('turn', call('spin', call('thick', call('shape', 'y', 0, 0, 0, nums(tri), 'ink'), 0.1), 3), 90, 0, 0))
+    }
+    // A group: one body of parts. Centred on the box round its parts (turned parts counted turned), its dims that box; the
+    // physics gets a record per part where it sits; a change to a part makes it again; parts may not move on their own.
+    {
+      const thing = items => new VeraArrayValue(items)
+      const snow = (headColor = 'white') => call('group', 'man', 0, 0, 0, thing([
+        call('sphere', 'base', 0, 0.15, 0, 0.15, 'white'),
+        call('sphere', 'head', 0, 0.36, 0, 0.1, headColor),
+        call('turn', call('box', 'hat', 0, 0.5, 0, 0.3, 0.04, 0.04, 'ink'), 0, 0, 90)]))
+      const w = S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', snow(), 2)]))
+      const g = w.bodies[0]
+      assert.equal(g.shape, 'group')
+      assert.equal(g.parts.length, 3)
+      // The hat turned upright reaches 0.15 above and below 0.5: the group spans y 0 .. 0.65, x and z -0.15 .. 0.15.
+      assert.deepEqual(g.dims.map(v => +v.toFixed(6)), [0.3, 0.65, 0.3], 'dims are the box round the parts: ' + g.dims)
+      assert.deepEqual(g.position.map(v => +v.toFixed(6)), [0, 0.325, 0], 'centred on it')
+      assert.deepEqual(g.parts[0].position.map(v => +v.toFixed(6)), [0, -0.175, 0], 'parts moved to match')
+      const recs = P.bodyRecords(g)
+      assert.equal(recs.records.length, 3 * 12, 'a record per part')
+      assert.deepEqual(recs.records.slice(0, 4).map(v => +v.toFixed(6)), [1, 0, -0.175, 0], 'the base ball, where it sits')
+      assert.ok(Math.abs(recs.records[2 * 12 + 6] - Math.sin(Math.PI / 4)) < 1e-9, 'the hat turned 90 degrees about z')
+      class Counting extends P.FakePhys {
+        constructor() { super(); this.parts = [] }
+        addParts(records, points, kind) { this.parts.push(records.length / 12); return super.addParts(records, points, kind) }
+      }
+      const eng = new Counting()
+      const sim = new P.WorldSim(eng)
+      sim.apply(S.diffWorld(null, w), w)
+      assert.deepEqual(eng.parts, [3], 'one body of three parts')
+      for (let f = 0; f < 120; f++) sim.step(FRAME_MS, f / 60)
+      assert.ok(sim.poseOf('man')[1] > 0.3 && sim.poseOf('man')[1] < 0.36, 'it stands on the floor: ' + sim.poseOf('man')[1])
+      const w2 = S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', snow('accent'), 2)]))
+      assert.deepEqual(S.diffWorld(w, w2).recreate.map(b => b.id), ['man'], 'a part\'s new colour makes the group again')
+      assert.deepEqual(S.diffWorld(w, S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', snow(), 2)]))).recreate, [],
+        'the same group is left alone')
+      const part = call('box', 'p', 0, 0, 0, 0.1, 0.1, 0.1, 'ink')
+      const refuse = (items, re) => assert.throws(() => call('group', 'g', 0, 0, 0, thing(items)), e => re.test(e.message), String(re))
+      refuse([call('loose', part, 1)], /wrap the group instead/)
+      refuse([call('kick', part, 1, 0, 1, 0, 1)], /wrap the group instead/)
+      refuse([call('spin', part, 2)], /wrap the group instead/)
+      refuse([call('mark', part, 'accent')], /wrap the group instead/)
+      refuse([call('glow', part)], /wrap the group instead/)
+      refuse([call('group', 'inner', 0, 0, 0, thing([part]))], /is a group/)
+      refuse([call('die', 'd', 0, 0, 0, 0.1, 'white')], /is a die/)
+      refuse([], /1 to 16 parts/)
+      refuse([part, part], /two parts have the id/)
+      refuse(Array.from({length: 17}, (_, k) => call('box', 'p' + k, k, 0, 0, 0.1, 0.1, 0.1, 'ink')), /1 to 16 parts/)
+      // The group is wrapped as any body is.
+      assert.doesNotThrow(() => call('kick', call('mark', call('turn', snow(), 0, 30, 0), 'accent'), 1, 0, 2, 0, 1))
+      // The prompt names the parts' type.
+      assert.match(S.describeSceneForPrompt ? S.describeSceneForPrompt() : JSON.stringify(S.SCENE_FUNCTIONS.map(f => f.name)), /group/)
     }
     // A block added on top of a tower built in an earlier state rests on it, as one built with it would.
     {

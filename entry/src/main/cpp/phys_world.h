@@ -17,9 +17,12 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -113,6 +116,12 @@ public:
         }
         JoltOnce();
         maxBodies = std::max(maxBodies, 16);
+        touching_.reset(new std::atomic<uint8_t>[maxBodies]);
+        touchCount_ = static_cast<size_t>(maxBodies);
+        for (size_t i = 0; i < touchCount_; i++) {
+            touching_[i].store(0, std::memory_order_relaxed);
+        }
+        contacts_.setTouching(touching_.get(), touchCount_);
         temp_ = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
         jobs_ = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
                                                            std::max(threads, 0));
@@ -167,11 +176,83 @@ public:
         float minHalf = std::min(hx, std::min(hy, hz));
         return Add(new JPH::BoxShape(JPH::Vec3(hx, hy, hz), std::min(0.05f, 0.2f * minHalf)), kind);
     }
-    int addSphere(float r, int kind) { return Add(new JPH::SphereShape(r), kind); }
+    int addSphere(float r, int kind) { return Add(new JPH::SphereShape(r), kind, true); }
     int addCylinder(float r, float halfHeight, int kind)
     {
         float convex = std::min(0.05f, 0.2f * std::min(r, halfHeight));
-        return Add(new JPH::CylinderShape(halfHeight, r, convex), kind);
+        return Add(new JPH::CylinderShape(halfHeight, r, convex), kind, true);
+    }
+
+    // A body of any shape: count records of kPartRecord floats, [type, px, py, pz, qx, qy, qz, qw, a, b, c, n], each
+    // one convex part placed at p and turned by q about the body's origin: type 0 a box of half-extents a, b, c; 1 a
+    // sphere of radius a; 2 a cylinder along y of radius a and half-height b; 3 the convex hull of the next n points
+    // (x, y, z after x, y, z) of points, which holds pointFloats numbers. Several are joined in a static compound (Jolt
+    // finds its centre of mass and inertia). Returns its
+    // index, or -1: no parts or more than kMaxParts, an unknown type, a size not above 0, a hull of fewer than 4 or more
+    // than kMaxHullPoints points, points past the end, or no volume.
+    int addParts(const float *records, int count, const float *points, size_t pointFloats, int kind)
+    {
+        if (!system_ || records == nullptr || count <= 0 || count > kMaxParts) {
+            return -1;
+        }
+        std::vector<JPH::RefConst<JPH::Shape>> parts;
+        std::vector<JPH::Vec3> at;
+        std::vector<JPH::Quat> turn;
+        size_t used = 0;
+        bool round = false;
+        for (int k = 0; k < count; k++) {
+            const float *r = records + static_cast<size_t>(k) * kPartRecord;
+            for (int j = 0; j < kPartRecord; j++) {
+                if (!std::isfinite(r[j])) {
+                    return -1;
+                }
+            }
+            int type = static_cast<int>(r[0]);
+            float a = r[8], b = r[9], c = r[10];
+            round = round || type == 1 || type == 2;
+            JPH::RefConst<JPH::Shape> shape;
+            if (type == 0) {
+                if (!(a > 0 && b > 0 && c > 0)) {
+                    return -1;
+                }
+                shape = new JPH::BoxShape(JPH::Vec3(a, b, c), std::min(0.05f, 0.2f * std::min(a, std::min(b, c))));
+            } else if (type == 1) {
+                if (!(a > 0)) {
+                    return -1;
+                }
+                shape = new JPH::SphereShape(a);
+            } else if (type == 2) {
+                if (!(a > 0 && b > 0)) {
+                    return -1;
+                }
+                shape = new JPH::CylinderShape(b, a, std::min(0.05f, 0.2f * std::min(a, b)));
+            } else if (type == 3) {
+                int n = static_cast<int>(r[11]);
+                if (points == nullptr || n < 4 || n > kMaxHullPoints || used + static_cast<size_t>(n) * 3 > pointFloats) {
+                    return -1;
+                }
+                shape = Hull(points + used, n);
+                used += static_cast<size_t>(n) * 3;
+                if (shape == nullptr) {
+                    return -1;
+                }
+            } else {
+                return -1;
+            }
+            parts.push_back(shape);
+            at.push_back(JPH::Vec3(r[1], r[2], r[3]));
+            turn.push_back(JPH::Quat(r[4], r[5], r[6], r[7]).Normalized());
+        }
+        // One part at the origin, unturned, comes back as itself; one moved or turned as a RotatedTranslatedShape.
+        JPH::StaticCompoundShapeSettings compound;
+        for (size_t k = 0; k < parts.size(); k++) {
+            compound.AddShape(at[k], turn[k], parts[k]);
+        }
+        JPH::ShapeSettings::ShapeResult made = compound.Create();
+        if (made.HasError()) {
+            return -1;
+        }
+        return Add(made.Get(), kind, round);
     }
 
     void remove(int i)
@@ -254,7 +335,11 @@ public:
         if (!system_ || dt <= 0) {
             return;
         }
+        for (size_t i = 0; i < touchCount_; i++) {
+            touching_[i].store(0, std::memory_order_relaxed);
+        }
         system_->Update(dt, std::max(substeps, 1), temp_.get(), jobs_.get());
+        RollingResistance(dt);
         std::vector<int> moved;
         ApplyBound(moved);
         // The sleep cap is per body: one awake for kSleepCapSeconds in a row (jittering, or kept
@@ -351,12 +436,29 @@ public:
 private:
     static constexpr float kSleepCapSeconds = 8.0f;
     static constexpr size_t kContactCap = 1024;
+    // Half-extent below which a moving body is cast along its motion (a sheet 2 cm thick or thinner).
+    static constexpr float kThinHalf = 0.01f;
+    // Rolling and spinning resistance. Jolt has neither, so a ball rolls on, a snowman on its side rolls in circles and
+    // one standing spins on its round foot like a top, each until the sleep cap. A body with a round side, touching
+    // something, loses kRollDecel m/s^2 of the speed its surface turns at (its turn times its smallest half-extent),
+    // whichever way. A body of flat faces only (a box, a die, a hull) is left alone: friction stops it within a second
+    // or so, and slowing its last turn would leave a die leaning on a wall instead of falling flat.
+    static constexpr float kRollDecel = 1.0f;
+
+public:
+    static constexpr int kMaxHullPoints = 128;
+    static constexpr int kMaxParts = 32;
+    static constexpr int kPartRecord = 12;
+
+private:
 
     struct Slot {
         JPH::BodyID id;
         int kind = 0;
         bool alive = false;
         float awakeFor = 0;  // seconds awake in a row, for the sleep cap
+        bool rolls = false;  // has a round side: a sphere, a cylinder, or parts with one of them
+        float rollRadius = 0.05f;  // its smallest half-extent: how far its surface is from its centre, for rolling
         float home[7] = {0, 0, 0, 0, 0, 0, 1};
     };
 
@@ -365,6 +467,7 @@ private:
         void OnContactAdded(const JPH::Body &b1, const JPH::Body &b2, const JPH::ContactManifold &m,
                             JPH::ContactSettings &) override
         {
+            Touch(b1, b2);
             JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
             float speed = (b1.GetPointVelocity(p) - b2.GetPointVelocity(p)).Dot(m.mWorldSpaceNormal);
             std::lock_guard<std::mutex> lock(mutex_);
@@ -374,6 +477,17 @@ private:
             }
             items_.push_back({static_cast<float>(b1.GetUserData()), static_cast<float>(b2.GetUserData()),
                               std::fabs(speed)});
+        }
+        void OnContactPersisted(const JPH::Body &b1, const JPH::Body &b2, const JPH::ContactManifold &,
+                                JPH::ContactSettings &) override
+        {
+            Touch(b1, b2);
+        }
+        // Where the bodies touching in this step are marked, one flag per body index (called from the job threads).
+        void setTouching(std::atomic<uint8_t> *flags, size_t count)
+        {
+            touching_ = flags;
+            touchCount_ = count;
         }
         int drain(float *out, int cap)
         {
@@ -401,6 +515,16 @@ private:
         }
 
     private:
+        void Touch(const JPH::Body &b1, const JPH::Body &b2)
+        {
+            for (JPH::uint64 i : {b1.GetUserData(), b2.GetUserData()}) {
+                if (i < touchCount_) {
+                    touching_[i].store(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        std::atomic<uint8_t> *touching_ = nullptr;
+        size_t touchCount_ = 0;
         struct Item { float a, b, speed; };
         mutable std::mutex mutex_;
         std::vector<Item> items_;
@@ -432,7 +556,32 @@ private:
         BI().DestroyBody(s.id);
     }
 
-    int Add(JPH::Shape *shape, int kind)
+    // The convex hull of n points (x, y, z after x, y, z), rounded as a box is; null when Jolt refuses it or it has no
+    // volume (Jolt makes a flat hull of points in one plane; a body needs a cubic millimetre at least).
+    static JPH::RefConst<JPH::Shape> Hull(const float *v, int n)
+    {
+        JPH::Array<JPH::Vec3> points;
+        float lo[3] = {INFINITY, INFINITY, INFINITY};
+        float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+        for (int j = 0; j < n; j++) {
+            const float *p = v + static_cast<size_t>(j) * 3;
+            for (int c = 0; c < 3; c++) {
+                lo[c] = std::min(lo[c], p[c]);
+                hi[c] = std::max(hi[c], p[c]);
+            }
+            points.push_back(JPH::Vec3(p[0], p[1], p[2]));
+        }
+        float minHalf = 0.5f * std::min(hi[0] - lo[0], std::min(hi[1] - lo[1], hi[2] - lo[2]));
+        JPH::ConvexHullShapeSettings hull(points, std::min(0.05f, 0.2f * minHalf));
+        JPH::ShapeSettings::ShapeResult made = hull.Create();
+        if (made.HasError() || made.Get()->GetVolume() < 1e-9f) {
+            return nullptr;
+        }
+        return made.Get();
+    }
+
+    // rolls: the shape has a round side (a sphere or cylinder in it), so it gets rolling resistance.
+    int Add(const JPH::Shape *shape, int kind, bool rolls = false)
     {
         if (!system_) {
             return -1;
@@ -446,6 +595,14 @@ private:
         s.mAngularDamping = 0.3f;
         s.mRestitution = 0.3f;
         s.mFriction = 0.5f;
+        // A thin moving body (a sheet, a coin) can pass most of its thickness into the ground in one step, deeper than
+        // the penetration slop pushes back out of: cast it along its motion instead (Jolt's continuous collision).
+        if (kind != kStatic) {
+            JPH::Vec3 extent = shape->GetLocalBounds().GetExtent();
+            if (std::min(extent.GetX(), std::min(extent.GetY(), extent.GetZ())) < kThinHalf) {
+                s.mMotionQuality = JPH::EMotionQuality::LinearCast;
+            }
+        }
         JPH::Body *body = BI().CreateBody(s);
         if (!body) {
             return -1;
@@ -465,12 +622,32 @@ private:
         slot.kind = kind;
         slot.alive = true;
         slot.awakeFor = 0;
+        slot.rolls = rolls;
+        JPH::Vec3 extent = shape->GetLocalBounds().GetExtent();
+        slot.rollRadius = std::max(0.005f, std::min(extent.GetX(), std::min(extent.GetY(), extent.GetZ())));
         const float home[7] = {0, 0, 0, 0, 0, 0, 1};
         std::copy(home, home + 7, slot.home);
         if (kind == kDynamic) {
             BI().ActivateBody(slot.id);
         }
         return idx;
+    }
+
+    void RollingResistance(float dt)
+    {
+        for (size_t i = 0; i < bodies_.size() && i < touchCount_; i++) {
+            Slot &s = bodies_[i];
+            if (!s.alive || s.kind != kDynamic || !s.rolls || !touching_[i].load(std::memory_order_relaxed) || !BI().IsActive(s.id)) {
+                continue;
+            }
+            JPH::Vec3 w = BI().GetAngularVelocity(s.id);
+            float turn = w.Length();
+            if (turn <= 0) {
+                continue;
+            }
+            float left = std::max(0.0f, turn - kRollDecel / s.rollRadius * dt);
+            BI().SetAngularVelocity(s.id, w * (left / turn));
+        }
     }
 
     void ApplyBound(std::vector<int> &moved)
@@ -506,6 +683,8 @@ private:
     ObjectVsBroadPhase objVsBp_;
     PairFilter pairFilter_;
     Contacts contacts_;
+    std::unique_ptr<std::atomic<uint8_t>[]> touching_;  // per body index: touched something in the step under way
+    size_t touchCount_ = 0;
     std::unique_ptr<JPH::TempAllocatorImpl> temp_;
     std::unique_ptr<JPH::JobSystemThreadPool> jobs_;
     std::unique_ptr<JPH::PhysicsSystem> system_;

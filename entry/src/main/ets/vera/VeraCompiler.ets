@@ -1447,7 +1447,7 @@ function buildStdSceneModule(): ModuleInterface {
     let params: VeraType[] = []
     let required = 0
     for (let p of f.params) {
-      params.push(p.kind === 'thing' ? thingType : tableFieldType(p.kind))
+      params.push(p.kind === 'thing' ? thingType : p.kind === 'thing[]' ? new VeraArrayType(thingType) : tableFieldType(p.kind))
       if (!p.optional) required = params.length
     }
     fns.push(new ExternalFunction(f.name, params, thingType, false, required))

@@ -22,6 +22,7 @@ import { RuntimeValue, VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraA
   RuntimeTrap } from './VeraInterpreter'
 import { GfxParam, GfxFunction, GFX_ROLES } from './VeraGfx'
 import { SURFACE_PATTERNS, surfacePattern } from './VeraSurfaces'
+import { MAX_SHAPE_POINTS, MAX_BODY_PARTS, outlineCheck, hullCheck, pointBounds, partBounds, partCount } from './VeraShapes'
 
 /** Class identities of the module's two types, as the compiler names them. */
 export const SCENE_THING: string = 'std/scene:Thing'
@@ -37,7 +38,12 @@ export const MAX_SKY_STARS: number = 3000
 export const SCENE_EVENT_KINDS: string[] = ['tap', 'swipe', 'hit', 'settled']
 
 /** Things that are bodies, which every wrapper takes; the rest (camera, table, floor) set up the world. */
-const BODY_KINDS: string[] = ['box', 'sphere', 'cylinder', 'die']
+const BODY_KINDS: string[] = ['box', 'sphere', 'cylinder', 'die', 'shape', 'hull', 'group']
+/** scene.shape without scene.thick is a sheet this share of its larger side thick, and never thinner than SHEET_MIN metres. */
+export const SHEET_RATIO: number = 0.01
+export const SHEET_MIN: number = 0.001
+/** The most parts one scene.group holds. */
+export const MAX_GROUP_PARTS: number = 16
 
 function num(name: string): GfxParam { return new GfxParam(name, 'number') }
 function str(name: string): GfxParam { return new GfxParam(name, 'string') }
@@ -52,6 +58,18 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'a ball of radius r centred on x, y, z: a ball, a planet, a sun, a marble'),
   new GfxFunction('cylinder', [str('id'), num('x'), num('y'), num('z'), num('r'), num('h'), color()], 'thing',
     'an upright cylinder of radius r and height h centred on x, y, z: a can, a pillar, a coin (small h), a tower'),
+  new GfxFunction('shape', [str('id'), num('x'), num('y'), num('z'), new GfxParam('points', 'number[]'), color()], 'thing',
+    'a flat body of any outline, thin as a sheet, lying level (wrap it in thick only for a thing with a thickness). points are its corners in order round it, [x1, z1, x2, z2, ...] in metres ' +
+    'from x, z (3 to ' + MAX_SHAPE_POINTS.toString() + ' corners, sides not crossing; a star, an L or a letter is fine). For a ' +
+    'shape that is not a box, ball or cylinder -- a triangle, a star, an arrow, a game piece; turn it to stand it up'),
+  new GfxFunction('hull', [str('id'), num('x'), num('y'), num('z'), new GfxParam('points', 'number[]'), color()], 'thing',
+    'the smallest convex body round points [x1, y1, z1, x2, y2, z2, ...] in metres from x, y, z (4 to ' +
+    MAX_SHAPE_POINTS.toString() + ' points, not all in one plane): a pyramid, a crystal, a gem, a wedge'),
+  new GfxFunction('group', [str('id'), num('x'), num('y'), num('z'), new GfxParam('parts', 'thing[]')], 'thing',
+    'one rigid body made of parts -- an animal, a vehicle, a snowman, furniture: each part a box, sphere, cylinder, shape or ' +
+    'hull placed by its own x, y, z from the group\'s x, y, z (turn a part to tilt it; 1 to ' + MAX_GROUP_PARTS.toString() +
+    ' parts). The group falls, is thrown, turns and is tapped as one body (a tap tells the part in e.other); wrap the group, ' +
+    'never a part, in loose, kick, spin, orbit, glow or mark'),
   new GfxFunction('die', [str('id'), num('x'), num('y'), num('z'), num('size'), color()], 'thing',
     'a die with pips, a cube of side size centred on x, y, z; when it comes to rest the event "settled" tells the face on top ' +
     '(1..6) in e.values, in the order of e.bodies'),
@@ -80,6 +98,9 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'the thing turns about its upright axis once every periodS seconds (negative turns the other way): a planet, a turntable'),
   new GfxFunction('turn', [thing(), num('rx'), num('ry'), num('rz')], 'thing',
     'the thing\'s starting rotation, in degrees about x, y and z: a tilted box, a fallen pillar'),
+  new GfxFunction('thick', [thing(), num('h')], 'thing',
+    'gives a scene.shape a thickness of h metres (y), for a thing that has one: a tile, a coin, a game piece, a slab. ' +
+    'Never for a thing asked for flat or thin: without it a shape is already a flat sheet'),
   new GfxFunction('glow', [thing()], 'thing',
     'the thing shines by itself, casts no shadow and, if it stands still, lights the bodies round it from where it is, ' +
     'each brighter on its side facing it: a sun, a lamp, a fire'),
@@ -126,8 +147,12 @@ export class SceneOrbit {
 
 /** One thing as the program built it, wrappers applied. Plain data, copied by every wrapper. */
 export class SceneThing {
-  /** 'box' | 'sphere' | 'cylinder' | 'die' | 'table' | 'floor' | 'camera' */
+  /** 'box' | 'sphere' | 'cylinder' | 'die' | 'shape' | 'hull' | 'table' | 'floor' | 'camera' */
   kind: string = ''
+  /** scene.shape's outline [x1, z1, ...] or scene.hull's points [x1, y1, z1, ...], about x, y, z; [] for the rest. */
+  points: number[] = []
+  /** scene.group's parts, each placed about the group's x, y, z; [] for the rest. */
+  parts: SceneThing[] = []
   id: string = ''
   x: number = 0
   y: number = 0
@@ -178,7 +203,7 @@ export class SceneThing {
     t.rx = this.rx; t.ry = this.ry; t.rz = this.rz; t.glow = this.glow
     t.pattern = this.pattern; t.color2 = this.color2
     t.ringInner = this.ringInner; t.ringOuter = this.ringOuter; t.ringColor = this.ringColor; t.mark = this.mark
-    t.trail = this.trail; t.stars = this.stars
+    t.trail = this.trail; t.stars = this.stars; t.points = this.points; t.parts = this.parts
     return t
   }
 }
@@ -223,6 +248,103 @@ function positive(n: number, what: string): number {
   return n
 }
 
+/** A number[] argument, every element finite, at most `most` numbers. */
+function asNumbers(args: RuntimeValue[], i: number, what: string, most: number): number[] {
+  let v = i < args.length ? args[i] : null
+  if (!(v instanceof VeraArrayValue)) { throw new RuntimeTrap('R0020', 'scene: ' + what + ' must be a number[]') }
+  let items = (v as VeraArrayValue).elements
+  if (items.length > most) {
+    throw new RuntimeTrap('R0029', 'scene: ' + what + ' holds at most ' + most.toString() + ' numbers; got ' + items.length.toString())
+  }
+  let out: number[] = []
+  for (let item of items) {
+    if (!(item instanceof VeraNumberValue)) { throw new RuntimeTrap('R0020', 'scene: ' + what + ' must be a number[]') }
+    out.push(finite((item as VeraNumberValue).value, what))
+  }
+  return out
+}
+
+/**
+ * The body put where its points' box is centred, and the points moved to match: its x, y, z, w, h, d are then that box,
+ * as every other body's are, so placing it, resting it on others and framing it need nothing of their own.
+ */
+function centreOnPoints(t: SceneThing, points: number[], dims: number): void {
+  let b = pointBounds(points, dims)
+  let cx = (b[0] + b[dims]) / 2
+  let cy = dims === 3 ? (b[1] + b[4]) / 2 : 0
+  let cz = dims === 3 ? (b[2] + b[5]) / 2 : (b[1] + b[3]) / 2
+  let out: number[] = []
+  for (let i = 0; i < points.length; i += dims) {
+    if (dims === 3) { out.push(points[i] - cx, points[i + 1] - cy, points[i + 2] - cz) } else { out.push(points[i] - cx, points[i + 1] - cz) }
+  }
+  t.points = out
+  t.x += cx; t.y += cy; t.z += cz
+  t.w = b[dims] - b[0]
+  if (dims === 3) {
+    t.h = b[4] - b[1]
+    t.d = b[5] - b[2]
+  } else {
+    t.d = b[3] - b[1]
+  }
+}
+
+/**
+ * scene.group's parts: bodies a group may hold, each still where the program put it (its x, y, z about the group's).
+ * What moves, lights or marks a body is the group's to have: a part wrapped in one is refused with what to do instead.
+ */
+function asParts(args: RuntimeValue[], i: number, groupId: string): SceneThing[] {
+  let v = i < args.length ? args[i] : null
+  if (!(v instanceof VeraArrayValue)) { throw new RuntimeTrap('R0020', 'scene.group: parts must be a scene.Thing[]') }
+  let items = (v as VeraArrayValue).elements
+  let where = 'scene.group "' + groupId + '"'
+  if (items.length < 1 || items.length > MAX_GROUP_PARTS) {
+    throw new RuntimeTrap('R0029', where + ' holds 1 to ' + MAX_GROUP_PARTS.toString() + ' parts; got ' + items.length.toString())
+  }
+  let out: SceneThing[] = []
+  let ids = new Set<string>()
+  let pieces = 0
+  for (let item of items) {
+    if (!(item instanceof SceneThingValue)) { throw new RuntimeTrap('R0020', where + ': parts must be scene.Things') }
+    let t = (item as SceneThingValue).thing
+    let part = where + ': part "' + t.id + '"'
+    if (t.kind === 'group') { throw new RuntimeTrap('R0029', part + ' is a group: put its parts in this group instead') }
+    if (t.kind === 'die') { throw new RuntimeTrap('R0029', part + ' is a die: a die is a body of its own, not a part') }
+    if (BODY_KINDS.indexOf(t.kind) < 0) {
+      throw new RuntimeTrap('R0029', part + ' is a ' + t.kind + ': a part is a box, sphere, cylinder, shape or hull')
+    }
+    let moved = t.motion !== 'static' || t.kick !== null || t.orbit !== null || t.spinPeriodS !== 0
+    if (moved || t.glow || t.mark.length > 0 || t.trail || t.ringOuter > 0) {
+      throw new RuntimeTrap('R0029', part + ' is wrapped in loose, kick, spin, orbit, glow, mark, trail or rings: wrap the ' +
+        'group instead -- its parts move, shine and are marked with it')
+    }
+    if (ids.has(t.id)) { throw new RuntimeTrap('R0029', where + ': two parts have the id "' + t.id + '"') }
+    ids.add(t.id)
+    pieces += partCount(t.kind, t.points)
+    out.push(t.copy())
+  }
+  if (pieces > MAX_BODY_PARTS) {
+    throw new RuntimeTrap('R0029', where + ' is cut into ' + pieces.toString() + ' convex pieces, more than ' +
+      MAX_BODY_PARTS.toString() + ': use fewer parts or simpler outlines')
+  }
+  return out
+}
+
+/** The group put where the box round its parts is centred, the parts moved to match, and its w, h, d that box. */
+function centreOnParts(t: SceneThing): void {
+  let all: number[] = []
+  for (let p of t.parts) {
+    let b = partBounds(p.kind, [p.w, p.h, p.d], p.points, [p.x, p.y, p.z], [p.rx, p.ry, p.rz])
+    all.push(b[0], b[1], b[2], b[3], b[4], b[5])
+  }
+  let b = pointBounds(all, 3)
+  let cx = (b[0] + b[3]) / 2
+  let cy = (b[1] + b[4]) / 2
+  let cz = (b[2] + b[5]) / 2
+  for (let p of t.parts) { p.x -= cx; p.y -= cy; p.z -= cz }
+  t.x += cx; t.y += cy; t.z += cz
+  t.w = b[3] - b[0]; t.h = b[4] - b[1]; t.d = b[5] - b[2]
+}
+
 function asId(args: RuntimeValue[], i: number, fn: string): string {
   let id = asStr(args, i)
   if (id.length === 0) { throw new RuntimeTrap('R0029', 'scene.' + fn + ' needs an id: a name no other body in the world has') }
@@ -233,11 +355,11 @@ function asId(args: RuntimeValue[], i: number, fn: string): string {
 function asBody(args: RuntimeValue[], fn: string): SceneThing {
   let v = args.length > 0 ? args[0] : null
   if (!(v instanceof SceneThingValue)) {
-    throw new RuntimeTrap('R0020', 'scene.' + fn + ' takes a scene.Thing made by scene.box, sphere, cylinder or die')
+    throw new RuntimeTrap('R0020', 'scene.' + fn + ' takes a scene.Thing made by scene.box, sphere, cylinder, die, shape, hull or group')
   }
   let t = (v as SceneThingValue).thing
   if (BODY_KINDS.indexOf(t.kind) < 0) {
-    throw new RuntimeTrap('R0029', 'scene.' + fn + ' takes a body (box, sphere, cylinder, die), not the ' + t.kind)
+    throw new RuntimeTrap('R0029', 'scene.' + fn + ' takes a body (box, sphere, cylinder, die, shape, hull, group), not the ' + t.kind)
   }
   return t.copy()
 }
@@ -273,6 +395,32 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
       let r = positive(asNum(args, 4, 'r'), 'r')
       t.w = 2 * r; t.h = positive(asNum(args, 5, 'h'), 'h'); t.d = 2 * r
       t.color = asStr(args, 6)
+      return wrap(t)
+    }
+    case 'shape': {
+      let t = body('shape', args)
+      let points = asNumbers(args, 4, 'points', 2 * MAX_SHAPE_POINTS)
+      let why = outlineCheck(points)
+      if (why.length > 0) { throw new RuntimeTrap('R0029', 'scene.shape "' + t.id + '": ' + why) }
+      centreOnPoints(t, points, 2)
+      // A sheet: as thin as a hundredth of its larger side, a millimetre at least (the physics needs a volume).
+      t.h = Math.max(SHEET_MIN, SHEET_RATIO * Math.max(t.w, t.d))
+      t.color = asStr(args, 5)
+      return wrap(t)
+    }
+    case 'hull': {
+      let t = body('hull', args)
+      let points = asNumbers(args, 4, 'points', 3 * MAX_SHAPE_POINTS)
+      let why = hullCheck(points)
+      if (why.length > 0) { throw new RuntimeTrap('R0029', 'scene.hull "' + t.id + '": ' + why) }
+      centreOnPoints(t, points, 3)
+      t.color = asStr(args, 5)
+      return wrap(t)
+    }
+    case 'group': {
+      let t = body('group', args)
+      t.parts = asParts(args, 4, t.id)
+      centreOnParts(t)
       return wrap(t)
     }
     case 'die': {
@@ -363,6 +511,16 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
     case 'turn': {
       let t = asBody(args, 'turn')
       t.rx = asNum(args, 1, 'rx'); t.ry = asNum(args, 2, 'ry'); t.rz = asNum(args, 3, 'rz')
+      return wrap(t)
+    }
+    case 'thick': {
+      let t = asBody(args, 'thick')
+      let h = asNum(args, 1, 'h')
+      if (t.kind !== 'shape') {
+        throw new RuntimeTrap('R0029', 'scene.thick takes a scene.shape, not a ' + t.kind + ': give a ' + t.kind + ' its size where it is made')
+      }
+      if (!(h > 0)) { throw new RuntimeTrap('R0029', 'scene.thick "' + t.id + '": h must be more than 0; got ' + h.toString() + ' (a shape without thick is already flat)') }
+      t.h = h
       return wrap(t)
     }
     case 'glow': {
@@ -469,8 +627,12 @@ export class SkySpec {
 
 export class BodySpec {
   id: string = ''
-  /** 'box' | 'sphere' | 'cylinder' (a die is a box with isDie) */
+  /** 'box' | 'sphere' | 'cylinder' | 'shape' | 'hull' (a die is a box with isDie) */
   shape: string = 'box'
+  /** A shape's outline [x1, z1, ...] or a hull's points [x1, y1, z1, ...], about its position; [] for the rest. */
+  points: number[] = []
+  /** A group's parts, each with its position and rotation about the group's centre; [] for the rest. */
+  parts: BodySpec[] = []
   /** Extents along x, y, z in metres. */
   dims: number[] = [0, 0, 0]
   /** Where it was put, in metres: for a loose body, where it starts; for an orbiting one, unused. */
@@ -514,6 +676,8 @@ function bodySpec(t: SceneThing): BodySpec {
   b.id = t.id
   b.shape = t.kind === 'die' ? 'box' : t.kind
   b.dims = [t.w, t.h, t.d]
+  b.points = t.points
+  b.parts = t.parts.map((p: SceneThing): BodySpec => bodySpec(p))
   b.position = [t.x, t.y, t.z]
   b.rotation = [t.rx, t.ry, t.rz]
   b.color = t.color
@@ -631,6 +795,13 @@ export class WorldDiff {
   }
 }
 
+/** Everything about a group's parts that its body is made from: a change to any of it makes the group again. */
+function partsKey(b: BodySpec): string {
+  if (b.parts.length === 0) { return '' }
+  return JSON.stringify(b.parts.map((p: BodySpec): string => [p.id, p.shape, p.dims.join(','), p.points.join(','),
+    p.position.join(','), p.rotation.join(','), p.color, p.pattern, p.color2].join('|')))
+}
+
 function sameNumbers(a: number[], b: number[]): boolean {
   if (a.length !== b.length) { return false }
   for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) { return false } }
@@ -675,7 +846,9 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
     }
     kept.add(b.id)
     // A painted body's colours are in its mesh, so a new colour, pattern, rings or mark makes it again.
-    if (old.shape !== b.shape || old.isDie !== b.isDie || !sameNumbers(old.dims, b.dims) || old.motion !== b.motion ||
+    if (old.shape !== b.shape || old.isDie !== b.isDie || !sameNumbers(old.dims, b.dims) || !sameNumbers(old.points, b.points) ||
+        partsKey(old) !== partsKey(b) ||
+        old.motion !== b.motion ||
         old.mass !== b.mass || old.pattern !== b.pattern || old.color2 !== b.color2 || !sameNumbers(old.rings, b.rings) ||
         old.ringColor !== b.ringColor || old.mark !== b.mark || (b.pattern.length > 0 && old.color !== b.color)) {
       diff.recreate.push(b)
@@ -846,7 +1019,10 @@ export function describeSceneForPrompt(): string {
   lines.push('  Units are metres; y is up and the floor or table top is y = 0, so a box of height h stands on it at y = h / 2.')
   for (let f of SCENE_FUNCTIONS) {
     let args: string[] = []
-    for (let p of f.params) { args.push(p.kind === 'thing' ? 'thing: scene.Thing' : paramText(p)) }
+    for (let p of f.params) {
+      args.push(p.kind === 'thing' ? 'thing: scene.Thing' : p.kind === 'thing[]' ? p.name + ': scene.Thing[]'
+        : p.kind === 'number[]' ? p.name + ': number[]' : paramText(p))
+    }
     lines.push('  scene.' + f.name + '(' + args.join(', ') + '): scene.Thing  -- ' + f.summary)
   }
   let fields: string[] = []
@@ -858,7 +1034,7 @@ export function describeSceneForPrompt(): string {
     'and speed its speed; settled every ' +
     'loose body come to rest after a throw (bodies the ids; values the face each die shows, 1..6, and for any other body 1 when ' +
     'it was knocked from where it was built, moved or tipped over, else 0). body is "" for a tap on ' +
-    'empty space')
+    'empty space; a tap on a group is its id in body and the part tapped in other')
   lines.push('  Wrappers take a thing and return it changed, so they nest: scene.kick(scene.loose(scene.die("d1", 0, 0.5, 0, 0.3, "white"), 1), ' +
     'state.throws, 2, 3, 0, 2). Without loose, kick, orbit or spin a body never moves.')
   lines.push('  Every body has an id of its own (two bodies with one id stop the program); at most ' + MAX_WORLD_BODIES.toString() +

@@ -59,6 +59,12 @@ Scale, units and placement:
   meant to stand together touch: a row of side s is s apart, a stack s higher each level. Bodies meant to be told
   apart -- thrown, picked, counted -- start about 1.5 times their size apart, so they read as separate things. Loose
   bodies start over the table or floor, near x = 0, z = 0; with a table, inside its width and depth.
+- A body has the shape of the thing it is. A box, ball or cylinder only for a thing of that shape; any other flat
+  shape (a triangle, a star, an arrow, a piece of a game) is scene.shape with its corners in order round it -- a flat
+  sheet; scene.thick only for a thing that has a thickness (a tile, a coin, a slab), never for one asked for flat or
+  thin -- and a solid one with points and flat faces (a pyramid, a crystal, a wedge) is scene.hull. Never stand a
+  box in for a shape the request names. A thing of several parts (an animal, a vehicle, a snowman, furniture) is one scene.group of its
+  parts, each placed from the group's centre; wrap the group, never a part, so it falls and is thrown as one body.
 - Every body has an id of its own (ids built with ui.numberToString in loops), at most 300 bodies; about 100 loose
   bodies is plenty.
 - The host adds nothing to the scene by itself. Behind the world is the app's background unless scene.sky gives a

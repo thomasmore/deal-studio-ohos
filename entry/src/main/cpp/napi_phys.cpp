@@ -11,6 +11,7 @@
 #include "phys_world.h"
 
 #include <chrono>
+#include <cmath>
 #include <thread>
 #endif
 
@@ -137,6 +138,17 @@ napi_value PhysAddCylinder(napi_env env, napi_callback_info info)
     ARGS(3);
     return Num(env, Idle().addCylinder(F(0, 0), F(0, 1), I(0, 2)));
 }
+// physAddParts(records, points, kind): a body of convex parts, see PhysWorld::addParts.
+napi_value PhysAddParts(napi_env env, napi_callback_info info)
+{
+    ARGS(3);
+    size_t recordFloats = 0;
+    size_t pointFloats = 0;
+    const float *records = argc > 0 ? FloatArray(env, argv[0], &recordFloats) : nullptr;
+    const float *points = argc > 1 ? FloatArray(env, argv[1], &pointFloats) : nullptr;
+    int count = static_cast<int>(recordFloats / vphys::PhysWorld::kPartRecord);
+    return Num(env, records ? Idle().addParts(records, count, points, points ? pointFloats : 0, I(0, 2)) : -1);
+}
 napi_value PhysRemove(napi_env env, napi_callback_info info)
 {
     ARGS(1);
@@ -229,6 +241,7 @@ napi_value Register(napi_env env, napi_value exports)
         D("physAddBox", PhysAddBox),
         D("physAddSphere", PhysAddSphere),
         D("physAddCylinder", PhysAddCylinder),
+        D("physAddParts", PhysAddParts),
         D("physRemove", PhysRemove),
         D("physSetPose", PhysSetPose),
         D("physSetMaterial", PhysSetMaterial),

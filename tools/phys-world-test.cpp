@@ -7,6 +7,7 @@
 
 #include "phys_world.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -547,6 +548,267 @@ void TestSleepCap()
     Check(awakeSteps > 60 * 8 - 10, "sleep cap: a body pushed all along stays awake up to its cap");
 }
 
+// Bodies of any shape: records of convex parts (PhysWorld::addParts), one rigid body. A prism is an outline's corners at
+// its top and bottom; a part record is [type, p, q, a, b, c, n].
+struct Parts {
+    std::vector<float> records;
+    std::vector<float> points;
+    void Part(int type, float px, float py, float pz, float a, float b, float c, int n = 0,
+              float qx = 0, float qy = 0, float qz = 0, float qw = 1)
+    {
+        records.insert(records.end(), {static_cast<float>(type), px, py, pz, qx, qy, qz, qw, a, b, c, static_cast<float>(n)});
+    }
+    void Hull(const std::vector<float> &v, float px = 0, float py = 0, float pz = 0)
+    {
+        Part(3, px, py, pz, 0, 0, 0, static_cast<int>(v.size() / 3));
+        points.insert(points.end(), v.begin(), v.end());
+    }
+    int Add(vphys::PhysWorld &w, int kind = vphys::kDynamic)
+    {
+        return w.addParts(records.data(), static_cast<int>(records.size() / 12), points.empty() ? nullptr : points.data(),
+                          points.size(), kind);
+    }
+};
+
+std::vector<float> Prism(const std::vector<float> &xz, float h)
+{
+    std::vector<float> v;
+    for (size_t i = 0; i + 1 < xz.size(); i += 2) {
+        v.insert(v.end(), {xz[i], h / 2, xz[i + 1], xz[i], -h / 2, xz[i + 1]});
+    }
+    return v;
+}
+
+float Settle(vphys::PhysWorld &w, int b, float *p)
+{
+    int steps = 0;
+    while (steps < 900 && (steps < 10 || w.awakeDynamic() > 0)) {
+        w.step(kDt, 1);
+        steps++;
+    }
+    w.readPose(b, p);
+    return static_cast<float>(steps);
+}
+
+// Where a point fixed in the body (bx, by, bz from its origin) is in the world, for pose p.
+void BodyPoint(const float *p, float bx, float by, float bz, float *out)
+{
+    JPH::Vec3 v = JPH::Quat(p[3], p[4], p[5], p[6]) * JPH::Vec3(bx, by, bz);
+    out[0] = p[0] + v.GetX(); out[1] = p[1] + v.GetY(); out[2] = p[2] + v.GetZ();
+}
+
+void TestParts()
+{
+    {
+        // A flat triangle 2 cm thick dropped flat lands on a face: its centre at half its thickness, still level.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts t;
+        t.Hull(Prism({0, -0.1f, 0.1f, 0.07f, -0.1f, 0.07f}, 0.02f));
+        int b = t.Add(w);
+        Check(b >= 0, "parts: a triangle prism is made");
+        w.setPose(b, 0, 0.3f, 0, 0, 0, 0, 1);
+        float p[7];
+        float steps = Settle(w, b, p);
+        std::printf("      triangle: y = %.4f after %.0f steps\n", p[1], steps);
+        Check(std::fabs(p[1] - 0.01f) < 0.002f && w.awakeDynamic() == 0, "parts: a dropped triangle lies flat on the floor");
+    }
+    {
+        // A sheet (scene.shape with h 0: 2 mm on a 20 cm triangle) dropped from 30 cm lies flat, not through the floor.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts t;
+        t.Hull(Prism({0, -0.1f, 0.1f, 0.07f, -0.1f, 0.07f}, 0.002f));
+        int b = t.Add(w);
+        Check(b >= 0, "parts: a sheet 2 mm thick is made");
+        w.setPose(b, 0, 0.3f, 0, 0, 0, 0, 1);
+        w.setVelocity(b, 0.2f, 0, 0, 1, 0, 2);
+        float p[7];
+        Settle(w, b, p);
+        std::printf("      sheet: y = %.4f\n", p[1]);
+        Check(p[1] > 0 && p[1] < 0.004f && w.awakeDynamic() == 0, "parts: a dropped sheet lies flat on the floor");
+    }
+    {
+        // A thrown triangle comes to rest on one of its faces, never inside the floor.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts t;
+        t.Hull(Prism({0, -0.1f, 0.1f, 0.07f, -0.1f, 0.07f}, 0.04f));
+        int b = t.Add(w);
+        w.setPose(b, 0, 0.3f, 0, 0, 0, 0, 1);
+        w.setVelocity(b, 0.5f, 2, 0.2f, 6, 3, 9);
+        float p[7];
+        Settle(w, b, p);
+        std::printf("      thrown triangle at rest: y = %.4f\n", p[1]);
+        Check(p[1] > 0.015f && p[1] < 0.1f && w.awakeDynamic() == 0, "parts: a thrown triangle comes to rest above the floor");
+    }
+    {
+        // An L of two hulls stands on the floor as one body: neither piece sinks or comes apart.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts l;
+        l.Hull(Prism({0, 0, 0.3f, 0, 0.3f, 0.1f, 0, 0.1f}, 0.05f));
+        l.Hull(Prism({0, 0.1f, 0.1f, 0.1f, 0.1f, 0.3f, 0, 0.3f}, 0.05f));
+        int b = l.Add(w);
+        Check(b >= 0, "parts: an L of two pieces is made");
+        w.setPose(b, 0, 0.2f, 0, 0, 0, 0, 1);
+        float p[7];
+        Settle(w, b, p);
+        std::printf("      L: y = %.4f\n", p[1]);
+        Check(std::fabs(p[1] - 0.025f) < 0.003f && w.awakeDynamic() == 0, "parts: an L lies flat at half its thickness");
+    }
+    {
+        // A pyramid set down on its base goes to sleep there.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts py;
+        py.Hull({-0.1f, 0, -0.1f, 0.1f, 0, -0.1f, 0.1f, 0, 0.1f, -0.1f, 0, 0.1f, 0, 0.15f, 0});
+        int b = py.Add(w);
+        w.setPose(b, 0, 0.05f, 0, 0, 0, 0, 1);
+        float p[7];
+        Settle(w, b, p);
+        std::printf("      pyramid: y = %.4f, |q.w| %.4f\n", p[1], std::fabs(p[6]));
+        Check(std::fabs(p[1]) < 0.003f && std::fabs(p[6]) > 0.999f && w.awakeDynamic() == 0, "parts: a pyramid rests on its base");
+    }
+    {
+        // A snowman of three balls, set down on the bottom one, stands: its head stays over its middle.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts s;
+        s.Part(1, 0, 0.15f, 0, 0.15f, 0, 0);
+        s.Part(1, 0, 0.36f, 0, 0.1f, 0, 0);
+        s.Part(1, 0, 0.51f, 0, 0.06f, 0, 0);
+        int b = s.Add(w);
+        Check(b >= 0, "parts: a snowman of three balls is made");
+        w.setPose(b, 0, 0.001f, 0, 0, 0, 0, 1);
+        float p[7];
+        Settle(w, b, p);
+        float head[3];
+        BodyPoint(p, 0, 0.51f, 0, head);
+        std::printf("      snowman: head at %.3f, %.3f, %.3f\n", head[0], head[1], head[2]);
+        Check(std::fabs(head[1] - 0.51f) < 0.01f && std::hypot(head[0], head[2]) < 0.01f, "parts: a snowman stands");
+    }
+    {
+        // A dumbbell (two balls on a bar along x) thrown along the floor rolls as one body: its balls stay a bar apart.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts d;
+        float h = std::sqrt(0.5f);
+        d.Part(2, 0, 0, 0, 0.02f, 0.15f, 0, 0, 0, 0, h, h);  // the bar, a cylinder turned onto its side
+        d.Part(1, -0.15f, 0, 0, 0.05f, 0, 0);
+        d.Part(1, 0.15f, 0, 0, 0.05f, 0, 0);
+        int b = d.Add(w);
+        Check(b >= 0, "parts: a dumbbell is made");
+        w.setPose(b, 0, 0.06f, 0, 0, 0, 0, 1);
+        w.setVelocity(b, 0, 0, 1.0f, 0, 0, 0);
+        float p[7];
+        for (int i = 0; i < 60; i++) {
+            w.step(kDt, 1);
+        }
+        w.readPose(b, p);
+        float l[3], r[3];
+        BodyPoint(p, -0.15f, 0, 0, l);
+        BodyPoint(p, 0.15f, 0, 0, r);
+        float apart = std::sqrt((l[0] - r[0]) * (l[0] - r[0]) + (l[1] - r[1]) * (l[1] - r[1]) + (l[2] - r[2]) * (l[2] - r[2]));
+        std::printf("      dumbbell after 1 s: z = %.3f, balls at y %.3f / %.3f\n", p[2], l[1], r[1]);
+        Check(p[2] > 0.2f && std::fabs(l[1] - 0.05f) < 0.01f && std::fabs(r[1] - 0.05f) < 0.01f && std::fabs(apart - 0.3f) < 1e-3f,
+              "parts: a dumbbell rolls on its balls as one body");
+    }
+    {
+        // A hammer (a long light handle, a heavy head at one end) has its centre of mass near the head.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts m;
+        m.Part(0, 0, 0, 0, 0.015f, 0.15f, 0.015f);       // handle along y, 30 cm
+        m.Part(0, 0, 0.17f, 0, 0.06f, 0.025f, 0.025f);   // head across the top
+        int b = m.Add(w);
+        w.setPose(b, 0, 0.5f, 0, 0, 0, 0, 1);
+        w.setVelocity(b, 0.3f, 1, 0, 4, 2, 6);
+        float p[7];
+        Settle(w, b, p);
+        float top[3], bottom[3];
+        BodyPoint(p, 0, 0.17f, 0, top);
+        BodyPoint(p, 0, -0.15f, 0, bottom);
+        std::printf("      hammer at rest: head y %.3f, handle end y %.3f\n", top[1], bottom[1]);
+        Check(w.awakeDynamic() == 0 && top[1] > 0 && bottom[1] > -0.01f, "parts: a thrown hammer comes to rest, whole, on the floor");
+    }
+    {
+        // Refused: points in one plane, three points, a size past the points, an unknown type, a box of no size.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Parts flat;
+        flat.Hull({0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1});
+        Check(flat.Add(w) < 0, "parts: points in one plane are refused");
+        Parts three;
+        three.Hull({0, 0, 0, 1, 0, 0, 0, 1, 0});
+        Check(three.Add(w) < 0, "parts: three points are refused");
+        Parts past;
+        past.Part(3, 0, 0, 0, 0, 0, 0, 9);
+        past.points = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+        Check(past.Add(w) < 0, "parts: a hull past the points is refused");
+        Parts odd;
+        odd.Part(7, 0, 0, 0, 1, 1, 1);
+        Check(odd.Add(w) < 0, "parts: an unknown type is refused");
+        Parts none;
+        none.Part(0, 0, 0, 0, 0.1f, 0, 0.1f);
+        Check(none.Add(w) < 0, "parts: a box of no height is refused");
+        Parts many;
+        for (int k = 0; k < 33; k++) {
+            many.Part(1, k * 0.1f, 0, 0, 0.04f, 0, 0);
+        }
+        Check(many.Add(w) < 0, "parts: more than 32 parts are refused");
+    }
+}
+
+// Rolling and spinning resistance: Jolt has neither, so round bodies used to move until the 8 s sleep cap stopped them
+// in mid-roll. A ball rolled at 1 m/s comes to rest by itself a metre or two on, and a snowman (three balls and a hat)
+// thrown spinning stops spinning on its foot and rolling on its side well before the cap.
+void TestRolling()
+{
+    vphys::PhysWorld w;
+    w.init(64, 0);
+    Floor(w);
+    int ball = w.addSphere(0.1f, vphys::kDynamic);
+    w.setPose(ball, 0, 0.1f, 0, 0, 0, 0, 1);
+    w.setVelocity(ball, 1, 0, 0, 0, 0, -10);
+    float p[7];
+    float steps = Settle(w, ball, p);
+    std::printf("      ball rolled at 1 m/s: %.2f m, asleep after %.2f s\n", p[0], steps * kDt);
+    Check(p[0] > 0.8f && p[0] < 2.5f && steps * kDt < 5.0f, "rolling: a rolled ball slows and stops by itself");
+    const float axes[4][3] = {{1, 1, 0}, {0.3f, 1, 0.7f}, {1, 1, 1}, {-0.2f, 0.9f, -1}};
+    float longest = 0;
+    for (const float *a : axes) {
+        vphys::PhysWorld s;
+        s.init(64, 0);
+        Floor(s);
+        Parts man;
+        man.Part(1, 0, -0.35f, 0, 0.3f, 0, 0);
+        man.Part(1, 0, 0.07f, 0, 0.22f, 0, 0);
+        man.Part(1, 0, 0.41f, 0, 0.15f, 0, 0);
+        man.Part(2, 0, 0.62f, 0, 0.12f, 0.08f, 0);
+        int b = man.Add(s);
+        s.setPose(b, 0, 0.67f, 0, 0, 0, 0, 1);
+        float n = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), om = 4 * static_cast<float>(M_PI) / n;
+        s.setVelocity(b, 0.5f, 2.4f, 0.3f, a[0] * om, a[1] * om, a[2] * om);
+        int k = 0;
+        while (k < 60 * 9 && (k < 5 || s.awakeDynamic() > 0)) {
+            s.step(kDt, 1);
+            k++;
+        }
+        longest = std::max(longest, k * kDt);
+    }
+    std::printf("      snowman thrown spinning: the longest of 4 throws asleep after %.2f s\n", longest);
+    Check(longest < 7.5f, "rolling: a thrown snowman comes to rest before the sleep cap");
+}
+
 }  // namespace
 
 int main()
@@ -560,6 +822,8 @@ int main()
     TestFloatCapacity();
     TestDrainBounded();
     TestSleepCap();
+    TestParts();
+    TestRolling();
     std::printf(g_failures ? "%d FAILED\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

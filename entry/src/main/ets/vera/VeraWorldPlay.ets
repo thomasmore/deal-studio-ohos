@@ -287,7 +287,9 @@ class WorldPlay {
   /**
    * Bodies circling one centre at different speeds pass each other, so neighbouring orbits must be further apart than
    * the two bodies reach: their radius, their rings and whatever orbits them (a planet's moon). Closer, they go through
-   * each other -- Saturn's rings through Jupiter -- and an orbit must clear its centre the same way.
+   * each other -- Saturn's rings through Jupiter -- and an orbit must clear its centre the same way. Two bodies going
+   * round in the same time never gain on each other: they keep the distance they start at, so for them that distance,
+   * not the gap between their orbits, has to clear what they reach (a ring of bodies sharing one orbit).
    */
   checkOrbits(next: WorldSpec): void {
     let byCentre = new Map<string, BodySpec[]>()
@@ -325,10 +327,16 @@ class WorldPlay {
           let gap = oo.radius - oi.radius
           let need = orbitReach(inner, byCentre, 0) + orbitReach(outer, byCentre, 0)
           if (gap >= need) { continue }
+          if (oi.periodS === oo.periodS) {
+            let apart = (oi.phaseDeg - oo.phaseDeg) * Math.PI / 180
+            let d = Math.sqrt(oi.radius * oi.radius + oo.radius * oo.radius - 2 * oi.radius * oo.radius * Math.cos(apart))
+            if (d >= need) { continue }
+          }
           throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_ORBITS_CROSS + ' The program plays, but "' + inner.id +
             '" (orbit ' + r2(oi.radius) + ') and "' + outer.id + '" (orbit ' + r2(oo.radius) + ') pass through each other: their orbits are ' +
             r2(gap) + ' apart and the two reach ' + r2(need) + ' across (radius, rings and the orbits of their moons). Put neighbouring ' +
-            'orbits further apart than that -- spread the outer ones wider, or make the bodies, rings and moon orbits smaller')
+            'orbits further apart than that -- spread the outer ones wider, or make the bodies, rings and moon orbits smaller; bodies ' +
+            'sharing one orbit radius need one period and phases far enough apart that they start ' + r2(need) + ' apart')
         }
       }
     }

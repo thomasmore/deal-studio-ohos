@@ -31,8 +31,9 @@ import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, Geo
   PrimitiveTopology } from '@kit.ArkGraphics3D'
 import { WorldSpec, BodySpec, WorldDiff, diffWorld, orbitPositions, MotionCarry } from '../vera/VeraScene'
 import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
+import { prismMesh, hullMesh } from '../vera/VeraShapes'
 import { PhysEngine, WorldSim, SimEvent } from '../vera/VeraPhysics'
-import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physRemove, physSetPose,
+import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physAddParts, physRemove, physSetPose,
   physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose, physDrainContacts,
   physAwakeDynamic } from 'libphys.so'
 import { ResolvedTheme } from '../vera/VeraTheme'
@@ -78,6 +79,23 @@ function paintedGeometry(b: BodySpec, theme: ResolvedTheme): CustomGeometry {
   let made = customGeometry(paintedSphere(b.dims[0] / 2, b.pattern, c1, c2, surfaceSeed(b.id)))
   if (PAINTED.size >= PAINTED_KEEP) { PAINTED.delete(PAINTED.keys().next().value as string) }
   PAINTED.set(key, made)
+  return made
+}
+
+/**
+ * Meshes of scene.shape and scene.hull, by their points: white vertices under the body's own material, so a body of any
+ * shape is coloured, recoloured and themed as a box is.
+ */
+const SHAPED: Map<string, CustomGeometry> = new Map<string, CustomGeometry>()
+const SHAPED_KEEP: number = 64
+
+function shapedGeometry(b: BodySpec): CustomGeometry {
+  let key = b.shape + '|' + b.dims[1].toFixed(5) + '|' + b.points.map((v: number): string => v.toFixed(5)).join(',')
+  let known = SHAPED.get(key)
+  if (known !== undefined) { return known }
+  let made = customGeometry(b.shape === 'hull' ? hullMesh(b.points) : prismMesh(b.points, b.dims[1]))
+  if (SHAPED.size >= SHAPED_KEEP) { SHAPED.delete(SHAPED.keys().next().value as string) }
+  SHAPED.set(key, made)
   return made
 }
 
@@ -132,6 +150,7 @@ class NativePhys implements PhysEngine {
   addBox(hx: number, hy: number, hz: number, kind: number): number { return physAddBox(hx, hy, hz, kind) }
   addSphere(r: number, kind: number): number { return physAddSphere(r, kind) }
   addCylinder(r: number, halfHeight: number, kind: number): number { return physAddCylinder(r, halfHeight, kind) }
+  addParts(records: Float32Array, points: Float32Array, kind: number): number { return physAddParts(records, points, kind) }
   remove(i: number): void { physRemove(i) }
   setPose(i: number, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number): void {
     physSetPose(i, px, py, pz, qx, qy, qz, qw)
@@ -205,6 +224,8 @@ function hasLoose(spec: WorldSpec | null): boolean {
 /** What a tap hit: the body's id ("" for empty space, the table or the floor) and where, in metres. */
 export class WorldPick {
   body: string = ''
+  /** For a group, the id of the part hit; '' otherwise. */
+  part: string = ''
   x: number = 0
   y: number = 0
   z: number = 0
@@ -227,6 +248,9 @@ class BodyNode {
   node: Node
   names: string[] = []
   pips: Node[] = []
+  /** A group's part nodes, children of `node` (an empty node), and the part each one draws. */
+  parts: Node[] = []
+  partSpecs: BodySpec[] = []
   /** Where the node was last put, for picking by screen distance. */
   pos: number[] = [0, 0, 0]
   constructor(spec: BodySpec, node: Node) {
@@ -293,6 +317,8 @@ export class WorldBox {
   private bodies: Map<string, BodyNode> = new Map<string, BodyNode>()
   /** Node name -> body id, pips included, for a raycast hit. */
   private byName: Map<string, string> = new Map<string, string>()
+  /** Node name -> part id, for a raycast that hits a part of a group. */
+  private partByName: Map<string, string> = new Map<string, string>()
   private materials: Map<string, Promise<Material>> = new Map<string, Promise<Material>>()
   private tableNodes: Node[] = []
   private floorNodes: Node[] = []
@@ -565,6 +591,7 @@ export class WorldBox {
     this.applied = null
     this.bodies.clear()
     this.byName.clear()
+    this.partByName.clear()
     this.materials.clear()
     this.tableNodes = []
     this.floorNodes = []
@@ -773,6 +800,7 @@ export class WorldBox {
     if (hits.length > 0) {
       let hit = hits[0]
       pick.body = this.bodyOf(hit.node)
+      pick.part = this.partOf(hit.node)
       pick.x = hit.hitPosition.x
       pick.y = hit.hitPosition.y
       pick.z = hit.hitPosition.z
@@ -803,6 +831,19 @@ export class WorldBox {
       }
     })
     return best
+  }
+
+  /** The group part a raycast hit belongs to ('' for none): the hit may be a node inside the part's, so look up the chain. */
+  private partOf(node: Node | null): string {
+    let at: Node | null = node
+    let steps = 0
+    while (at !== null && steps < 8) {
+      let id = this.partByName.get(at.name)
+      if (id !== undefined) { return id }
+      at = at.parent
+      steps++
+    }
+    return ''
   }
 
   private bodyOf(node: Node | null): string {
@@ -932,6 +973,17 @@ export class WorldBox {
       let known = this.bodies.get(b.id)
       // A painted ball's colours are its mesh's (diffWorld makes it again when they change).
       if (known === undefined || (b.shape === 'sphere' && b.pattern.length > 0)) { continue }
+      if (known.parts.length > 0) {
+        // A group: each part its own colour (a painted part's are its mesh's); the group's node itself draws nothing.
+        for (let k = 0; k < known.parts.length; k++) {
+          let part = known.partSpecs[k]
+          if (part.shape === 'sphere' && part.pattern.length > 0) { continue }
+          let partMaterial = await this.material(part.color, b.glow, theme, 'ink')
+          if (this.destroyed) { return }
+          this.paint(known.parts[k], partMaterial)
+        }
+        continue
+      }
       let material = await this.material(b.color, b.glow, theme, 'ink')
       if (this.destroyed) { return }
       this.paint(known.node, material)
@@ -1034,6 +1086,7 @@ export class WorldBox {
   }
 
   private shapeOf(b: BodySpec): GeometryDefinition {
+    if (b.shape === 'shape' || b.shape === 'hull') { return shapedGeometry(b) }
     if (b.shape === 'sphere') {
       let s = new SphereGeometry()
       s.radius = b.dims[0] / 2
@@ -1055,6 +1108,10 @@ export class WorldBox {
   private async createBody(b: BodySpec, theme: ResolvedTheme): Promise<void> {
     let rf = this.rf
     if (rf === null || this.destroyed) { return }
+    if (b.shape === 'group') {
+      await this.createGroup(rf, b, theme)
+      return
+    }
     this.serial++
     let name = 'b' + this.serial.toString()
     // A painted ball carries its colours in its vertices, under a white material; anything else is one colour.
@@ -1077,6 +1134,55 @@ export class WorldBox {
     this.bodies.set(b.id, entry)
     this.byName.set(name, b.id)
     if (b.isDie) { await this.addPips(rf, entry, theme) }
+    await this.addMarks(rf, entry, b, theme)
+  }
+
+  /**
+   * A scene.group: an empty node where the group stands, and each part a node of its own under it, placed and turned
+   * about the group's centre, in its own colour. Every node's name leads a tap to the group, and a part's to the part.
+   */
+  private async createGroup(rf: SceneResourceFactory, b: BodySpec, theme: ResolvedTheme): Promise<void> {
+    this.serial++
+    let name = 'b' + this.serial.toString()
+    let parent = await rf.createNode({ name: name })
+    if (this.destroyed) { return }
+    let entry = new BodyNode(b, parent)
+    this.place(entry, b)
+    let at = b.motion === 'loose' && this.sim !== null ? this.sim.poseOf(b.id) : null
+    if (at !== null) {
+      parent.position = v3(at[0], at[1], at[2])
+      parent.rotation = quat([at[3], at[4], at[5], at[6]])
+      entry.pos = [at[0], at[1], at[2]]
+    }
+    entry.names.push(name)
+    this.bodies.set(b.id, entry)
+    this.byName.set(name, b.id)
+    for (let p of b.parts) {
+      let painted = p.shape === 'sphere' && p.pattern.length > 0
+      let material = painted ? await this.vertexMaterial(b.glow) : await this.material(p.color, b.glow, theme, 'ink')
+      if (this.destroyed) { return }
+      this.serial++
+      let partName = 'b' + this.serial.toString()
+      let node = await this.node(rf, partName, painted ? paintedGeometry(p, theme) : this.shapeOf(p), material)
+      if (this.destroyed) { return }
+      if (this.bodies.get(b.id) !== entry) {
+        this.removeNode(node)
+        return
+      }
+      node.position = v3(p.position[0], p.position[1], p.position[2])
+      node.rotation = quat(quatXYZ(p.rotation[0], p.rotation[1], p.rotation[2]))
+      parent.children.append(node)
+      entry.parts.push(node)
+      entry.partSpecs.push(p)
+      entry.names.push(partName)
+      this.byName.set(partName, b.id)
+      this.partByName.set(partName, p.id)
+    }
+    await this.addMarks(rf, entry, b, theme)
+  }
+
+  /** A body's rings and selection mark, as rings under its node. */
+  private async addMarks(rf: SceneResourceFactory, entry: BodyNode, b: BodySpec, theme: ResolvedTheme): Promise<void> {
     if (b.rings.length === 2) {
       await this.addRing(rf, entry, flatRing(b.rings[0], b.rings[1], lookRgba(theme, b.ringColor, 'surface'), 1, surfaceSeed(b.id)))
     }
@@ -1141,7 +1247,10 @@ export class WorldBox {
     let entry = this.bodies.get(id)
     if (entry === undefined) { return }
     this.bodies.delete(id)
-    for (let name of entry.names) { this.byName.delete(name) }
+    for (let name of entry.names) {
+      this.byName.delete(name)
+      this.partByName.delete(name)
+    }
     this.removeNode(entry.node)
   }
 

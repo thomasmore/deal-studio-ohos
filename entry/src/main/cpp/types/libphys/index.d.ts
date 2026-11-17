@@ -23,6 +23,14 @@ export const physAddBox: (hx: number, hy: number, hz: number, kind: number) => n
 export const physAddSphere: (r: number, kind: number) => number
 /** A cylinder with its axis along y, of radius r and half-height halfHeight (m), at the origin. Returns its index, or -1. */
 export const physAddCylinder: (r: number, halfHeight: number, kind: number) => number
+/**
+ * A body of any shape: records of 12 floats [type, px, py, pz, qx, qy, qz, qw, a, b, c, n], each one convex part placed
+ * at p and turned by q about the body's origin -- type 0 a box of half-extents a, b, c; 1 a sphere of radius a; 2 a
+ * cylinder along y of radius a and half-height b; 3 the convex hull of the next n points (x, y, z after x, y, z, 4 to
+ * 128) taken in order from points. At most 32 parts, joined as one rigid body. Returns its index, or -1 (an unknown
+ * type, a size not above 0, a hull too small, too large or flat, or points past the end).
+ */
+export const physAddParts: (records: Float32Array, points: Float32Array, kind: number) => number
 /** Removes a body and frees its index. */
 export const physRemove: (i: number) => void
 /** Teleports a body (m, quaternion x y z w) and wakes it; also the pose the world bound resets it to. */

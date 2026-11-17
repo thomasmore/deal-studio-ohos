@@ -1873,8 +1873,9 @@ export struct VeraPreview {
         return
       }
       // Logged once the ray is cast: before it, the body is not known yet.
-      console.info('VERA-WORLD event tap body=' + pick.body)
-      this.dispatchFieldAction(action, sceneEventValue('tap', pick.body, '', pick.x, pick.y, pick.z, 0, [], []), true, node)
+      console.info('VERA-WORLD event tap body=' + pick.body + (pick.part.length > 0 ? ' part=' + pick.part : ''))
+      // A group's tap tells the part in other.
+      this.dispatchFieldAction(action, sceneEventValue('tap', pick.body, pick.part, pick.x, pick.y, pick.z, 0, [], []), true, node)
     }).catch((e: Error) => {
       console.warn('VERA-WORLD pick failed: ' + e.message)
     })

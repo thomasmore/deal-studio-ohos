@@ -36,7 +36,7 @@ export const MAX_GFX_POINTS: number = 2000
 
 export class GfxParam {
   name: string
-  /** 'number' | 'string' | 'boolean' | 'number[]' | 'shapes' | 'color' | 'colors' (a string[] of colours) */
+  /** 'number' | 'string' | 'boolean' | 'number[]' | 'shapes' | 'color' | 'colors' (a string[] of colours); std/scene adds 'thing' and 'thing[]' */
   kind: string
   optional: boolean
   constructor(name: string, kind: string, optional: boolean = false) {
