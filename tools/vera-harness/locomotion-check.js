@@ -136,6 +136,10 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   assert.deepEqual(S.orbitPositions({bodies: [still]}, 50).get('w').slice(0, 3), [1, 0.5, 1], 'speed 0 stands it at the start')
   near(S.travelPace(still, 3), 0, 0, 'a body standing has no stride')
   near(S.travelPace(square, 3), 1, 0, 'a body going has its full stride')
+  // At the far turnaround, where the way there and back fold onto one point, it faces the way it came in.
+  const ell = world([call('path', box('w'), [0, 0, 3, 0, 3, 3], 1, false)]).bodies[0]
+  near(S.orbitPositions({bodies: [ell]}, 6).get('w')[4], -90, 1e-6, 'at the far end it faces along the last side, not the first')
+  near(S.orbitPositions({bodies: [ell]}, 5.99).get('w')[4], -90, 1e-6, 'as it did coming in')
 }
 
 // ---- a wander: within its radius, at about its speed, pausing, turning the way it goes
@@ -234,11 +238,12 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
 // ---- the player's driving
 {
   const drive = new L.PlayerDrive()
-  let yaw = 0, x = 0, z = 0
+  let yaw = 0, x = 0, z = 0, vx = 0, vz = 0
   const dt = 1 / 60
   const run = (frames, dx, dz, push) => {
     for (let f = 0; f < frames; f++) {
-      const v = drive.step(yaw, dx, dz, push, 4, dt)
+      const v = drive.step(yaw, dx, dz, push, 4, dt, vx, vz)
+      vx = v[0]; vz = v[1]
       x += v[0] * dt; z += v[1] * dt; yaw += v[2] * dt * 180 / Math.PI
     }
   }
@@ -249,14 +254,32 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   near(L.turnDeg(yaw, -90), 0, 25, 'pushed towards +z it turns to face it: ' + yaw)
   assert.ok(z > 0.3, 'and goes that way: ' + z)
   const turnStart = yaw
-  drive.step(yaw, -1, 0, 1, 4, dt)
-  const wy = drive.step(yaw, -1, 0, 1, 4, dt)[2] * 180 / Math.PI
+  drive.step(yaw, -1, 0, 1, 4, dt, vx, vz)
+  const wy = drive.step(yaw, -1, 0, 1, 4, dt, vx, vz)[2] * 180 / Math.PI
   assert.ok(Math.abs(wy) <= L.PLAYER_TURN_DEG_S + 1e-9, 'turning is capped: ' + wy)
   run(60, 0, 0, 0)
   assert.equal(drive.speed, 0, 'let go, it stops within a second')
   assert.equal(drive.moving(), false)
   const v = drive.step(yaw, 1, 0, 0.05, 4, dt)
   assert.deepEqual(v.map(n => Math.abs(n)), [0, 0, 0], 'a stick barely touched is let go')
+  // Knocked while let go: the going it was given runs out, at PLAYER_BRAKE.
+  vx = 3; vz = 0
+  run(1, 0, 0, 0)
+  near(vx, 3 - L.PLAYER_BRAKE * dt, 1e-9, 'a knocked player brakes from the velocity it really has')
+  run(30, 0, 0, 0)
+  assert.equal(drive.speed, 0, 'and stops within half a second')
+  // A dash across the stick: not undone at once, it runs out towards the stick's going.
+  vx = 0; vz = 0
+  run(60, 0, 1, 1)
+  vx = 6
+  run(1, 0, 1, 1)
+  assert.ok(vx > 5.5, 'a dash across the held stick is kept, nearly: ' + vx)
+  run(60, 0, 1, 1)
+  assert.ok(Math.abs(vx) < 0.05 && Math.abs(vz - 4) < 0.05, 'and runs out into the stick\'s going: ' + vx + ' ' + vz)
+  // Held into a wall: the body goes nowhere, so its speed is about none, not the stick's.
+  vx = 0; vz = 0
+  const pinned = drive.step(yaw, 1, 0, 1, 4, dt, 0, 0)
+  assert.ok(drive.speed <= L.PLAYER_ACCEL * dt + 1e-9 && pinned[0] > 0, 'against a wall its speed is what it really goes at')
   const r = L.yawOf(look.quatXYZ(0, 37, 0))
   near(r, 37, 1e-9, 'the heading of a turn about y')
   near(L.yawOf(look.quatXYZ(10, -120, 5)), -120, 6, 'nearly so when tipped a little')
@@ -280,6 +303,15 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   assert.deepEqual(watch.update(moved, at([20, 0, 0])).map(e => e.zone), ['far'], 'a zone seen before tells')
   const fresh = [...moved, ...world([call('zone', 'new', 20, 0, 1, 'accent')]).zones]
   assert.deepEqual(watch.update(fresh, at([20, 0, 0])), [], 'a zone put round a body is not an entry')
+  // The same zone moved (a new round's goal) onto a body that stands still: not an entry, and coming in later is.
+  const shifted = world([call('zone', 'goal', 0, 0, 1, 'accent')]).zones
+  watch.update(moved, at([0, 0, 0]))
+  assert.deepEqual(watch.update(shifted, at([0, 0, 0])), [], 'a zone moved onto a standing body is not an entry')
+  const grown = world([call('zone', 'goal', 9, 0, 9.5, 'accent')]).zones
+  watch.update(moved, at([0, 0, 0]))
+  assert.deepEqual(watch.update(grown, at([0, 0, 0])), [], 'nor one grown round it')
+  watch.update(grown, at([-12, 0, 0]))
+  assert.deepEqual(watch.update(grown, at([0, 0, 0])).map(e => e.zone), ['goal'], 'coming into the moved zone is')
 }
 
 // ---- the follow camera
@@ -397,6 +429,67 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   sim.apply(S.diffWorld(spec, round), round)
   assert.deepEqual(sim.poseOf('r1-me').slice(0, 3), [0, 0.5, 0], 'a new round\'s player is where it was built')
   assert.equal(sim.playerSpeedNow(), 0, 'and starts standing')
+}
+
+// ---- the player knocked, dashing, and made the player lying on its side (FakePhys)
+{
+  const P = loadVera('VeraPhysics')
+  const FRAME_MS = 1000 / 60
+  const me = (kick = 0, vx = 0) => {
+    let b = call('box', 'me', 0, 0.5, 0, 1, 1, 1, 'ink')
+    if (kick) b = call('kick', b, kick, vx, 0, 0, 0)
+    return call('player', b, 3, 'Dash')
+  }
+  const scene = (kick = 0, vx = 0) => world([call('floor', 'surface'), me(kick, vx)])
+  const run = (sim, n) => { for (let f = 0; f < n; f++) sim.step(FRAME_MS, f / 60) }
+
+  // A dash with the stick let go: it goes, then stops by itself, it does not glide on.
+  let sim = new P.WorldSim(new P.FakePhys())
+  let spec = scene()
+  sim.apply(S.diffWorld(null, spec), spec)
+  run(sim, 20)
+  let next = scene(1, 6)
+  sim.apply(S.diffWorld(spec, next), next); spec = next
+  assert.ok(sim.needsFrames(), 'a dash needs frames')
+  run(sim, 60)
+  const after = sim.poseOf('me')
+  assert.ok(after[0] > 1 && after[0] < 2.5, 'a dash with the stick let go takes it about 1.5 m: ' + after[0].toFixed(2))
+  run(sim, 120)
+  near(sim.poseOf('me')[0], after[0], 0.01, 'and then it stands: no friction of its own does not make it glide')
+  assert.ok(!sim.needsFrames(), 'and frames stop')
+
+  // A dash across the stick held: not wiped out the next step.
+  sim = new P.WorldSim(new P.FakePhys())
+  spec = scene()
+  sim.apply(S.diffWorld(null, spec), spec)
+  run(sim, 20)
+  sim.setStick(0, 1, 1)
+  run(sim, 60)
+  const before = sim.poseOf('me')
+  next = scene(1, 6)
+  sim.apply(S.diffWorld(spec, next), next); spec = next
+  run(sim, 30)
+  const dashed = sim.poseOf('me')
+  assert.ok(dashed[0] - before[0] > 1, 'a dash while the stick is held goes across it: ' + (dashed[0] - before[0]).toFixed(2))
+  assert.ok(dashed[2] - before[2] > 0.5, 'and it still goes the stick\'s way')
+
+  // A box tumbled onto its side, then made the player: it stands upright where it lay.
+  sim = new P.WorldSim(new P.FakePhys())
+  const lying = world([call('floor', 'surface'), call('loose', call('turn', call('box', 'me', 2, 0.5, 1, 1, 1, 1, 'ink'), 30, 40, 90), 1)])
+  sim.apply(S.diffWorld(null, lying), lying)
+  run(sim, 30)
+  const lay = sim.poseOf('me')
+  const asPlayer = world([call('floor', 'surface'), call('player', call('turn', call('box', 'me', 2, 0.5, 1, 1, 1, 1, 'ink'), 30, 40, 90), 3, '')])
+  const d = S.diffWorld(lying, asPlayer)
+  assert.deepEqual(d.recreate.map(b => b.id), ['me'], 'becoming the player makes it again')
+  sim.apply(d, asPlayer)
+  const stood = sim.poseOf('me')
+  near(Math.hypot(stood[0] - lay[0], stood[2] - lay[2]), 0, 1e-4, 'where it lay')
+  near(Math.abs(stood[3]) + Math.abs(stood[5]), 0, 1e-6, 'but upright, turned only about y')
+  const up = P.uprightPose([0, 0, 0, ...look.quatXYZ(0, 37, 0)])
+  near(L.yawOf(up.slice(3)), 37, 1e-6, 'uprightPose keeps the heading')
+  near(L.yawOf(P.uprightPose([0, 0, 0, ...look.quatXYZ(20, -120, 15)]).slice(3)), L.yawOf(look.quatXYZ(20, -120, 15)), 1e-6,
+    'of a tipped body too')
 }
 
 console.log('locomotion-check ok')

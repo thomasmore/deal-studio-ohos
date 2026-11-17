@@ -18,7 +18,7 @@ import { CompileResult } from './VeraCompiler'
 import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, ZoneSpec, ScenePlayer, decodeScene, diffWorld, orbitPositions,
   sceneEventValue, MotionCarry, SceneOrbit } from './VeraScene'
 import { ZoneWatch } from './VeraLocomotion'
-import { FakePhys, WorldSim, SimEvent, specBounds } from './VeraPhysics'
+import { FakePhys, WorldSim, SimEvent, specBounds, enterEvent } from './VeraPhysics'
 import { worldCamera, projectPoint, metresPerVp, floorDirection, CameraPose } from './VeraLook3D'
 import { functionLine, worldBudgetProblem, predictWorkMs } from './VeraBudget'
 
@@ -561,9 +561,8 @@ class WorldPlay {
     for (let b of spec.bodies) { if (b.player !== null) { player = b } }
     if (player === null) { return }
     let p = player as BodySpec
-    let pose = worldCamera(spec, this.width / this.height)
     if (frame === STICK_FROM) {
-      let d = floorDirection(pose, 0, -1)
+      let d = floorDirection(worldCamera(spec, this.width / this.height), 0, -1)
       this.sim.setStick(d[0], d[2], 1)
       this.playerId = p.id
       this.playerStart = this.sim.poseOf(p.id)
@@ -573,7 +572,7 @@ class WorldPlay {
       this.playerSpeed = (p.player as ScenePlayer).speed
       this.playerMoved = at !== null && from !== null && this.playerId === p.id ?
         Math.hypot(at[0] - (from as number[])[0], at[2] - (from as number[])[2]) : -1
-      let d = floorDirection(pose, 1, 0)
+      let d = floorDirection(worldCamera(spec, this.width / this.height), 1, 0)
       this.sim.setStick(d[0], d[2], 1)
     } else if (frame === STICK_FROM + STICK_AHEAD + STICK_RIGHT) {
       this.sim.setStick(0, 0, 0)
@@ -597,14 +596,7 @@ class WorldPlay {
       if (live !== null) { at.set(b.id, live) } else if (o !== undefined) { at.set(b.id, o) }
     }
     for (let z of this.zones.update(spec.zones, at)) {
-      let e = new SimEvent()
-      e.kind = 'enter'
-      e.body = z.body
-      e.other = z.zone
-      e.x = z.x
-      e.y = z.y
-      e.z = z.z
-      queue.push(e)
+      queue.push(enterEvent(z))
       this.enterEvents++
     }
   }

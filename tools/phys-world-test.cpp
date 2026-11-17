@@ -631,6 +631,24 @@ void TestParts()
         Check(p[1] > 0 && p[1] < 0.004f && w.awakeDynamic() == 0, "parts: a dropped sheet lies flat on the floor");
     }
     {
+        // The thinnest sheet scene.shape makes (1 mm, an outline under 10 cm): pieces of a 5 cm star, as thick as Jolt's
+        // default hull tolerance. It is made (the tolerance lets points lie outside the hull, it does not flatten it),
+        // and it lies on the floor.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts t;
+        t.Hull(Prism({0, 0, 0.025f, 0.004f, 0.025f, -0.004f}, 0.001f));
+        t.Hull(Prism({0, 0, -0.012f, 0.02f, -0.012f, -0.02f}, 0.001f));
+        int b = t.Add(w);
+        Check(b >= 0, "parts: a sheet 1 mm thick on a 5 cm outline is made");
+        w.setPose(b, 0, 0.1f, 0, 0, 0, 0, 1);
+        float p[7];
+        Settle(w, b, p);
+        std::printf("      1 mm sheet: y = %.5f\n", p[1]);
+        Check(p[1] > 0 && p[1] < 0.003f, "parts: and it lies on the floor");
+    }
+    {
         // A thrown triangle comes to rest on one of its faces, never inside the floor.
         vphys::PhysWorld w;
         w.init(64, 0);
@@ -840,6 +858,9 @@ void TestCharacter()
         w.readPose(c, p);
         std::printf("      driven 2 m/s for 2 s: x = %.3f y = %.4f\n", p[0], p[1]);
         Check(std::fabs(p[0] - 4.0f) < 0.4f, "character: goes as far as it is driven (4 m +-10%)");
+        float v[3];
+        Check(w.readVelocity(c, v) && std::fabs(v[0] - 2) < 0.05f && std::fabs(v[2]) < 0.05f, "character: readVelocity has its going");
+        Check(!w.readVelocity(999, v), "readVelocity: no such body");
         Check(std::fabs(p[1] - 0.4f) < 0.02f && Upright(p), "character: stays on the floor, upright");
         // Turning: 90 degrees a second for a second.
         Drive(w, c, 0, 0, static_cast<float>(M_PI / 2), 60);

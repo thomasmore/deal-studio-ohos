@@ -76,6 +76,8 @@ export const physStepEnd: () => number
 export const physReadAwake: (out: Float32Array) => number
 /** Writes px, py, pz, qx, qy, qz, qw of one body into out (7 floats). Returns 1, or 0 if there is no such body. */
 export const physReadPose: (i: number, out: Float32Array) => number
+/** Writes vx, vy, vz of one body (m/s) into out (3 floats). Returns 1, or 0 if there is no such body. */
+export const physReadVelocity: (i: number, out: Float32Array) => number
 /**
  * Takes the contacts that began since the last call: 3 floats each, body a, body b, approach
  * speed (m/s, along the contact normal). Returns the count (at most out.length / 3); contacts

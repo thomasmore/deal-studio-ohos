@@ -223,6 +223,13 @@ napi_value PhysReadPose(napi_env env, napi_callback_info info)
     float *out = argc > 1 ? FloatArray(env, argv[1], &len) : nullptr;
     return Num(env, out && len >= 7 && Idle().readPose(I(0, 0), out) ? 1 : 0);
 }
+napi_value PhysReadVelocity(napi_env env, napi_callback_info info)
+{
+    ARGS(2);
+    size_t len;
+    float *out = argc > 1 ? FloatArray(env, argv[1], &len) : nullptr;
+    return Num(env, out && len >= 3 && Idle().readVelocity(I(0, 0), out) ? 1 : 0);
+}
 napi_value PhysDrainContacts(napi_env env, napi_callback_info info)
 {
     ARGS(1);
@@ -260,6 +267,7 @@ napi_value Register(napi_env env, napi_value exports)
         D("physStepEnd", PhysStepEnd),
         D("physReadAwake", PhysReadAwake),
         D("physReadPose", PhysReadPose),
+        D("physReadVelocity", PhysReadVelocity),
         D("physDrainContacts", PhysDrainContacts),
         D("physAwakeDynamic", PhysAwakeDynamic),
     };

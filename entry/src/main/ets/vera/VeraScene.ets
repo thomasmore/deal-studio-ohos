@@ -1273,9 +1273,18 @@ export function pathPose(b: BodySpec, tSeconds: number): number[] {
   let dx = c[0] - a[0]
   let dz = c[1] - a[1]
   if (Math.hypot(dx, dz) < 1e-9) {
-    // Standing at the end of a there-and-back with speed 0: face along the first side.
-    dx = route.points[2] - route.points[0]
-    dz = route.points[3] - route.points[1]
+    // At a turnaround of a there-and-back, where the way there and the way back fold onto one point. At the far end it
+    // faces the way it came in, along the last side; at the start (or standing there with speed 0), along the first.
+    let span = 2 * length
+    let s = ((u % span) + span) % span
+    let n = Math.floor(route.points.length / 2)
+    if (Math.abs(s - length) < h && n >= 2) {
+      dx = route.points[2 * n - 2] - route.points[2 * n - 4]
+      dz = route.points[2 * n - 1] - route.points[2 * n - 3]
+    } else {
+      dx = route.points[2] - route.points[0]
+      dz = route.points[3] - route.points[1]
+    }
   }
   return [here[0], here[1], headingDeg(dx, dz)]
 }

@@ -311,8 +311,8 @@ public:
     }
 
     // Drives a character: its velocity along the ground (vx, vz) and its turn about y (wy, radians a second); its
-    // vertical velocity is its own, so it falls, lands and jumps as before. Wakes it and restarts its sleep cap; a
-    // character left undriven at rest sleeps as any body does.
+    // vertical velocity is its own, so it falls, lands and jumps as before. A drive that moves it wakes it and restarts
+    // its sleep cap; a character driven to a stand, or left undriven, sleeps as any body does.
     void drive(int i, float vx, float vz, float wy)
     {
         if (!Valid(i) || !bodies_[i].character) {
@@ -323,8 +323,21 @@ public:
         BI().SetLinearAndAngularVelocity(id, JPH::Vec3(vx, vy, vz), JPH::Vec3(0, wy, 0));
         if (vx != 0 || vz != 0 || wy != 0) {
             BI().ActivateBody(id);
+            bodies_[i].awakeFor = 0;
         }
-        bodies_[i].awakeFor = 0;
+    }
+
+    // The linear velocity of one body (m/s) into out3; false when there is no such body.
+    bool readVelocity(int i, float *out3) const
+    {
+        if (!Valid(i)) {
+            return false;
+        }
+        JPH::Vec3 v = BI().GetLinearVelocity(bodies_[i].id);
+        out3[0] = v.GetX();
+        out3[1] = v.GetY();
+        out3[2] = v.GetZ();
+        return true;
     }
 
     // Puts a dynamic body to sleep where it is, as if it had come to rest there: it stays put until

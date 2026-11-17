@@ -32,10 +32,10 @@ import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, Geo
 import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, diffWorld, orbitPositions, MotionCarry, travelPace } from '../vera/VeraScene'
 import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
 import { prismMesh, hullMesh } from '../vera/VeraShapes'
-import { PhysEngine, WorldSim, SimEvent } from '../vera/VeraPhysics'
-import { Follower, ZoneWatch, ZoneEnter, swingTurn, hasSwing, yawOf } from '../vera/VeraLocomotion'
+import { PhysEngine, WorldSim, SimEvent, enterEvent } from '../vera/VeraPhysics'
+import { Follower, ZoneWatch, swingTurn, hasSwing, yawOf } from '../vera/VeraLocomotion'
 import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physAddParts, physRemove, physSetPose,
-  physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physDrive, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose,
+  physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physDrive, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose, physReadVelocity,
   physDrainContacts, physAwakeDynamic } from 'libphys.so'
 import { ResolvedTheme } from '../vera/VeraTheme'
 import { LOOK_SUN_INTENSITY, LOOK_SUN_POSITION, LOOK_SUN_TARGET, sunFor, LOOK_SHADOWS, LOOK_AMBIENT, LOOK_FOV, LOOK_FLOOR_ROLE,
@@ -172,6 +172,7 @@ class NativePhys implements PhysEngine {
   stepEnd(): number { return physStepEnd() }
   readAwake(out: Float32Array): number { return physReadAwake(out) }
   readPose(i: number, out: Float32Array): number { return physReadPose(i, out) }
+  readVelocity(i: number, out: Float32Array): number { return physReadVelocity(i, out) }
   drainContacts(out: Float32Array): number { return physDrainContacts(out) }
   awakeDynamic(): number { return physAwakeDynamic() }
 }
@@ -228,12 +229,18 @@ function hasLoose(spec: WorldSpec | null): boolean {
   return false
 }
 
-/** Whether a world has something the host moves each frame without physics: an orbit, a spin, a route, a swinging leg. */
+/**
+ * Whether a world has something the host moves each frame without physics: an orbit, a spin, a route. A swinging leg is
+ * not by itself: it swings only while its body goes (writeSwing), and asks for frames only then.
+ */
 function hasMoves(spec: WorldSpec | null): boolean {
   if (spec === null) { return false }
-  for (let b of spec.bodies) { if (b.motion === 'kinematic' || hasSwing(b)) { return true } }
+  for (let b of spec.bodies) { if (b.motion === 'kinematic') { return true } }
   return false
 }
+
+/** Below this share of its stride a swing that is easing to a stand has stood. */
+const PACE_STILL: number = 0.002
 
 /** The player's body in a world, or null. */
 export function playerOf(spec: WorldSpec | null): BodySpec | null {
@@ -343,6 +350,8 @@ export class WorldBox {
   private wantedTheme: ResolvedTheme | null = null
   private showing: WorldSpec | null = null
   private showingMoves: boolean = false
+  /** Whether a swinging part has still to come to rest (writeSwing). */
+  private swinging: boolean = false
   private applied: WorldSpec | null = null
   private appliedTheme: ResolvedTheme | null = null
   private bodies: Map<string, BodyNode> = new Map<string, BodyNode>()
@@ -417,7 +426,7 @@ export class WorldBox {
   /** Whether the display loop should run for this world: something in what it shows, or is about to, orbits or spins. */
   needsFrames(): boolean {
     if (this.destroyed || this.retired) { return false }
-    if (hasKinematic(this.wanted) || this.showingMoves || this.events.length > 0) { return true }
+    if (hasKinematic(this.wanted) || this.showingMoves || this.swinging || this.events.length > 0) { return true }
     if (this.push > 0 || this.followBehind) { return true }
     if (this.sim !== null && this.sim.needsFrames()) { return true }
     // A world about to be given loose bodies (or a throw) starts its frames before the apply is done.
@@ -507,23 +516,35 @@ export class WorldBox {
     return entry !== undefined ? [entry.pos[0], entry.pos[1], entry.pos[2]] : null
   }
 
-  /** Swinging parts of groups, each swung by its body's pace now (eased): still when the body stands. */
+  /**
+   * Swinging parts of groups, each swung by its body's pace now (eased): still when the body stands. A body travelling
+   * its path or wander goes at its pace there, the player at the speed it really goes, an orbiting one at its stride;
+   * a body that stands (static, spinning on the spot, loose, the player at rest) stands still. Parts at rest are not
+   * written again, and `swinging` asks for frames only while some swing has still to come to rest.
+   */
   private writeSwing(dt: number): void {
     let spec = this.showing
+    this.swinging = false
     if (spec === null || this.destroyed) { return }
     let player = playerOf(spec)
     this.bodies.forEach((entry: BodyNode) => {
       let b = entry.spec
       if (entry.parts.length === 0 || !hasSwing(b)) { return }
-      let target = 1
+      let target = 0
       if (b.path !== null || b.wander !== null) {
         target = travelPace(b, this.timeS)
       } else if (player !== null && b.id === player.id && this.sim !== null) {
         target = this.sim.playerSpeedNow() / Math.max(0.01, (b.player as ScenePlayer).speed)
-      } else if (b.motion === 'loose') {
-        target = 0
+      } else if (b.orbit !== null) {
+        target = 1
       }
+      if (target <= 0 && entry.pace === 0) { return }
       entry.pace += (target - entry.pace) * Math.min(1, dt * PACE_EASE)
+      if (target <= 0 && entry.pace < PACE_STILL) {
+        entry.pace = 0
+      } else {
+        this.swinging = true
+      }
       let n = Math.min(entry.parts.length, b.parts.length)
       for (let k = 0; k < n; k++) {
         let part = b.parts[k]
@@ -566,19 +587,8 @@ export class WorldBox {
     })
     for (let z of this.zoneWatch.update(spec.zones, at)) {
       console.info('VERA-WORLD event enter body=' + z.body + ' zone=' + z.zone)
-      this.queue(this.enterEvent(z))
+      this.queue(enterEvent(z))
     }
-  }
-
-  private enterEvent(z: ZoneEnter): SimEvent {
-    let e = new SimEvent()
-    e.kind = 'enter'
-    e.body = z.body
-    e.other = z.zone
-    e.x = z.x
-    e.y = z.y
-    e.z = z.z
-    return e
   }
 
   /** Every 2 s while the player goes: where it is and how fast, for the VERA-WORLD log. */
@@ -775,6 +785,7 @@ export class WorldBox {
     this.wanted = null
     this.showing = null
     this.showingMoves = false
+    this.swinging = false
     this.applied = null
     this.bodies.clear()
     this.byName.clear()

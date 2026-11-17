@@ -46,21 +46,26 @@ export function yawOf(q: number[]): number {
 
 /**
  * The player's driving, one physics step at a time: from the stick (a unit direction on the floor and how far it is
- * pushed, 0..1) and the way the body faces, the horizontal velocity and the turn to give it. It speeds up and slows down
- * at PLAYER_ACCEL and PLAYER_BRAKE, goes the way the stick points (so the person's push is what it does) and turns, at
- * most PLAYER_TURN_DEG_S, to face it; pushed against the way it faces it first turns, going slowly.
+ * pushed, 0..1), the way the body faces and how it moves along the ground now, the horizontal velocity and the turn to
+ * give it. Its velocity goes towards the stick's -- the way the stick points, at the speed pushed -- by at most
+ * PLAYER_ACCEL a second when that is faster and PLAYER_BRAKE when slower, from the velocity the body really has: so a
+ * dash or a knock is not undone at once but runs out, a stick let go (or never held) brings any going to a stop, and a
+ * player held against a wall has the speed it really goes at, about none. It turns, at most PLAYER_TURN_DEG_S, to face
+ * the push; pushed against the way it faces it first turns, going slowly.
  */
 export class PlayerDrive {
-  /** Its speed along the ground now, m/s. */
+  /** Its speed along the ground after this step, m/s. */
   speed: number = 0
   /** The way it was last pushed, a unit [x, z]. */
   dir: number[] = [1, 0]
 
-  /** [vx, vz, wy] for this step: metres a second, and radians a second about y. */
-  step(yawDeg: number, dx: number, dz: number, push: number, maxSpeed: number, dt: number): number[] {
+  /** [vx, vz, wy] for this step, the body going (vx, vz) now: metres a second, and radians a second about y. */
+  step(yawDeg: number, dx: number, dz: number, push: number, maxSpeed: number, dt: number, vx: number = 0,
+    vz: number = 0): number[] {
     let held = push > STICK_DEAD && Math.hypot(dx, dz) > 1e-6
     let wy = 0
-    let target = 0
+    let tx = 0
+    let tz = 0
     if (held) {
       let n = Math.hypot(dx, dz)
       this.dir = [dx / n, dz / n]
@@ -68,13 +73,24 @@ export class PlayerDrive {
       wy = Math.max(-PLAYER_TURN_DEG_S, Math.min(PLAYER_TURN_DEG_S, delta * PLAYER_TURN_GAIN)) * DEG
       // Facing away from the push it first turns round, nearly on the spot; facing it, it goes at the speed pushed.
       let facing = Math.cos(Math.min(90, Math.abs(delta)) * DEG)
-      target = maxSpeed * Math.min(1, push) * Math.max(0.25, facing)
+      let target = maxSpeed * Math.min(1, push) * Math.max(0.25, facing)
+      tx = this.dir[0] * target
+      tz = this.dir[1] * target
     }
-    let rate = target > this.speed ? PLAYER_ACCEL : PLAYER_BRAKE
-    let change = Math.max(-rate * dt, Math.min(rate * dt, target - this.speed))
-    this.speed = Math.max(0, this.speed + change)
-    if (!held && this.speed < PLAYER_STOP) { this.speed = 0 }
-    return [this.dir[0] * this.speed, this.dir[1] * this.speed, wy]
+    let rate = Math.hypot(tx, tz) > Math.hypot(vx, vz) ? PLAYER_ACCEL : PLAYER_BRAKE
+    let gx = tx - vx
+    let gz = tz - vz
+    let gap = Math.hypot(gx, gz)
+    let k = gap > rate * dt ? rate * dt / gap : 1
+    let nx = vx + gx * k
+    let nz = vz + gz * k
+    this.speed = Math.hypot(nx, nz)
+    if (!held && this.speed < PLAYER_STOP) {
+      nx = 0
+      nz = 0
+      this.speed = 0
+    }
+    return [nx, nz, wy]
   }
 
   /** Whether it is still going (or turning) and needs driving. */
@@ -85,6 +101,11 @@ export class PlayerDrive {
   reset(): void {
     this.speed = 0
   }
+}
+
+/** A zone as the watch tells it apart: its id where it is and as large as it is. */
+function zonePlace(z: ZoneSpec): string {
+  return z.id + '\u0000' + z.x.toString() + ',' + z.z.toString() + ',' + z.r.toString()
 }
 
 /** A body that came into a zone. */
@@ -100,6 +121,7 @@ export class ZoneEnter {
  * Which bodies are in which zones, from where the bodies are each frame. A body counts as in a zone when its centre is
  * within the zone's radius, seen from above. Only coming in is told; and only for a body and a zone both seen before:
  * a body made inside a zone (a new round puts the player back on its start) or a zone put round a body is not an entry.
+ * A zone the program moves or resizes is a zone put down afresh: a body it now lands on has not come into it.
  */
 export class ZoneWatch {
   private inside: Set<string> = new Set<string>()
@@ -111,7 +133,7 @@ export class ZoneWatch {
     let out: ZoneEnter[] = []
     let inside = new Set<string>()
     let zoneIds = new Set<string>()
-    for (let z of zones) { zoneIds.add(z.id) }
+    for (let z of zones) { zoneIds.add(zonePlace(z)) }
     let bodyIds = new Set<string>()
     positions.forEach((p: number[], id: string) => {
       bodyIds.add(id)
@@ -119,7 +141,7 @@ export class ZoneWatch {
         if (Math.hypot(p[0] - z.x, p[2] - z.z) > z.r) { continue }
         let key = id + '\u0000' + z.id
         inside.add(key)
-        if (this.inside.has(key) || !this.bodies.has(id) || !this.zones.has(z.id)) { continue }
+        if (this.inside.has(key) || !this.bodies.has(id) || !this.zones.has(zonePlace(z))) { continue }
         let e = new ZoneEnter()
         e.body = id
         e.zone = z.id

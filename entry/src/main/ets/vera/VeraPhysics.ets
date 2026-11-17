@@ -11,7 +11,7 @@
  */
 
 import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, orbitPositions, topFace } from './VeraScene'
-import { PlayerDrive, yawOf } from './VeraLocomotion'
+import { PlayerDrive, ZoneEnter, yawOf, PLAYER_STOP } from './VeraLocomotion'
 import { pointBounds, PartRecords, PART_RECORD, addPartRecords } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
 
@@ -62,10 +62,28 @@ export interface PhysEngine {
   readAwake(out: Float32Array): number
   /** px, py, pz, qx, qy, qz, qw of one body; 1, or 0 when there is no such body. */
   readPose(i: number, out: Float32Array): number
+  /** vx, vy, vz of one body (m/s); 1, or 0 when there is no such body. */
+  readVelocity(i: number, out: Float32Array): number
   /** Triples [a, b, approach speed] of contacts begun since the last drain; returns how many. */
   drainContacts(out: Float32Array): number
   /** Dynamic bodies awake, characters not counted. */
   awakeDynamic(): number
+}
+
+/**
+ * A pose [px, py, pz, qx, qy, qz, qw] stood upright: the same place, turned only about y, to the heading its +x had.
+ * A body on its side (its +x straight up) keeps its place and faces +x.
+ */
+export function uprightPose(at: number[]): number[] {
+  let x = at[3]
+  let y = at[4]
+  let z = at[5]
+  let w = at[6]
+  let fx = 1 - 2 * (y * y + z * z)
+  let fz = 2 * (x * z - y * w)
+  // A turn of a about y takes +x to (cos a, 0, -sin a).
+  let a = Math.hypot(fx, fz) > 1e-6 ? Math.atan2(-fz, fx) : 0
+  return [at[0], at[1], at[2], 0, Math.sin(a / 2), 0, Math.cos(a / 2)]
 }
 
 /** FNV-1a, 32 bits: the seed of everything the world does that could otherwise be random. */
@@ -351,8 +369,10 @@ export class FakePhys implements PhysEngine {
     let b = this.bodies[i]
     b.v = [vx, b.v[1], vz]
     b.w = [0, wy, 0]
-    if (vx !== 0 || vz !== 0 || wy !== 0) { this.wake(b) }
-    this.sinceVelocity = 0
+    if (vx !== 0 || vz !== 0 || wy !== 0) {
+      this.wake(b)
+      this.sinceVelocity = 0
+    }
   }
 
   sleep(i: number): void {
@@ -633,6 +653,13 @@ export class FakePhys implements PhysEngine {
     return 1
   }
 
+  readVelocity(i: number, out: Float32Array): number {
+    if (!this.valid(i) || out.length < 3) { return 0 }
+    let v = this.bodies[i].v
+    out[0] = v[0]; out[1] = v[1]; out[2] = v[2]
+    return 1
+  }
+
   drainContacts(out: Float32Array): number {
     let n = Math.min(Math.floor(out.length / 3), this.contacts.length / 3)
     for (let k = 0; k < n * 3; k++) { out[k] = this.contacts[k] }
@@ -699,6 +726,18 @@ export class SimEvent {
   /** For `settled`: which throw it ends (WorldSim.kickSerial when it was kicked) and the simulated ms since that kick. */
   kick: number = 0
   afterMs: number = 0
+}
+
+/** The `enter` event of a body that came into a zone: the one both the phone (WorldBox) and the host play check send. */
+export function enterEvent(z: ZoneEnter): SimEvent {
+  let e = new SimEvent()
+  e.kind = 'enter'
+  e.body = z.body
+  e.other = z.zone
+  e.x = z.x
+  e.y = z.y
+  e.z = z.z
+  return e
 }
 
 /** [minX, minY, minZ, maxX, maxY, maxZ] of a body where its spec puts it, turned as its spec turns it. */
@@ -886,6 +925,11 @@ export class WorldSim {
   private stick: number[] = [0, 0, 0]
   private driver: PlayerDrive = new PlayerDrive()
   private driving: boolean = false
+  /** The player's speed along the ground when it was last driven (m/s), and whether it was going up or down. */
+  private playerGround: number = 0
+  private playerFlying: boolean = false
+  /** The player kicked by the apply going on, '' for none. */
+  private playerKicked: string = ''
 
   constructor(engine: PhysEngine, random: RandomSource | null = null) {
     this.engine = engine
@@ -925,12 +969,13 @@ export class WorldSim {
 
   /** Whether the player is being steered, or still coming to a stop. */
   playerGoing(): boolean {
-    return this.player.length > 0 && (this.stick[2] > 0 || this.driver.moving() || this.driving)
+    return this.player.length > 0 && (this.stick[2] > 0 || this.driver.moving() || this.driving || this.playerGround >= PLAYER_STOP ||
+      this.playerFlying)
   }
 
-  /** The player's speed along the ground now (m/s), as its driving has it. */
+  /** The player's speed along the ground now (m/s), as the physics last had it: about none held against a wall. */
   playerSpeedNow(): number {
-    return this.driver.speed
+    return this.playerGround
   }
 
   hasLoose(): boolean {
@@ -971,6 +1016,8 @@ export class WorldSim {
     this.stick = [0, 0, 0]
     this.driver.reset()
     this.driving = false
+    this.playerGround = 0
+    this.playerFlying = false
   }
 
   /** Bring the engine from the world it had to next, by the diff between them (diffWorld). */
@@ -985,12 +1032,14 @@ export class WorldSim {
     let first = this.spec === null
     if (first || diff.tableChanged || diff.floorChanged) { this.buildGround(next) }
     let freed = new Set<number>()
-    // The player made again (a new mark, a new shape) stays where the person took it, not where it was built.
+    // The player made again (a new mark, a new shape, or a body that only now became it) stays where the person took
+    // it, not where it was built, and facing the way it faced -- but stood upright: a character turns only about y, so
+    // a tilt kept now (a box that had tumbled onto its side) would be kept for good.
     let kept = new Map<string, number[]>()
     for (let b of diff.recreate) {
       if (b.player === null || b.motion !== 'loose') { continue }
       let at = this.poseOf(b.id)
-      if (at !== null) { kept.set(b.id, at) }
+      if (at !== null) { kept.set(b.id, uprightPose(at)) }
     }
     for (let id of diff.remove) { this.removeBody(id, freed) }
     for (let b of diff.recreate) { this.removeBody(b.id, freed) }
@@ -1023,9 +1072,11 @@ export class WorldSim {
       if (i === undefined || b.kick === null || b.motion !== 'loose') { continue }
       let k = b.kick as SceneKick
       if (b.player !== null) {
-        // The player's kick is a jump or a dash: no tumble, and not a throw to wait on (it walks on after it).
+        // The player's kick is a jump or a dash: no tumble, and not a throw to wait on (it walks on after it). Its
+        // driving starts from that velocity and runs it out (drivePlayer), and frames run while it does.
         this.engine.setVelocity(i, k.vx, k.vy, k.vz, 0, 0, 0)
         kicked.add(b.id)
+        this.playerKicked = b.id
         continue
       }
       thrown++
@@ -1072,8 +1123,12 @@ export class WorldSim {
       // A new player (or a new round's) starts standing.
       this.driver.reset()
       this.driving = false
+      this.playerGround = 0
+      this.playerFlying = false
     }
     this.player = player
+    if (this.playerKicked.length > 0 && this.playerKicked === player) { this.driving = true }
+    this.playerKicked = ''
     if (this.loose.length === 0) { this.settlePending = false }
     this.awake = this.engine.awakeDynamic()
     if (thrown > 0) { this.lastKickAwake = this.awake }
@@ -1137,17 +1192,28 @@ export class WorldSim {
   }
 
   /**
-   * The player, steered by the stick for the step about to run: its speed and turn from PlayerDrive, from the way it
-   * faces now. Driven while the stick is held and while it comes to a stop, then once more with nothing, so it can sleep.
+   * The player, steered by the stick for the step about to run: its velocity and turn from PlayerDrive, from the way it
+   * faces and the velocity it has now. Driven while the stick is held and while it goes along the ground for any reason
+   * (the stick let go, a knock, a dash), then once more with nothing, so it can sleep: it has no friction of its own, and
+   * this is what stops it.
    */
   private drivePlayer(dt: number): void {
     if (this.player.length === 0) { return }
     let i = this.index.get(this.player)
     if (i === undefined) { return }
     let held = this.stick[2] > 0
-    if (!held && !this.driver.moving() && !this.driving) { return }
+    let vx = 0
+    let vz = 0
+    this.playerFlying = false
+    if (this.engine.readVelocity(i, this.one) === 1) {
+      vx = this.one[0]
+      vz = this.one[2]
+      this.playerFlying = Math.abs(this.one[1]) >= PLAYER_STOP
+    }
+    this.playerGround = Math.hypot(vx, vz)
+    if (!held && !this.driving && this.playerGround < PLAYER_STOP) { return }
     let yaw = this.engine.readPose(i, this.one) === 1 ? yawOf([this.one[3], this.one[4], this.one[5], this.one[6]]) : 0
-    let v = this.driver.step(yaw, this.stick[0], this.stick[1], this.stick[2], this.playerSpeed, dt)
+    let v = this.driver.step(yaw, this.stick[0], this.stick[1], this.stick[2], this.playerSpeed, dt, vx, vz)
     this.engine.drive(i, v[0], v[1], v[2])
     this.driving = held || this.driver.moving()
   }
