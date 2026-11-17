@@ -28,6 +28,7 @@ export class LiveNode {
   /** ui.Surface with style fill: how tall it is drawn, from where it starts to the bottom of the window. */
   @Trace layoutHeight: number = 0
   @Trace kind: string = ''
+  @Trace screenId: string = ''
   @Trace style: string = ''
   @Trace text: string = ''
   @Trace source: string = ''
@@ -132,6 +133,7 @@ export function armReveal(on: boolean): void {
 export function toLive(node: VeraUiNode): LiveNode {
   let live = new LiveNode()
   live.kind = node.kind
+  live.screenId = node.screenId
   live.style = node.style
   live.text = node.text
   live.source = node.source
@@ -209,6 +211,17 @@ export function reconcile(live: LiveNode, next: VeraUiNode,
     ? fieldValue !== undefined ? fieldValue(live, next)
       : live.fieldValue !== live.value && next.value === live.value ? live.fieldValue : undefined
     : undefined
+  // A screen owns its native controls. Never reconcile an outgoing editor into
+  // an unrelated incoming screen just because its fields occupy the same positions.
+  let screenChanged = (live.kind === 'screen' || next.kind === 'screen') &&
+    (live.kind !== next.kind || live.screenId !== next.screenId)
+  if (screenChanged) {
+    live.children = next.children.map((child: VeraUiNode): LiveNode => toLive(child))
+    live.layoutWidth = 0
+    live.layoutHeight = 0
+    live.fieldGeneration++
+  }
+  if (live.screenId !== next.screenId) { live.screenId = next.screenId }
   if (live.kind !== next.kind || live.action !== next.action || live.enabled !== next.enabled ||
       ((live.kind === 'field' || live.kind === 'surface') &&
         live.value !== next.value && live.fieldValue !== next.value && draft === undefined) ||
@@ -271,6 +284,8 @@ export function reconcile(live: LiveNode, next: VeraUiNode,
   if (live.patternMessage !== next.patternMessage) { live.patternMessage = next.patternMessage }
   if (live.email !== next.email) { live.email = next.email }
   if (live.emailMessage !== next.emailMessage) { live.emailMessage = next.emailMessage }
+
+  if (screenChanged) { return }
 
   // Reconcile the positions that already exist, in place, so the components
   // rendering them keep pointing at a node that is still being updated.

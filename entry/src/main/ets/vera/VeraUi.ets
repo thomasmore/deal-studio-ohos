@@ -17,6 +17,8 @@ import { invokeStdScene } from './VeraScene'
 export class VeraUiNode {
   id: number = 0
   kind: string = ''
+  /** ui.Screen: native subtree identity, not a second program or state. */
+  screenId: string = ''
   style: string = ''
   text: string = ''
   source: string = ''
@@ -256,6 +258,19 @@ function invokeStdTime(name: string, args: RuntimeValue[]): RuntimeValue {
       return new VeraNumberValue(now.getTime())
     case 'nowSeconds':
       return new VeraNumberValue(Math.floor(now.getTime() / 1000))
+    case 'atLocalTime': {
+      let day = asWhole(args[0])
+      let minute = asWhole(args[1])
+      if (Math.abs(day) > 1000000 || minute < 0 || minute >= 1440) {
+        throw new RuntimeTrap('R0009', 'atLocalTime expects a day in -1000000..1000000 and minutes in 0..1439')
+      }
+      let date = new Date(day * 86400000)
+      // Convert the local calendar date, not an offset added to today's midnight: DST days are not always 24 hours.
+      let at = new Date(0)
+      at.setFullYear(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+      at.setHours(Math.floor(minute / 60), minute % 60, 0, 0)
+      return new VeraNumberValue(at.getTime())
+    }
     case 'daysSinceEpoch':
       // Local midnights, not UTC: a dose taken at 23:30 belongs to that day for
       // the person holding the phone.
@@ -484,6 +499,11 @@ export class UiHostEnvironment extends HostEnvironment {
       case 'Column': return containerNode('column', args)
       case 'Row': return containerNode('row', args)
       case 'Card': return containerNode('card', args)
+      case 'Screen':
+        return viewNode('screen', [
+          ['screenId', new VeraStringValue(argString(args, 0))],
+          ['children', argArray(args, 1)],
+        ])
       case 'Scroll': return containerNode('scroll', args)
       case 'Canvas': return containerNode('canvas', args)
       case 'Transform':
@@ -1052,6 +1072,9 @@ function decodeNode(obj: VeraObjectValue, depth: number): VeraUiNode {
     switch (key) {
       case 'type':
         if (v instanceof VeraStringValue) { node.kind = (v as VeraStringValue).value }
+        break
+      case 'screenId':
+        if (v instanceof VeraStringValue) { node.screenId = (v as VeraStringValue).value }
         break
       case 'style':
         if (v instanceof VeraStringValue) { node.style = (v as VeraStringValue).value }

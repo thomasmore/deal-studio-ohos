@@ -77,6 +77,27 @@ Each new process loads its selected sources again, so a previous build cannot su
 `visual-check.js` records the tested revision, command, decoded trees, and expected-versus-observed checks in JSON.
 Native validation still requires the toolchain described in `CLAUDE.md`.
 
+For one-module multi-screen runtime coverage and the hand-written PillPal port:
+
+```bash
+node tools/vera-harness/multiscreen-check.js
+node tools/vera-harness/pillpal-check.js /tmp/vera-pillpal
+```
+
+These test shared state, screen identity, stale controls, navigation/back, drafts,
+dose history and calendar-queue behavior. PillPal calendar answers are mocked on
+this host; SVGs are not native-device evidence. See
+[`docs/multiscreen-runtime.md`](../../docs/multiscreen-runtime.md) for the contract,
+port limitations, phone evidence and safe use of the ephemeral proof runner.
+
+For the multi-screen planning/shared-writer path and refinement preservation:
+
+```bash
+VERA_TYPESCRIPT_PATH=/path/to/typescript/lib/typescript.js node tools/vera-harness/app-plan-check.js
+```
+
+This uses the real compiler/VM with mocked model, selector and phone effects. It covers plan references, record-owner normalization, filtering/questions/cancellation, one shared handoff, unreferenced state mutations feeding the existing repair loop, bounded failures without flat fallback, empty active views, shared drafts/stable IDs and pre-edit screen preservation. It is not proof that every requested action has a reachable UI control. See [`docs/multiscreen-agent.md`](../../docs/multiscreen-agent.md) for native evidence and known generated-app gaps.
+
 A `ui.Surface` is drawn by the program itself, frame by frame, so its proofs come from playing it.
 `gfx-run.js` runs `init()`, `view()`, then fixed-step frames with scripted fingers, and draws chosen frames to SVG with `VeraGfx.paintGfx`, the phone's own painter, through the canvas recorder in `gfx-svg.js`:
 
