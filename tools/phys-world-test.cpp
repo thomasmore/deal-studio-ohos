@@ -809,6 +809,146 @@ void TestRolling()
     Check(longest < 7.5f, "rolling: a thrown snowman comes to rest before the sleep cap");
 }
 
+// A character (kind 3, scene.player): driven along the ground it goes the way and as far as it is driven, stays upright
+// against a wall, turns about y as asked, still falls and jumps, never keeps a throw from settling, sleeps once let go,
+// and the world bound puts it back. A group character (a horse of parts) behaves the same.
+bool Upright(const float *p) { return std::fabs(p[3]) < 1e-3f && std::fabs(p[5]) < 1e-3f; }
+
+void Drive(vphys::PhysWorld &w, int b, float vx, float vz, float wy, int steps)
+{
+    for (int k = 0; k < steps; k++) {
+        w.drive(b, vx, vz, wy);
+        w.step(kDt, 1);
+    }
+}
+
+void TestCharacter()
+{
+    {
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        int f = w.addBox(100, 0.5f, 100, vphys::kStatic);
+        w.setPose(f, 0, -0.5f, 0, 0, 0, 0, 1);
+        w.setBound(-5, 99, 99);
+        int c = w.addBox(0.4f, 0.4f, 0.25f, vphys::kCharacter);
+        w.setPose(c, 0, 0.4f, 0, 0, 0, 0, 1);
+        w.setMaterial(c, 1, 0.3f, 0.6f);
+        Check(c >= 0, "character: made");
+        Check(w.awakeDynamic() == 0, "character: not counted among the dynamic bodies a throw waits for");
+        float p[7];
+        Drive(w, c, 2, 0, 0, 120);
+        w.readPose(c, p);
+        std::printf("      driven 2 m/s for 2 s: x = %.3f y = %.4f\n", p[0], p[1]);
+        Check(std::fabs(p[0] - 4.0f) < 0.4f, "character: goes as far as it is driven (4 m +-10%)");
+        Check(std::fabs(p[1] - 0.4f) < 0.02f && Upright(p), "character: stays on the floor, upright");
+        // Turning: 90 degrees a second for a second.
+        Drive(w, c, 0, 0, static_cast<float>(M_PI / 2), 60);
+        w.readPose(c, p);
+        float yaw = 2 * std::atan2(p[4], p[6]) * 180 / static_cast<float>(M_PI);
+        std::printf("      turned: yaw = %.1f degrees\n", yaw);
+        Check(std::fabs(yaw - 90) < 6 && Upright(p), "character: turns about y as it is told");
+        // Let go: it stops where it is and goes to sleep.
+        w.drive(c, 0, 0, 0);
+        float x0 = p[0];
+        float moved[8 * 4];
+        int still = 0;
+        for (int k = 0; k < 120; k++) {
+            w.step(kDt, 1);
+            still = w.readAwake(moved, 4) == 0 ? still + 1 : 0;
+        }
+        w.readPose(c, p);
+        Check(still > 10, "character: let go, it goes to sleep");
+        Check(std::fabs(p[0] - x0) < 0.02f, "character: let go, it stays where it is");
+        // A wall: driven into a static box it stops at it and stays upright.
+        int wall = w.addBox(0.2f, 1, 3, vphys::kStatic);
+        w.setPose(wall, p[0] + 2, 1, p[2], 0, 0, 0, 1);
+        Drive(w, c, 3, 0, 0, 120);
+        w.readPose(c, p);
+        std::printf("      against a wall: x = %.3f (wall face at %.3f), q = %.4f %.4f %.4f %.4f\n", p[0], x0 + 2 - 0.2f, p[3], p[4], p[5], p[6]);
+        Check(p[0] < x0 + 2 - 0.2f - 0.2f && Upright(p), "character: stopped by a wall, upright");
+        // A jump: an upward velocity takes it up, and it lands.
+        w.setVelocity(c, 0, 4, 0, 0, 0, 0);
+        float top = 0;
+        for (int k = 0; k < 90; k++) {
+            w.drive(c, 0, 0, 0);
+            w.step(kDt, 1);
+            w.readPose(c, p);
+            top = std::max(top, p[1]);
+        }
+        std::printf("      jump: top y = %.3f, landed y = %.4f\n", top, p[1]);
+        Check(top > 1.0f && std::fabs(p[1] - 0.4f) < 0.02f, "character: driving keeps its fall: it jumps and lands");
+        // Falling off a height while driven: it keeps falling.
+        w.setPose(c, -10, 3, 0, 0, 0, 0, 1);
+        Drive(w, c, 1, 0, 0, 60);
+        w.readPose(c, p);
+        Check(p[1] < 0.6f, "character: driven in the air it still falls");
+        // The bound puts it back where it was last placed.
+        w.setPose(c, 5, 0.4f, 5, 0, 0, 0, 1);
+        float farthest = 0;
+        bool back = false;
+        for (int k = 0; k < 150; k++) {
+            w.drive(c, 0, 60, 0);
+            w.step(kDt, 1);
+            w.readPose(c, p);
+            farthest = std::max(farthest, std::fabs(p[2]));
+            back = back || (k > 0 && std::fabs(p[2] - 5) < 0.01f);
+        }
+        std::printf("      driven off the world: farthest z %.1f\n", farthest);
+        Check(back && farthest < 99 + 1.1f, "character: the world bound brings it back");
+        // A thrown die settles while the character walks about.
+        int die = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+        w.setPose(die, 3, 0.5f, 3, 0, 0, 0, 1);
+        w.setVelocity(die, 1, 2, 0, 5, 1, 2);
+        int k = 0;
+        bool settled = false;
+        for (; k < 600 && !settled; k++) {
+            w.drive(c, 1, 0, 0.5f);
+            w.step(kDt, 1);
+            settled = k > 10 && w.awakeDynamic() == 0;
+        }
+        Check(settled, "character: a throw settles while it walks");
+    }
+    {
+        // A horse of parts as a character: it walks upright.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        Parts h;
+        h.Part(0, 0, 0.8f, 0, 0.6f, 0.2f, 0.2f);
+        for (float x : {-0.45f, 0.45f}) {
+            for (float z : {-0.15f, 0.15f}) { h.Part(0, x, 0.3f, z, 0.05f, 0.3f, 0.05f); }
+        }
+        h.Part(0, 0.75f, 1.1f, 0, 0.15f, 0.25f, 0.1f);
+        int c = h.Add(w, vphys::kCharacter);
+        Check(c >= 0, "character: a group of parts can be one");
+        float p[7];
+        w.readPose(c, p);
+        float y0 = p[1];
+        w.setPose(c, 0, y0 + 0.01f, 0, 0, 0, 0, 1);
+        Drive(w, c, 1.5f, 0.5f, 0.3f, 180);
+        w.readPose(c, p);
+        std::printf("      horse: at %.2f %.2f, y %.3f, q %.4f %.4f %.4f %.4f\n", p[0], p[2], p[1], p[3], p[4], p[5], p[6]);
+        Check(p[0] > 3.5f && Upright(p), "character: a group walks upright on its four legs");
+    }
+    {
+        // Two runs are the same.
+        float a[7], b[7];
+        for (float *out : {a, b}) {
+            vphys::PhysWorld w;
+            w.init(64, 0);
+            Floor(w);
+            int c = w.addBox(0.3f, 0.3f, 0.3f, vphys::kCharacter);
+            w.setPose(c, 0, 0.3f, 0, 0, 0, 0, 1);
+            int box = w.addBox(0.2f, 0.2f, 0.2f, vphys::kDynamic);
+            w.setPose(box, 1.5f, 0.2f, 0.05f, 0, 0, 0, 1);
+            Drive(w, c, 2, 0, 0.2f, 120);
+            w.readPose(box, out);
+        }
+        Check(std::equal(a, a + 7, b), "character: deterministic, and it pushes a loose box");
+        Check(a[0] > 1.6f, "character: the box it walked into moved");
+    }
+}
+
 }  // namespace
 
 int main()
@@ -824,6 +964,7 @@ int main()
     TestSleepCap();
     TestParts();
     TestRolling();
+    TestCharacter();
     std::printf(g_failures ? "%d FAILED\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

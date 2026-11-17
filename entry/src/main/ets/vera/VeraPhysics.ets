@@ -10,7 +10,8 @@
  * Pure: imports only relative modules, never a platform kit, so tools/vera-harness loads it under node.
  */
 
-import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, orbitPositions, topFace } from './VeraScene'
+import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, orbitPositions, topFace } from './VeraScene'
+import { PlayerDrive, yawOf } from './VeraLocomotion'
 import { pointBounds, PartRecords, PART_RECORD, addPartRecords } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
 
@@ -18,6 +19,8 @@ import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
 export const PHYS_STATIC: number = 0
 export const PHYS_DYNAMIC: number = 1
 export const PHYS_KINEMATIC: number = 2
+/** A dynamic body kept upright, turning only about y, without friction or bounce, moved by drive (the player). */
+export const PHYS_CHARACTER: number = 3
 
 /**
  * The native physics API (entry/src/main/cpp/types/libphys/index.d.ts), one method per function. Metres, seconds,
@@ -41,6 +44,8 @@ export interface PhysEngine {
   /** A dynamic body asleep where it is, as if it had come to rest there: it stays put until something awake touches it. */
   sleep(i: number): void
   moveKinematic(i: number, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number, dt: number): void
+  /** A character's velocity along the ground and turn about y (rad/s); its vertical velocity is its own. */
+  drive(i: number, vx: number, vz: number, wy: number): void
   /** Milliseconds the step took. */
   step(dt: number, substeps: number): number
   /**
@@ -59,6 +64,7 @@ export interface PhysEngine {
   readPose(i: number, out: Float32Array): number
   /** Triples [a, b, approach speed] of contacts begun since the last drain; returns how many. */
   drainContacts(out: Float32Array): number
+  /** Dynamic bodies awake, characters not counted. */
   awakeDynamic(): number
 }
 
@@ -177,6 +183,8 @@ class FakeBody {
   awake: boolean = false
   still: number = 0
   seed: number = 0
+  /** Made as PHYS_CHARACTER: upright, turning about y only, no friction or bounce. */
+  character: boolean = false
   /** Extents along the world axes, for this sub-step. */
   e: number[] = [0, 0, 0]
 }
@@ -256,7 +264,13 @@ export class FakePhys implements PhysEngine {
 
   private add(kind: number, hx: number, hy: number, hz: number, sphere: boolean): number {
     let b = new FakeBody()
-    b.kind = Math.max(0, Math.min(2, kind))
+    b.kind = Math.max(0, Math.min(3, kind))
+    if (b.kind === PHYS_CHARACTER) {
+      b.kind = PHYS_DYNAMIC
+      b.character = true
+      b.friction = 0
+      b.restitution = 0
+    }
     b.half = [hx, hy, hz]
     b.sphere = sphere
     b.awake = b.kind === PHYS_DYNAMIC
@@ -319,16 +333,25 @@ export class FakePhys implements PhysEngine {
     if (!this.valid(i)) { return }
     let b = this.bodies[i]
     if (b.kind === PHYS_DYNAMIC && mass > 0) { b.mass = mass }
-    b.restitution = restitution
-    b.friction = friction
+    b.restitution = b.character ? 0 : restitution
+    b.friction = b.character ? 0 : friction
   }
 
   setVelocity(i: number, vx: number, vy: number, vz: number, wx: number, wy: number, wz: number): void {
     if (!this.valid(i)) { return }
     let b = this.bodies[i]
     b.v = [vx, vy, vz]
-    b.w = [wx, wy, wz]
+    b.w = b.character ? [0, wy, 0] : [wx, wy, wz]
     if (b.kind === PHYS_DYNAMIC) { this.wake(b) }
+    this.sinceVelocity = 0
+  }
+
+  drive(i: number, vx: number, vz: number, wy: number): void {
+    if (!this.valid(i) || !this.bodies[i].character) { return }
+    let b = this.bodies[i]
+    b.v = [vx, b.v[1], vz]
+    b.w = [0, wy, 0]
+    if (vx !== 0 || vz !== 0 || wy !== 0) { this.wake(b) }
     this.sinceVelocity = 0
   }
 
@@ -432,12 +455,16 @@ export class FakePhys implements PhysEngine {
       b.v[t2] += r2 * f * mb / total
     }
     for (let n = 0; n < 3; n++) {
-      if (ma > 0) { a.w[n] *= FAKE_CONTACT_SPIN }
-      if (mb > 0) { b.w[n] *= FAKE_CONTACT_SPIN }
+      if (ma > 0 && !a.character) { a.w[n] *= FAKE_CONTACT_SPIN }
+      if (mb > 0 && !b.character) { b.w[n] *= FAKE_CONTACT_SPIN }
     }
   }
 
   private integrate(b: FakeBody, h: number): void {
+    if (b.character) {
+      b.w[0] = 0
+      b.w[2] = 0
+    }
     b.v[1] += this.gravity * h
     let lin = Math.max(0, 1 - FAKE_LINEAR_DAMPING * h)
     let ang = Math.max(0, 1 - FAKE_ANGULAR_DAMPING * h)
@@ -480,7 +507,7 @@ export class FakePhys implements PhysEngine {
     b.still = 0
     b.v = [0, 0, 0]
     b.w = [0, 0, 0]
-    this.snap(b)
+    if (!b.character) { this.snap(b) }
   }
 
   private stepTook: number = 0
@@ -615,7 +642,7 @@ export class FakePhys implements PhysEngine {
 
   awakeDynamic(): number {
     let n = 0
-    for (let b of this.bodies) { if (b.alive && b.kind === PHYS_DYNAMIC && b.awake) { n++ } }
+    for (let b of this.bodies) { if (b.alive && b.kind === PHYS_DYNAMIC && b.awake && !b.character) { n++ } }
     return n
   }
 }
@@ -766,7 +793,7 @@ export function bodyRecords(b: BodySpec): PartRecords {
 }
 
 function kindOf(b: BodySpec): number {
-  if (b.motion === 'loose') { return PHYS_DYNAMIC }
+  if (b.motion === 'loose') { return b.player !== null ? PHYS_CHARACTER : PHYS_DYNAMIC }
   if (b.motion === 'kinematic') { return PHYS_KINEMATIC }
   return PHYS_STATIC
 }
@@ -853,6 +880,12 @@ export class WorldSim {
   private contacts: Float32Array = new Float32Array(SIM_CONTACT_CAPACITY * 3)
   private one: Float32Array = new Float32Array(7)
   private events: SimEvent[] = []
+  /** The player (scene.player), '' for none; the stick as the renderer last set it; its driving; whether it was driven last step. */
+  private player: string = ''
+  private playerSpeed: number = 0
+  private stick: number[] = [0, 0, 0]
+  private driver: PlayerDrive = new PlayerDrive()
+  private driving: boolean = false
 
   constructor(engine: PhysEngine, random: RandomSource | null = null) {
     this.engine = engine
@@ -872,9 +905,32 @@ export class WorldSim {
     return [o[0], o[1], o[2], o[3], o[4], o[5], o[6]]
   }
 
-  /** Whether frames are needed: loose bodies awake, or a throw whose settling has not been told yet. */
+  /** Whether frames are needed: loose bodies awake, a throw whose settling has not been told yet, or the player going. */
   needsFrames(): boolean {
-    return this.loose.length > 0 && (this.awake > 0 || this.settlePending || this.hitBest !== null)
+    return this.loose.length > 0 && (this.awake > 0 || this.settlePending || this.hitBest !== null || this.playerGoing())
+  }
+
+  /** The player's id, '' for none. */
+  playerId(): string {
+    return this.player
+  }
+
+  /**
+   * The stick: dx, dz a direction along the floor (the renderer turns the screen's push into it with floorDirection) and
+   * push how far it is pushed, 0..1; 0 lets go.
+   */
+  setStick(dx: number, dz: number, push: number): void {
+    this.stick = [dx, dz, Math.max(0, Math.min(1, push))]
+  }
+
+  /** Whether the player is being steered, or still coming to a stop. */
+  playerGoing(): boolean {
+    return this.player.length > 0 && (this.stick[2] > 0 || this.driver.moving() || this.driving)
+  }
+
+  /** The player's speed along the ground now (m/s), as its driving has it. */
+  playerSpeedNow(): number {
+    return this.driver.speed
   }
 
   hasLoose(): boolean {
@@ -911,6 +967,10 @@ export class WorldSim {
     this.events = []
     this.awake = 0
     this.poseCount = 0
+    this.player = ''
+    this.stick = [0, 0, 0]
+    this.driver.reset()
+    this.driving = false
   }
 
   /** Bring the engine from the world it had to next, by the diff between them (diffWorld). */
@@ -925,6 +985,13 @@ export class WorldSim {
     let first = this.spec === null
     if (first || diff.tableChanged || diff.floorChanged) { this.buildGround(next) }
     let freed = new Set<number>()
+    // The player made again (a new mark, a new shape) stays where the person took it, not where it was built.
+    let kept = new Map<string, number[]>()
+    for (let b of diff.recreate) {
+      if (b.player === null || b.motion !== 'loose') { continue }
+      let at = this.poseOf(b.id)
+      if (at !== null) { kept.set(b.id, at) }
+    }
     for (let id of diff.remove) { this.removeBody(id, freed) }
     for (let b of diff.recreate) { this.removeBody(b.id, freed) }
     if (this.held && freed.size > 0) { this.dropPoses(freed) }
@@ -937,6 +1004,10 @@ export class WorldSim {
       this.createBody(b)
       created.push(b)
     }
+    kept.forEach((at: number[], id: string) => {
+      let i = this.index.get(id)
+      if (i !== undefined) { this.engine.setPose(i, at[0], at[1], at[2], at[3], at[4], at[5], at[6]) }
+    })
     for (let b of diff.material) {
       let i = this.index.get(b.id)
       if (i !== undefined) { this.engine.setMaterial(i, b.mass, b.restitution, b.friction) }
@@ -946,10 +1017,18 @@ export class WorldSim {
       if (i !== undefined) { this.placeBody(i, b) }
     }
     let kicked = new Set<string>()
+    let thrown = 0
     for (let b of diff.kick) {
       let i = this.index.get(b.id)
       if (i === undefined || b.kick === null || b.motion !== 'loose') { continue }
       let k = b.kick as SceneKick
+      if (b.player !== null) {
+        // The player's kick is a jump or a dash: no tumble, and not a throw to wait on (it walks on after it).
+        this.engine.setVelocity(i, k.vx, k.vy, k.vz, 0, 0, 0)
+        kicked.add(b.id)
+        continue
+      }
+      thrown++
       if (b.isDie) {
         let v = dieThrow(k.vx, k.vy, k.vz, k.spin, this.draw(b.id + '#' + k.trigger.toString()))
         this.engine.setVelocity(i, v[0], v[1], v[2], v[3], v[4], v[5])
@@ -966,12 +1045,12 @@ export class WorldSim {
       if (i !== undefined) { this.engine.sleep(i) }
     }
     this.restingCount = resting.length
-    if (kicked.size > 0) {
+    if (thrown > 0) {
       // A new throw: whatever the last one had not yet told is superseded, and this one settles once, after its bodies
       // have been seen awake (see step).
       this.events = this.events.filter((e: SimEvent): boolean => e.kind !== 'settled')
       this.kickSerial++
-      this.lastKickBodies = kicked.size
+      this.lastKickBodies = thrown
       this.settlePending = true
       this.woke = false
       this.stepsSinceKick = 0
@@ -980,13 +1059,24 @@ export class WorldSim {
     this.spec = next
     this.loose = []
     this.kinematic = []
+    let player = ''
     for (let b of next.bodies) {
       if (!this.index.has(b.id)) { continue }
       if (b.motion === 'loose') { this.loose.push(b.id) } else if (b.motion === 'kinematic') { this.kinematic.push(b.id) }
+      if (b.player !== null && b.motion === 'loose') {
+        player = b.id
+        this.playerSpeed = (b.player as ScenePlayer).speed
+      }
     }
+    if (player !== this.player) {
+      // A new player (or a new round's) starts standing.
+      this.driver.reset()
+      this.driving = false
+    }
+    this.player = player
     if (this.loose.length === 0) { this.settlePending = false }
     this.awake = this.engine.awakeDynamic()
-    if (kicked.size > 0) { this.lastKickAwake = this.awake }
+    if (thrown > 0) { this.lastKickAwake = this.awake }
   }
 
   /**
@@ -1028,6 +1118,7 @@ export class WorldSim {
       this.carry = Math.max(0, this.carry - n * SIM_STEP_S)
     }
     let dt = n * SIM_STEP_S
+    this.drivePlayer(dt)
     if (this.kinematic.length > 0) {
       let at = orbitPositions(this.spec as WorldSpec, timeS)
       for (let id of this.kinematic) {
@@ -1043,6 +1134,22 @@ export class WorldSim {
     this.stepping = true
     this.steppingSteps = n
     if (!this.engine.overlaps()) { this.finishStep() }
+  }
+
+  /**
+   * The player, steered by the stick for the step about to run: its speed and turn from PlayerDrive, from the way it
+   * faces now. Driven while the stick is held and while it comes to a stop, then once more with nothing, so it can sleep.
+   */
+  private drivePlayer(dt: number): void {
+    if (this.player.length === 0) { return }
+    let i = this.index.get(this.player)
+    if (i === undefined) { return }
+    let held = this.stick[2] > 0
+    if (!held && !this.driver.moving() && !this.driving) { return }
+    let yaw = this.engine.readPose(i, this.one) === 1 ? yawOf([this.one[3], this.one[4], this.one[5], this.one[6]]) : 0
+    let v = this.driver.step(yaw, this.stick[0], this.stick[1], this.stick[2], this.playerSpeed, dt)
+    this.engine.drive(i, v[0], v[1], v[2])
+    this.driving = held || this.driver.moving()
   }
 
   /** What the step begun last did: the awake poses, the knocks, and whether a throw has settled. */
@@ -1074,7 +1181,7 @@ export class WorldSim {
     e.afterMs = Math.round((this.simTime - this.kickAt) * 1000)
     let spec = this.spec as WorldSpec
     for (let b of spec.bodies) {
-      if (b.motion !== 'loose') { continue }
+      if (b.motion !== 'loose' || b.player !== null) { continue }
       let i = this.index.get(b.id)
       if (i === undefined) { continue }
       let value = 0

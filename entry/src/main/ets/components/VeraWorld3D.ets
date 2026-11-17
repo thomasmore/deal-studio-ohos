@@ -29,20 +29,21 @@ import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, Geo
   PlaneGeometry, Material, MaterialType, MetallicRoughnessMaterial, UnlitMaterial, Vec2, Vec3, Vec4, Quaternion, Node, Geometry,
   MeshResource, EnvironmentBackgroundType, PostProcessSettings, RaycastResult, RaycastParameters, Color, SpotLight, CustomGeometry,
   PrimitiveTopology } from '@kit.ArkGraphics3D'
-import { WorldSpec, BodySpec, WorldDiff, diffWorld, orbitPositions, MotionCarry } from '../vera/VeraScene'
+import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, diffWorld, orbitPositions, MotionCarry, travelPace } from '../vera/VeraScene'
 import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
 import { prismMesh, hullMesh } from '../vera/VeraShapes'
 import { PhysEngine, WorldSim, SimEvent } from '../vera/VeraPhysics'
+import { Follower, ZoneWatch, ZoneEnter, swingTurn, hasSwing, yawOf } from '../vera/VeraLocomotion'
 import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physAddParts, physRemove, physSetPose,
-  physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose, physDrainContacts,
-  physAwakeDynamic } from 'libphys.so'
+  physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physDrive, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose,
+  physDrainContacts, physAwakeDynamic } from 'libphys.so'
 import { ResolvedTheme } from '../vera/VeraTheme'
 import { LOOK_SUN_INTENSITY, LOOK_SUN_POSITION, LOOK_SUN_TARGET, sunFor, LOOK_SHADOWS, LOOK_AMBIENT, LOOK_FOV, LOOK_FLOOR_ROLE,
   LOOK_TABLE_ROLE, LOOK_PIP_ROLE, LOOK_BACKGROUND_ROLE, TABLE_TOP_THICKNESS, PIP_RADIUS, lookLinear, lookColorKey, quatXYZ,
   lookAtQuat, CameraPose, worldCamera, orbitEye, pinchDistance, zoomPose, worldBounds, tableParts, floorSize, pipLayout, floorColor, worldGlows,
   floorGain, floorBaseLinear, linearHex, FLOOR_ROUGHNESS, FLOOR_METALLIC, FLOOR_SPECULAR, projectPoint, metresPerVp, floorDirection,
   GLOW_AMBIENT, GLOW_SPOTS, GLOW_SPOT_INNER, GLOW_SPOT_OUTER, TRAIL_POINTS, glowCandela, worldBackgroundRgba, isDarkRgba,
-  worldHasBackdrop, starField, worldTrails, worldSuns, lookRgba, srgbToLinear } from '../vera/VeraLook3D'
+  worldHasBackdrop, starField, worldTrails, worldSuns, lookRgba, srgbToLinear, followTarget, followPlanes } from '../vera/VeraLook3D'
 
 /** A SurfaceMesh as the kit's geometry: its colours turned from sRGB to the linear values a vertex colour is. */
 function customGeometry(m: SurfaceMesh): CustomGeometry {
@@ -163,6 +164,7 @@ class NativePhys implements PhysEngine {
   moveKinematic(i: number, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number, dt: number): void {
     physMoveKinematic(i, px, py, pz, qx, qy, qz, qw, dt)
   }
+  drive(i: number, vx: number, vz: number, wy: number): void { physDrive(i, vx, vz, wy) }
   step(dt: number, substeps: number): number { return physStep(dt, substeps) }
   /** The step runs on the library's own thread while the frame is drawn (phys_stepper.h). */
   overlaps(): boolean { return true }
@@ -205,6 +207,11 @@ function vec4(c: number[]): Vec4 {
   return v
 }
 
+function quatOf(node: Node): number[] {
+  let r = node.rotation
+  return [r.x, r.y, r.z, r.w]
+}
+
 function nextFrame(): Promise<void> {
   return new Promise<void>((resolve: () => void) => { setTimeout(resolve, 16) })
 }
@@ -220,6 +227,27 @@ function hasLoose(spec: WorldSpec | null): boolean {
   for (let b of spec.bodies) { if (b.motion === 'loose') { return true } }
   return false
 }
+
+/** Whether a world has something the host moves each frame without physics: an orbit, a spin, a route, a swinging leg. */
+function hasMoves(spec: WorldSpec | null): boolean {
+  if (spec === null) { return false }
+  for (let b of spec.bodies) { if (b.motion === 'kinematic' || hasSwing(b)) { return true } }
+  return false
+}
+
+/** The player's body in a world, or null. */
+export function playerOf(spec: WorldSpec | null): BodySpec | null {
+  if (spec === null) { return null }
+  for (let b of spec.bodies) { if (b.player !== null) { return b } }
+  return null
+}
+
+/** How far a stick's knob may go from its centre, as a share of the stick's radius; and what a push of 1 is. */
+const STICK_TRAVEL: number = 1
+/** A swing's stride catches up with the body's pace this fast (per second), so a stop or a start eases. */
+const PACE_EASE: number = 6
+/** A follow camera that moved less than this (m) in a frame is not written again: the backdrop repaints with it. */
+const FOLLOW_EPS: number = 0.0005
 
 /** What a tap hit: the body's id ("" for empty space, the table or the floor) and where, in metres. */
 export class WorldPick {
@@ -253,6 +281,9 @@ class BodyNode {
   partSpecs: BodySpec[] = []
   /** Where the node was last put, for picking by screen distance. */
   pos: number[] = [0, 0, 0]
+  /** The share of its stride a swinging body goes at now, eased (see PACE_EASE), and where it was a frame ago. */
+  pace: number = 0
+  lastPos: number[] = [0, 0, 0]
   constructor(spec: BodySpec, node: Node) {
     this.spec = spec
     this.node = node
@@ -354,6 +385,27 @@ export class WorldBox {
   private framed: number = 0
   private worldRadius: number = 1
 
+  /**
+   * The stick over a world with a player (VeraPreview draws it from these): whether there is a player, its action
+   * button's label ('' for none), and where the knob is, as a share of the stick's radius right and down.
+   */
+  @Trace hasPlayer: boolean = false
+  @Trace action: string = ''
+  @Trace knobX: number = 0
+  @Trace knobY: number = 0
+  /** How far the stick is pushed (0..1) and which way on the screen, right and down. */
+  private push: number = 0
+  private pushX: number = 0
+  private pushY: number = 0
+  /** The camera following a body (scene.follow, or the player), and whether it has still to catch up. */
+  private follower: Follower = new Follower()
+  private followBehind: boolean = false
+  /** Which bodies are in which zones, and the zones' rings. */
+  private zoneWatch: ZoneWatch = new ZoneWatch()
+  private zoneNodes: Node[] = []
+  /** Seconds since VERA-WORLD last said where the player is. */
+  private playerLogS: number = 0
+
   /** Show this world (with this theme) as soon as what is being applied now is done. */
   apply(spec: WorldSpec, theme: ResolvedTheme): void {
     if (this.destroyed || this.retired) { return }
@@ -366,6 +418,7 @@ export class WorldBox {
   needsFrames(): boolean {
     if (this.destroyed || this.retired) { return false }
     if (hasKinematic(this.wanted) || this.showingMoves || this.events.length > 0) { return true }
+    if (this.push > 0 || this.followBehind) { return true }
     if (this.sim !== null && this.sim.needsFrames()) { return true }
     // A world about to be given loose bodies (or a throw) starts its frames before the apply is done.
     return this.wanted !== this.applied && hasLoose(this.wanted) && !this.physicsLost && this.note.length === 0
@@ -406,6 +459,139 @@ export class WorldBox {
         this.queue(e)
       }
     }
+    let dt = Math.min(0.1, Math.max(0, elapsedMs / 1000))
+    this.writeSwing(dt)
+    this.writeFollow(dt)
+    this.watchZones()
+    this.logPlayer(dt)
+  }
+
+  /**
+   * The stick, as VeraPreview's control reads the finger: dx right and dy down as a share of its radius (0, 0 lets go).
+   * It is turned into a direction on the floor from where the camera looks now, so pushing up goes away from the eye.
+   */
+  setStick(dx: number, dy: number): void {
+    let n = Math.hypot(dx, dy)
+    let k = n > STICK_TRAVEL ? STICK_TRAVEL / n : 1
+    this.knobX = dx * k
+    this.knobY = dy * k
+    this.pushX = dx
+    this.pushY = dy
+    this.push = Math.min(1, n / STICK_TRAVEL)
+    this.steer()
+  }
+
+  /** The stick's push given to the sim, along the floor as the camera sees it now (called again as the camera turns). */
+  private steer(): void {
+    let sim = this.sim
+    let pose = this.pose
+    if (sim === null) { return }
+    if (this.push <= 0 || pose === null) {
+      sim.setStick(0, 0, 0)
+      return
+    }
+    let d = floorDirection(pose, this.pushX, this.pushY)
+    sim.setStick(d[0], d[2], this.push)
+  }
+
+  /** The world as last fully applied (null before the first). */
+  appliedSpec(): WorldSpec | null {
+    return this.applied
+  }
+
+  /** Where the player is now, [x, y, z]; null without one. */
+  playerAt(): number[] | null {
+    let p = playerOf(this.applied)
+    if (p === null) { return null }
+    let entry = this.bodies.get(p.id)
+    return entry !== undefined ? [entry.pos[0], entry.pos[1], entry.pos[2]] : null
+  }
+
+  /** Swinging parts of groups, each swung by its body's pace now (eased): still when the body stands. */
+  private writeSwing(dt: number): void {
+    let spec = this.showing
+    if (spec === null || this.destroyed) { return }
+    let player = playerOf(spec)
+    this.bodies.forEach((entry: BodyNode) => {
+      let b = entry.spec
+      if (entry.parts.length === 0 || !hasSwing(b)) { return }
+      let target = 1
+      if (b.path !== null || b.wander !== null) {
+        target = travelPace(b, this.timeS)
+      } else if (player !== null && b.id === player.id && this.sim !== null) {
+        target = this.sim.playerSpeedNow() / Math.max(0.01, (b.player as ScenePlayer).speed)
+      } else if (b.motion === 'loose') {
+        target = 0
+      }
+      entry.pace += (target - entry.pace) * Math.min(1, dt * PACE_EASE)
+      let n = Math.min(entry.parts.length, b.parts.length)
+      for (let k = 0; k < n; k++) {
+        let part = b.parts[k]
+        if (part.swing === null) { continue }
+        let at = swingTurn(part, this.timeS, entry.pace)
+        entry.parts[k].position = v3(at[0], at[1], at[2])
+        entry.parts[k].rotation = quat([at[3], at[4], at[5], at[6]])
+      }
+    })
+  }
+
+  /** The follow camera catches up with its body; the stick's direction follows the camera. */
+  private writeFollow(dt: number): void {
+    let spec = this.applied
+    let pose = this.pose
+    if (spec === null || pose === null || spec.follow === null || !this.follower.ready) {
+      this.followBehind = false
+      return
+    }
+    let f = spec.follow as FollowSpec
+    let entry = this.bodies.get(f.target)
+    if (entry === undefined) {
+      this.followBehind = false
+      return
+    }
+    if (this.follower.step(pose, entry.pos, f, dt, FOLLOW_EPS)) {
+      this.writeCamera()
+      if (this.push > 0) { this.steer() }
+    }
+    this.followBehind = this.follower.behind(entry.pos, f)
+  }
+
+  /** Bodies that move, against the zones: each one that came into a zone is told as `enter`. */
+  private watchZones(): void {
+    let spec = this.applied
+    if (spec === null || spec.zones.length === 0) { return }
+    let at = new Map<string, number[]>()
+    this.bodies.forEach((entry: BodyNode, id: string) => {
+      if (entry.spec.motion !== 'static') { at.set(id, entry.pos) }
+    })
+    for (let z of this.zoneWatch.update(spec.zones, at)) {
+      console.info('VERA-WORLD event enter body=' + z.body + ' zone=' + z.zone)
+      this.queue(this.enterEvent(z))
+    }
+  }
+
+  private enterEvent(z: ZoneEnter): SimEvent {
+    let e = new SimEvent()
+    e.kind = 'enter'
+    e.body = z.body
+    e.other = z.zone
+    e.x = z.x
+    e.y = z.y
+    e.z = z.z
+    return e
+  }
+
+  /** Every 2 s while the player goes: where it is and how fast, for the VERA-WORLD log. */
+  private logPlayer(dt: number): void {
+    let sim = this.sim
+    if (sim === null || !sim.playerGoing()) { return }
+    this.playerLogS += dt
+    if (this.playerLogS < 2) { return }
+    this.playerLogS = 0
+    let at = this.playerAt()
+    if (at === null) { return }
+    console.info('VERA-WORLD player x=' + at[0].toFixed(2) + ' z=' + at[2].toFixed(2) + ' v=' + sim.playerSpeedNow().toFixed(2) +
+      ' push=' + this.push.toFixed(2))
   }
 
   /** The second half of the frame: the next physics step begins, on its own thread, while the frame is drawn. */
@@ -500,6 +686,7 @@ export class WorldBox {
     full.kick = prev !== null ? diff.kick : []
     made.apply(full, next)
     this.sim = made
+    this.steer()
     this.noteKick(made)
     if (made.restingCount > 0) { console.info('VERA-WORLD resting=' + made.restingCount.toString() + ' start asleep') }
   }
@@ -595,6 +782,9 @@ export class WorldBox {
     this.materials.clear()
     this.tableNodes = []
     this.floorNodes = []
+    this.zoneNodes = []
+    this.zoneWatch.reset()
+    this.push = 0
     if (scene !== null) {
       try {
         scene.destroy()
@@ -666,9 +856,16 @@ export class WorldBox {
     if (this.moved && this.downBody.length === 0 && this.pose !== null && this.pose.orbit && this.cam !== null) {
       let pose = this.pose
       let grounded = this.applied !== null && (this.applied.floor !== null || this.applied.table !== null)
-      pose.eye = orbitEye(pose.eye, pose.look, -(x - this.lastX) * DRAG_RAD_PER_VP, (y - this.lastY) * DRAG_RAD_PER_VP,
-        grounded ? 0.05 : -1.45, 1.45)
+      let yaw = -(x - this.lastX) * DRAG_RAD_PER_VP
+      let pitch = (y - this.lastY) * DRAG_RAD_PER_VP
+      if (this.following()) {
+        // A follow camera turns round its body, and keeps the turn as it follows.
+        this.follower.turn(pose, yaw, pitch, grounded ? 0.05 : -1.45)
+      } else {
+        pose.eye = orbitEye(pose.eye, pose.look, yaw, pitch, grounded ? 0.05 : -1.45, 1.45)
+      }
       this.writeCamera()
+      if (this.push > 0) { this.steer() }
     }
     this.lastX = x
     this.lastY = y
@@ -768,7 +965,16 @@ export class WorldBox {
     if (pose === null) { return }
     let span = Math.hypot(this.pinchX - this.lastX, this.pinchY - this.lastY)
     zoomPose(pose, pinchDistance(this.pinchFrom, this.pinchSpan, span, this.framed), this.worldRadius)
+    if (this.following()) {
+      this.follower.keepEye(pose)
+      followPlanes(pose)
+    }
     this.writeCamera()
+  }
+
+  /** Whether the camera follows a body now. */
+  private following(): boolean {
+    return this.applied !== null && this.applied.follow !== null && this.follower.ready
   }
 
   /**
@@ -948,7 +1154,11 @@ export class WorldBox {
     }
     if (backdropChanged && !themeChanged) { this.writeBackground(theme) }
     this.showing = next
-    this.showingMoves = hasKinematic(next)
+    this.showingMoves = hasMoves(next)
+    let player = playerOf(next)
+    this.hasPlayer = player !== null
+    this.action = player !== null ? (player.player as ScenePlayer).action : ''
+    if (player === null && this.push > 0) { this.setStick(0, 0) }
     if (themeChanged) {
       // Materials are by the colour a role comes out as; a new theme makes them again.
       this.materials.clear()
@@ -975,8 +1185,10 @@ export class WorldBox {
       if (known === undefined || (b.shape === 'sphere' && b.pattern.length > 0)) { continue }
       if (known.parts.length > 0) {
         // A group: each part its own colour (a painted part's are its mesh's); the group's node itself draws nothing.
-        for (let k = 0; k < known.parts.length; k++) {
-          let part = known.partSpecs[k]
+        for (let k = 0; k < known.parts.length && k < b.parts.length; k++) {
+          // The parts as this spec has them: a new part colour is a material update, not a new group.
+          let part = b.parts[k]
+          known.partSpecs[k] = part
           if (part.shape === 'sphere' && part.pattern.length > 0) { continue }
           let partMaterial = await this.material(part.color, b.glow, theme, 'ink')
           if (this.destroyed) { return }
@@ -1001,7 +1213,12 @@ export class WorldBox {
       await this.buildGround(next, theme, diff.tableChanged || themeChanged, diff.floorChanged || themeChanged || glowsChanged)
       if (this.destroyed) { return }
     }
-    let reframe = prev === null || diff.cameraChanged || (next.camera === null &&
+    if (diff.zonesChanged || themeChanged) {
+      await this.buildZones(next, theme)
+      if (this.destroyed) { return }
+    }
+    // A follow camera is placed once, and again only for a new body to follow: bodies coming and going leave it be.
+    let reframe = prev === null || diff.cameraChanged || (next.camera === null && next.follow === null &&
       (creating.length > 0 || diff.remove.length > 0 || diff.setPose.length > 0 || diff.tableChanged))
     if (reframe) { this.resetCamera(next) }
     for (let i = 0; i < creating.length; i += BATCH) {
@@ -1335,10 +1552,44 @@ export class WorldBox {
   private resetCamera(spec: WorldSpec): void {
     let pose = worldCamera(spec, this.height > 0 ? this.width / this.height : 1)
     this.pose = pose
+    this.follower.ready = false
+    if (spec.follow !== null) {
+      // Behind the followed body where it is now (a body already in the world), else where it starts.
+      let f = spec.follow as FollowSpec
+      let start = followTarget(spec)
+      let entry = this.bodies.get(f.target)
+      if (start !== null) {
+        let at = entry !== undefined ? entry.pos : [start[0], start[1], start[2]]
+        let heading = entry !== undefined ? yawOf(quatOf(entry.node)) : start[3]
+        this.follower.snap(pose, at, heading, f)
+      }
+    }
     this.framed = Math.hypot(pose.eye[0] - pose.look[0], pose.eye[1] - pose.look[1], pose.eye[2] - pose.look[2])
     let bounds = worldBounds(spec)
     this.worldRadius = bounds !== null ? bounds[3] : 1
+    if (spec.follow !== null) { this.worldRadius = Math.max(this.worldRadius, this.framed * 2) }
     this.writeCamera()
+    if (this.push > 0) { this.steer() }
+  }
+
+  /** The zones' rings: a faint band round each circle, lying on the ground, unlit so it reads in any light. */
+  private async buildZones(spec: WorldSpec, theme: ResolvedTheme): Promise<void> {
+    let rf = this.rf
+    if (rf === null) { return }
+    for (let n of this.zoneNodes) { this.removeNode(n) }
+    this.zoneNodes = []
+    let y = spec.table !== null && spec.floor === null ? 0.002 : 0.004
+    for (let z of spec.zones) {
+      let band = Math.max(0.04, z.r * 0.1)
+      let material = await this.vertexMaterial(true)
+      if (this.destroyed) { return }
+      this.serial++
+      let mesh = flatRing(Math.max(0.001, z.r - band), z.r, lookRgba(theme, z.color, 'accent'), 0, 0)
+      let node = await this.node(rf, 'z' + this.serial.toString(), customGeometry(mesh), material)
+      if (this.destroyed) { return }
+      node.position = v3(z.x, y, z.z)
+      this.zoneNodes.push(node)
+    }
   }
 
   private writeCamera(): void {

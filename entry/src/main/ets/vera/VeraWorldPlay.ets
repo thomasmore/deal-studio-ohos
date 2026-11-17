@@ -15,8 +15,9 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
   encodeRuntimeValue } from './VeraInterpreter'
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
-import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, decodeScene, diffWorld, orbitPositions, sceneEventValue,
-  MotionCarry, SceneOrbit } from './VeraScene'
+import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, ZoneSpec, ScenePlayer, decodeScene, diffWorld, orbitPositions,
+  sceneEventValue, MotionCarry, SceneOrbit } from './VeraScene'
+import { ZoneWatch } from './VeraLocomotion'
 import { FakePhys, WorldSim, SimEvent, specBounds } from './VeraPhysics'
 import { worldCamera, projectPoint, metresPerVp, floorDirection, CameraPose } from './VeraLook3D'
 import { functionLine, worldBudgetProblem, predictWorkMs } from './VeraBudget'
@@ -41,6 +42,26 @@ export const CODE_RESULT_UNREAD: string = 'P0007'
 export const CODE_NO_WORLD: string = 'P0008'
 export const CODE_ORBITS_CROSS: string = 'P0009'
 export const CODE_TOO_SMALL: string = 'P0010'
+export const CODE_STUCK: string = 'P0011'
+export const CODE_WALKS_THROUGH: string = 'P0012'
+export const CODE_ZONE_UNREACHABLE: string = 'P0013'
+export const CODE_NO_TRAVEL: string = 'P0014'
+/** The stick is held this many frames ahead, then this many to the right, from STICK_FROM; the player must go this share of its speed's reach. */
+const STICK_FROM: number = 30
+const STICK_AHEAD: number = 120
+const STICK_RIGHT: number = 60
+const STICK_MIN_SHARE: number = 0.25
+/** A body that walks by itself is sampled this often (s), for this long, against what stands in its way. */
+const WALK_SAMPLE_S: number = 0.25
+const WALK_SAMPLE_FOR_S: number = 60
+/** A body standing no higher than this share of a walker's height is stepped over (grass, a stone, a mark on the ground). */
+const STEP_OVER: number = 0.3
+
+/**
+ * What the request says should travel, as the design names it: 'none' (nothing asked), 'self' (something walks, runs or
+ * drives by itself), 'steered' (the person steers something), 'both'.
+ */
+export const TRAVEL_KINDS: string[] = ['none', 'self', 'steered', 'both']
 /** The biggest body the person plays with or watches is at least this many vp across as the world starts, or it is a speck. */
 export const MIN_BODY_VP: number = 12
 
@@ -123,6 +144,9 @@ export class WorldPlayReport {
   /** Hits handed to the handler, and the VM steps of the costliest (handler, and the build when the state changed). */
   hitEvents: number = 0
   hitStepsMax: number = 0
+  /** How far the player went under the held stick (m), and the zone entries told. */
+  playerMoved: number = 0
+  enterEvents: number = 0
 }
 
 /** A failure the play stops at: its diagnostic, already in the repair form. */
@@ -158,6 +182,14 @@ class WorldPlay {
   settledRead: number = 0
   hitEvents: number = 0
   hitStepsMax: number = 0
+  /** What the design says travels (TRAVEL_KINDS), the zones' watch, the player's start under the stick and how far it went. */
+  travel: string = 'none'
+  zones: ZoneWatch = new ZoneWatch()
+  enterEvents: number = 0
+  playerStart: number[] | null = null
+  playerId: string = ''
+  playerMoved: number = -1
+  playerSpeed: number = 1
 
   constructor(node: VeraUiNode, state: RuntimeValue, vm: VirtualMachine, host: UiHostEnvironment,
       module: BytecodeModule) {
@@ -225,9 +257,10 @@ class WorldPlay {
     this.checkCreated(next, diff)
     this.checkOrbits(next)
     for (let b of next.bodies) {
-      if (b.motion !== 'static' || b.orbit !== null || b.spinPeriodS !== 0) { this.moving = true }
+      if (b.motion !== 'static' || b.orbit !== null || b.spinPeriodS !== 0 || b.path !== null || b.wander !== null) { this.moving = true }
       if (b.isDie) { this.dice = true }
-      if (b.kick !== null) { this.thrower = true }
+      // The player's kick is a jump, not a throw that settles.
+      if (b.kick !== null && b.player === null) { this.thrower = true }
     }
     let kicksBefore = this.sim.kickSerial
     this.sim.apply(diff, next)
@@ -477,6 +510,9 @@ class WorldPlay {
     this.rebuild('when the program starts')
     this.checkSeen()
     this.checkReadable()
+    this.checkTravel()
+    this.checkWalks()
+    this.checkZones()
     let buttons: VeraUiNode[] = []
     for (let root of decodeVeraUi(this.vm.execute('view', [this.state]))) { buttonsIn(root, buttons) }
     let pressed = spread(buttons, PRESSED_BUTTONS)
@@ -503,19 +539,204 @@ class WorldPlay {
             'in ' + this.event + ' (a swipe of body "' + input.body + '" at frame ' + frame.toString() + ')')
         }
       }
+      this.steerAt(frame)
       this.time += WORLD_STEP_MS / 1000
       this.sim.step(WORLD_STEP_MS, this.time)
       for (let e of this.sim.takeEvents()) { queue.push(e) }
+      this.watchZones(queue)
       this.deliver(queue, frame)
+      if (frame === STICK_FROM + STICK_AHEAD) { this.checkPlayerSeen() }
     }
     return this.verdict()
   }
 
+  /**
+   * The person's thumb on the stick, when the world has a player: held ahead (away from the eye) from STICK_FROM for
+   * STICK_AHEAD frames, then to the right, then let go; its action button pressed once on the way. How far the player
+   * went while held ahead is what P0011 reads.
+   */
+  steerAt(frame: number): void {
+    let spec = this.spec as WorldSpec
+    let player: BodySpec | null = null
+    for (let b of spec.bodies) { if (b.player !== null) { player = b } }
+    if (player === null) { return }
+    let p = player as BodySpec
+    let pose = worldCamera(spec, this.width / this.height)
+    if (frame === STICK_FROM) {
+      let d = floorDirection(pose, 0, -1)
+      this.sim.setStick(d[0], d[2], 1)
+      this.playerId = p.id
+      this.playerStart = this.sim.poseOf(p.id)
+    } else if (frame === STICK_FROM + STICK_AHEAD) {
+      let at = this.sim.poseOf(this.playerId)
+      let from = this.playerStart
+      this.playerSpeed = (p.player as ScenePlayer).speed
+      this.playerMoved = at !== null && from !== null && this.playerId === p.id ?
+        Math.hypot(at[0] - (from as number[])[0], at[2] - (from as number[])[2]) : -1
+      let d = floorDirection(pose, 1, 0)
+      this.sim.setStick(d[0], d[2], 1)
+    } else if (frame === STICK_FROM + STICK_AHEAD + STICK_RIGHT) {
+      this.sim.setStick(0, 0, 0)
+    } else if (frame === STICK_FROM + STICK_AHEAD / 2 && (p.player as ScenePlayer).action.length > 0 && this.event.length > 0) {
+      let at = this.where(p.id)
+      this.handle(this.event, sceneEventValue('action', p.id, '', at[0], at[1], at[2], 0, [], []),
+        'in ' + this.event + ' (the player\'s button "' + (p.player as ScenePlayer).action + '" at frame ' + frame.toString() + ')')
+    }
+  }
+
+  /** The bodies that move, against the zones: entries go to the handler with the world's other events. */
+  watchZones(queue: SimEvent[]): void {
+    let spec = this.spec as WorldSpec
+    if (spec.zones.length === 0) { return }
+    let at = new Map<string, number[]>()
+    let orbits = orbitPositions(spec, this.time)
+    for (let b of spec.bodies) {
+      if (b.motion === 'static') { continue }
+      let live = b.motion === 'loose' ? this.sim.poseOf(b.id) : null
+      let o = orbits.get(b.id)
+      if (live !== null) { at.set(b.id, live) } else if (o !== undefined) { at.set(b.id, o) }
+    }
+    for (let z of this.zones.update(spec.zones, at)) {
+      let e = new SimEvent()
+      e.kind = 'enter'
+      e.body = z.body
+      e.other = z.zone
+      e.x = z.x
+      e.y = z.y
+      e.z = z.z
+      queue.push(e)
+      this.enterEvents++
+    }
+  }
+
+  /** After the stick has been held ahead, the player is still in view: a camera the program fixed does not lose it. */
+  checkPlayerSeen(): void {
+    let spec = this.spec as WorldSpec
+    if (spec.camera === null || this.playerId.length === 0) { return }
+    let at = this.sim.poseOf(this.playerId)
+    if (at === null) { return }
+    let pose = worldCamera(spec, this.width / this.height)
+    let seen = projectPoint(pose, this.width, this.height, [at[0], at[1], at[2]])
+    if (seen !== null && seen[0] >= 0 && seen[0] <= this.width && seen[1] >= 0 && seen[1] <= this.height) { return }
+    throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_NOT_SEEN + ' The program plays, but the player "' +
+      this.playerId + '" walks out of view within two seconds: the scene.camera stands still. Leave scene.camera out -- the ' +
+      'camera then follows the player -- or follow it with scene.follow')
+  }
+
+  /**
+   * What the request asks to travel is there: a thing that walks or drives by itself has scene.path or scene.wander (or
+   * orbits), one the person steers is scene.player.
+   */
+  checkTravel(): void {
+    let spec = this.spec as WorldSpec
+    let at = this.line(this.build)
+    let self = this.travel === 'self' || this.travel === 'both'
+    let steered = this.travel === 'steered' || this.travel === 'both'
+    let travels = spec.bodies.some((b: BodySpec): boolean => b.path !== null || b.wander !== null || b.orbit !== null)
+    let player = spec.bodies.some((b: BodySpec): boolean => b.player !== null)
+    if (self && !travels) {
+      let spins = spec.bodies.some((b: BodySpec): boolean => b.spinPeriodS !== 0)
+      throw new PlayStop(at.toString() + ':1 ' + CODE_NO_TRAVEL + ' The program plays, but nothing in the world goes anywhere by ' +
+        'itself, and the request has something that does' + (spins ? ': scene.spin only turns a body where it stands' : '') +
+        '. Give what walks, runs or drives scene.path(body, [x1, z1, x2, z2, ...], speed, true) for a route or ' +
+        'scene.wander(body, radius, speed) to roam, built facing +x')
+    }
+    if (steered && !player) {
+      throw new PlayStop(at.toString() + ':1 ' + CODE_NO_TRAVEL + ' The program plays, but nothing in the world can be steered, ' +
+        'and the request has the person move something: wrap it in scene.player(body, speed, action) -- the host draws the ' +
+        'stick and the camera follows it')
+    }
+  }
+
+  /** Each zone is somewhere a body can get to: on the floor or table, not inside a body, in a world where something moves. */
+  checkZones(): void {
+    let spec = this.spec as WorldSpec
+    if (spec.zones.length === 0) { return }
+    let at = this.line(this.build)
+    let movers = spec.bodies.some((b: BodySpec): boolean => b.motion !== 'static')
+    for (let z of spec.zones) {
+      let why = ''
+      if (!movers) {
+        why = 'nothing in the world moves, so nothing can come into it: make a body the player, give one a path, or throw one'
+      } else if (spec.table !== null && (Math.abs(z.x) > (spec.table as TableSpec).width / 2 ||
+          Math.abs(z.z) > (spec.table as TableSpec).depth / 2)) {
+        why = 'its centre is off the table (' + (spec.table as TableSpec).width.toString() + ' by ' +
+          (spec.table as TableSpec).depth.toString() + ' m, centred on 0, 0)'
+      } else if (spec.floor !== null && (Math.abs(z.x) > 99 || Math.abs(z.z) > 99)) {
+        why = 'its centre is past the edge of the floor (99 m from the middle)'
+      } else {
+        for (let b of spec.bodies) {
+          if (b.motion !== 'static') { continue }
+          let box = specBounds(b)
+          if (z.x > box[0] && z.x < box[3] && z.z > box[2] && z.z < box[5] && box[4] > 0.3 && box[1] < 0.3) {
+            why = 'its centre is inside "' + b.id + '", which stands there'
+            break
+          }
+        }
+      }
+      if (why.length > 0) {
+        throw new PlayStop(at.toString() + ':1 ' + CODE_ZONE_UNREACHABLE + ' The program plays, but zone "' + z.id +
+          '" cannot be reached: ' + why)
+      }
+    }
+  }
+
+  /**
+   * Bodies that walk by themselves keep out of what stands in their way: over their route or area, every WALK_SAMPLE_S for
+   * WALK_SAMPLE_FOR_S, never inside a body that stands still (one low enough to step over is no obstacle), never below
+   * the ground.
+   */
+  checkWalks(): void {
+    let spec = this.spec as WorldSpec
+    let at = this.line(this.build)
+    let walkers = spec.bodies.filter((b: BodySpec): boolean => b.path !== null || b.wander !== null)
+    if (walkers.length === 0) { return }
+    let grounded = spec.floor !== null || spec.table !== null
+    let still = spec.bodies.filter((b: BodySpec): boolean => b.motion === 'static')
+    for (let w of walkers) {
+      let own = specBounds(w)
+      let height = own[4] - own[1]
+      if (grounded && own[1] < -0.01) {
+        throw new PlayStop(at.toString() + ':1 ' + CODE_OUT_OF_WORLD + ' The program plays, but "' + w.id + '" walks ' +
+          (Math.round(-own[1] * 100) / 100).toString() + ' m below the ground (y = 0): its y is kept as it goes, so put it ' +
+          'at half its height')
+      }
+      let obstacles = still.filter((o: BodySpec): boolean => specBounds(o)[4] > own[1] + height * STEP_OVER)
+      if (obstacles.length === 0) { continue }
+      for (let t = 0; t <= WALK_SAMPLE_FOR_S; t += WALK_SAMPLE_S) {
+        let p = orbitPositions(spec, t).get(w.id)
+        if (p === undefined) { break }
+        let dx = p[0] - w.position[0]
+        let dz = p[2] - w.position[2]
+        let box = [own[0] + dx, own[1], own[2] + dz, own[3] + dx, own[4], own[5] + dz]
+        for (let o of obstacles) {
+          if (!overlapsAt(w, [p[0], p[1], p[2]], box, o)) { continue }
+          throw new PlayStop(at.toString() + ':1 ' + CODE_WALKS_THROUGH + ' The program plays, but "' + w.id + '" walks through "' +
+            o.id + '" (at ' + (Math.round(p[0] * 100) / 100).toString() + ', ' + (Math.round(p[2] * 100) / 100).toString() +
+            ', after ' + t.toString() + ' s): ' + (w.path !== null ? 'route the path round it, with its corners clear of it' :
+            'wander where nothing stands, or move what stands out of its area') + ' -- the host moves it through anything')
+        }
+      }
+    }
+  }
+
   verdict(): string {
+    if (this.playerMoved >= 0) {
+      // The speed it had while it was steered: a later round may have made it again under another id.
+      let speed = this.playerSpeed
+      let reach = speed * STICK_AHEAD * WORLD_STEP_MS / 1000
+      if (this.playerMoved < reach * STICK_MIN_SHARE) {
+        return this.line(this.build).toString() + ':1 ' + CODE_STUCK + ' The program plays, but the player "' + this.playerId +
+          '" hardly moves with the stick held: ' + (Math.round(this.playerMoved * 100) / 100).toString() + ' m in ' +
+          (STICK_AHEAD * WORLD_STEP_MS / 1000).toString() + ' s at speed ' + speed.toString() + '. It must start on the ' +
+          'ground (y half its height) and clear of every other body -- not inside a wall, a fence or under something'
+      }
+    }
     if (!this.moving && !this.stateChanged) {
       return this.line(this.build).toString() + ':1 ' + CODE_STILL + ' The program plays, but nothing in the world moves: no body ' +
-        'is loose, orbits or spins, and neither a tap on a body, a swipe nor a button changed the state. Make the bodies move ' +
-        'with scene.loose and scene.kick (thrown when a count in the state changes), scene.orbit or scene.spin, and change the ' +
+        'is loose, orbits, spins, walks or is steered, and neither a tap on a body, a swipe nor a button changed the state. ' +
+        'Make the bodies move with scene.loose and scene.kick (thrown when a count in the state changes), scene.orbit or ' +
+        'scene.spin, scene.path or scene.wander (walking by itself), or scene.player (steered), and change the ' +
         'state in ' + (this.event.length > 0 ? this.event : 'an event handler (the World\'s last argument)') + ' when a body is tapped'
     }
     // Anything with scene.kick is there to be thrown, and a throw ends in "settled"; a die's face is read from it.
@@ -545,7 +766,8 @@ class WorldPlay {
  * is itself the problem (the 3D route asked for one). Only the first ui.World on the screen is played; the smoke run has
  * built every one.
  */
-export function playWorld(compiled: CompileResult, requireWorld: boolean = true, report: WorldPlayReport | null = null): string {
+export function playWorld(compiled: CompileResult, requireWorld: boolean = true, report: WorldPlayReport | null = null,
+    travel: string = 'none'): string {
   let host = new UiHostEnvironment()
   let module = deserializeVbc2(compiled.vbc2)
   let vm = new VirtualMachine(module, host)
@@ -567,6 +789,7 @@ export function playWorld(compiled: CompileResult, requireWorld: boolean = true,
       'built on one, ui.World("default", 0, "build", "onWorld")' : ''
   }
   let play = new WorldPlay(world as VeraUiNode, state, vm, host, module)
+  play.travel = TRAVEL_KINDS.indexOf(travel) >= 0 ? travel : 'none'
   let verdict = ''
   try {
     verdict = play.play()
@@ -583,6 +806,8 @@ export function playWorld(compiled: CompileResult, requireWorld: boolean = true,
     report.stateChanged = play.stateChanged
     report.hitEvents = play.hitEvents
     report.hitStepsMax = play.hitStepsMax
+    report.playerMoved = play.playerMoved
+    report.enterEvents = play.enterEvents
   }
   return verdict
 }
@@ -592,10 +817,15 @@ function cameraText(c: CameraSpec): string {
 }
 
 function overlaps(b: BodySpec, box: number[], o: BodySpec): boolean {
+  return overlapsAt(b, b.position, box, o)
+}
+
+/** overlaps, for b at position p with its bounds box there. */
+function overlapsAt(b: BodySpec, p: number[], box: number[], o: BodySpec): boolean {
   if (b.shape === 'sphere' && o.shape === 'sphere') {
-    let dx = b.position[0] - o.position[0]
-    let dy = b.position[1] - o.position[1]
-    let dz = b.position[2] - o.position[2]
+    let dx = p[0] - o.position[0]
+    let dy = p[1] - o.position[1]
+    let dz = p[2] - o.position[2]
     let r = (b.dims[0] + o.dims[0]) / 2
     return Math.sqrt(dx * dx + dy * dy + dz * dz) < r * 0.9
   }

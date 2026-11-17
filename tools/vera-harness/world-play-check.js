@@ -11,7 +11,8 @@ const path = require('node:path')
 const {loadVera} = require('./source-loader')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playWorld, WorldPlayReport, CODE_NOT_SEEN, CODE_OVERLAP, CODE_OUT_OF_WORLD, CODE_STILL, CODE_NO_SETTLE,
-  CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL} = loadVera('VeraWorldPlay')
+  CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL, CODE_STUCK, CODE_WALKS_THROUGH, CODE_ZONE_UNREACHABLE,
+  CODE_NO_TRAVEL} = loadVera('VeraWorldPlay')
 const B = loadVera('VeraBudget')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
@@ -34,7 +35,7 @@ assert.equal(B.median([]), 0)
 
 // ---- the examples play, within budget
 const budgets = []
-for (const name of ['world-dice', 'world-cubes', 'world-solar']) {
+for (const name of ['world-dice', 'world-cubes', 'world-solar', 'world-basics', 'world-walk']) {
   const report = new WorldPlayReport()
   assert.equal(playWorld(compileVeraSource(example(name)), true, report), '', name + ' plays')
   assert.ok(report.slowestMs < B.WORLD_BUILD_BUDGET_MS, name + ' within budget')
@@ -182,5 +183,65 @@ assert.match(play(swap(dice, 'if (e.kind === "tap" || e.kind === "swipe") {', 'i
 // No world at all.
 assert.match(play(swap(dice, 'ui.World("default", 0, "build", "onWorld"),', '')), new RegExp('^1:1 ' + CODE_NO_WORLD + ' '), 'no ui.World')
 assert.equal(playWorld(compileVeraSource(swap(dice, 'ui.World("default", 0, "build", "onWorld"),', '')), false), '', 'unless one is not required')
+
+// ---- things that travel: the walk example plays (steered, walking, entering zones); what breaks it is refused
+{
+  const walk = example('world-walk')
+  const report = new WorldPlayReport()
+  for (const travel of ['none', 'self', 'steered', 'both']) {
+    assert.equal(playWorld(compileVeraSource(walk), true, report, travel), '', 'world-walk plays for travel ' + travel)
+  }
+  assert.ok(report.playerMoved > 3, 'the stick held for two seconds takes the player along: ' + report.playerMoved.toFixed(2) + ' m')
+  assert.ok(report.enterEvents > 0, 'the walker comes into the zone on its route: ' + report.enterEvents)
+  budgets.push('world-walk: the player went ' + report.playerMoved.toFixed(2) + ' m in 2 s, ' + report.enterEvents + ' zone entries')
+  const playT = (src, travel) => playWorld(compileVeraSource(src), true, null, travel)
+  const refusedT = (src, travel, code, re, what) => {
+    const got = playT(src, travel)
+    assert.match(got, new RegExp('^\\d+:1 ' + code + ' '), what + ' is refused with ' + code + ': ' + got)
+    if (re) assert.match(got, re, what + ': ' + got)
+  }
+  // A player boxed in by a wall round it hardly moves.
+  refusedT(swap(walk, '  things.push(scene.player(me, 3, "Jump"));', '  things.push(scene.player(me, 3, "Jump"));\n' +
+    '  things.push(scene.box(r + "pen1", -0.9, 0.5, 2, 0.2, 1, 3, "ink"));\n  things.push(scene.box(r + "pen2", -3.1, 0.5, 2, 0.2, 1, 3, "ink"));\n' +
+    '  things.push(scene.box(r + "pen3", -2, 0.5, 0.9, 2, 1, 0.2, "ink"));\n  things.push(scene.box(r + "pen4", -2, 0.5, 3.1, 2, 1, 0.2, "ink"));'),
+    'none', CODE_STUCK, /hardly moves with the stick held/, 'a player penned in')
+  // A route through the post.
+  refusedT(swap(walk, 'scene.box(r + "post", 0, 0.75, 0,', 'scene.box(r + "post", 4, 0.75, 1,'), 'none', CODE_WALKS_THROUGH,
+    /walks through "r0-post"/, 'a route through a post')
+  // Grass low enough to step over is no obstacle.
+  assert.equal(playT(swap(walk, 'scene.box(r + "post", 0, 0.75, 0, 0.3, 1.5, 0.3,', 'scene.box(r + "post", 4, 0.05, 1, 0.3, 0.1, 0.3,'), 'none'), '',
+    'a tuft on the route is stepped over')
+  refusedT(swap(walk, 'scene.sphere(r + "roamer", 6, 0.25, -6,', 'scene.sphere(r + "roamer", 6, -0.5, -6,'), 'none', CODE_OUT_OF_WORLD,
+    /walks 0.75 m below the ground/, 'a roamer under the floor')
+  refusedT(swap(walk, 'scene.zone(r + "gate", 4, 0,', 'scene.zone(r + "gate", 150, 0,'), 'none', CODE_ZONE_UNREACHABLE,
+    /past the edge of the floor/, 'a zone off the floor')
+  refusedT(swap(walk, 'scene.zone(r + "gate", 4, 0,', 'scene.zone(r + "gate", 0, 0,'), 'none', CODE_ZONE_UNREACHABLE,
+    /inside "r0-post"/, 'a zone inside the post')
+  // The request's travel: a horse that only spins, where something should walk; nothing to steer, where the person steers.
+  const spinner = swap(swap(walk, 'things.push(scene.path(walker(r + "walker", "#8b5a2b"), [-4, -4, 4, -4, 4, 4, -4, 4], 1.2 * state.pace, true));',
+    'things.push(scene.spin(walker(r + "walker", "#8b5a2b"), 8));'),
+    'things.push(scene.wander(scene.sphere(r + "roamer", 6, 0.25, -6, 0.25, "white"), 2, 0.5 * state.pace));', '')
+  refusedT(spinner, 'self', CODE_NO_TRAVEL, /scene.spin only turns a body where it stands/, 'a walker that only spins')
+  assert.equal(playT(spinner, 'none'), '', 'a spin is fine where nothing has to travel')
+  const unsteered = swap(walk, 'things.push(scene.player(me, 3, "Jump"));', 'things.push(scene.loose(me, 1));')
+  refusedT(unsteered, 'steered', CODE_NO_TRAVEL, /wrap it in scene.player/, 'nothing to steer')
+  refusedT(unsteered, 'both', CODE_NO_TRAVEL, /wrap it in scene.player/, 'nothing to steer, both asked')
+  // A camera the program fixed loses the player as it goes.
+  const alone = camera => `
+@jsonable class AppState { n: number; }
+function init(): AppState { return {n: 0}; }
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.floor("surface"));
+  ${camera}
+  things.push(scene.player(scene.box("me", 0, 0.3, 0, 0.6, 0.6, 0.6, "accent"), 3, ""));
+  return things;
+}
+function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.World("fill", 0, "build", "")]); }
+`
+  refusedT(alone('things.push(scene.camera(0, 3, 0.5, 0, 0.3, 0, false));'), 'steered', CODE_NOT_SEEN, /walks out of view within two seconds/,
+    'a fixed camera that loses the player')
+  assert.equal(playT(alone(''), 'steered'), '', 'with no camera the player is followed')
+}
 
 console.log('world-play-check ok\n  ' + budgets.join('\n  '))

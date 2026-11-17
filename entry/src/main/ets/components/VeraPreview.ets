@@ -35,7 +35,7 @@ import { decodeGfx, paintGfx, pointerValue, gfxFit, gfxToSurface, gfxNaturalHeig
 import { TimerFace, timerFace } from '../widget/CardModel'
 import { decodeScene, sceneEventValue } from '../vera/VeraScene'
 import { worldBackgroundRgba, isDarkRgba } from '../vera/VeraLook3D'
-import { WorldBox, WorldPick, WorldGesture } from './VeraWorld3D'
+import { WorldBox, WorldPick, WorldGesture, playerOf } from './VeraWorld3D'
 import { SimEvent } from '../vera/VeraPhysics'
 
 /**
@@ -156,6 +156,9 @@ const SURFACE_MAX_ELAPSED_MS: number = 100
  * state, a build and a view refresh. Hits come at most four a second already (HIT_INTERVAL_S).
  */
 const WORLD_EVENTS_PER_FRAME: number = 4
+/** The stick over a world with a player: its size and its knob's, in vp. */
+const STICK_SIZE: number = 128
+const STICK_KNOB: number = 56
 
 /** "#rrggbb" as "#aarrggbb" with this alpha (0..255); any other colour as it is. */
 function withAlpha(color: string, alpha: number): string {
@@ -1761,6 +1764,99 @@ export struct VeraPreview {
     return null
   }
 
+  /**
+   * The stick over a world with a player (scene.player), bottom left, and its action button bottom right when the player
+   * has one: the host's, drawn the same in every program. The stick is its own touch target, so a thumb on it steers
+   * while another finger turns the camera; the knob follows the thumb, and lifting lets go.
+   */
+  @Builder
+  worldStick(node: LiveNode) {
+    Column() {
+      Row() {
+        Stack() {
+          Circle()
+            .width(STICK_SIZE)
+            .height(STICK_SIZE)
+            .fill(this.t().surface)
+            .fillOpacity(0.45)
+            .stroke(this.t().ink)
+            .strokeOpacity(0.25)
+            .strokeWidth(1.5)
+          Circle()
+            .width(STICK_KNOB)
+            .height(STICK_KNOB)
+            .fill(this.t().surface)
+            .fillOpacity(0.92)
+            .stroke(this.t().ink)
+            .strokeOpacity(0.35)
+            .strokeWidth(1.5)
+            .translate({ x: this.drawnWorld(node).knobX * (STICK_SIZE - STICK_KNOB) / 2,
+              y: this.drawnWorld(node).knobY * (STICK_SIZE - STICK_KNOB) / 2 })
+        }
+        .width(STICK_SIZE)
+        .height(STICK_SIZE)
+        .accessibilityText('Steer')
+        .hitTestBehavior(HitTestMode.Block)
+        .onTouch((event: TouchEvent) => { this.stickTouch(node, event) })
+        // The thumb's drag is the stick's: the page must not scroll under it, nor the world take it for a camera turn.
+        .gesture(PanGesture({ distance: 1 }))
+        .onGestureJudgeBegin((_info: GestureInfo, _event: BaseGestureEvent) => GestureJudgeResult.CONTINUE)
+        if (this.drawnWorld(node).action.length > 0) {
+          Button(this.drawnWorld(node).action)
+            .fontSize(16)
+            .fontWeight(600)
+            .fontColor(this.t().ink)
+            .backgroundColor(this.t().surface)
+            .opacity(0.92)
+            .height(56)
+            .padding({ left: 22, right: 22 })
+            .onClick(() => { this.worldAction(node) })
+            .hitTestBehavior(HitTestMode.Block)
+        }
+      }
+      .width('100%')
+      .justifyContent(FlexAlign.SpaceBetween)
+      .alignItems(VerticalAlign.Bottom)
+      .padding({ left: 20, right: 20, bottom: 20 + (this.fullWorldEpoch >= 0 && node === this.fullWorld ?
+        this.snackbarRoom() + this.bottomRoom : 0) })
+      // None, not Transparent: a finger on the stick or the button is theirs alone (Transparent would hand it to the
+      // world under them as well, a tap or a camera turn), and one anywhere else passes through to the world.
+      .hitTestBehavior(HitTestMode.None)
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.End)
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** A thumb on the stick: where it is from the stick's centre, as a share of how far the knob can go, steers the player. */
+  private stickTouch(node: LiveNode, event: TouchEvent): void {
+    let box = this.worlds.get(node)
+    if (box === undefined || this.disposed || event.changedTouches.length === 0) { return }
+    let touch = event.changedTouches[0]
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      box.setStick(0, 0)
+      return
+    }
+    let reach = (STICK_SIZE - STICK_KNOB) / 2
+    box.setStick((touch.x - STICK_SIZE / 2) / reach, (touch.y - STICK_SIZE / 2) / reach)
+    if (event.type === TouchType.Down && !this.previewOnly && !this.pageHidden && this.error.length === 0) {
+      this.startSurfaceLoop()
+    }
+  }
+
+  /** The player's button: the event "action" to the world's handler, with where the player is. */
+  private worldAction(node: LiveNode): void {
+    let box = this.worlds.get(node)
+    if (box === undefined || this.previewOnly || node.action.length === 0) { return }
+    let player = playerOf(box.appliedSpec())
+    if (player === null) { return }
+    let at = box.playerAt()
+    let p = at !== null ? at : player.position
+    console.info('VERA-WORLD event action body=' + player.id)
+    this.dispatchFieldAction(node.action, sceneEventValue('action', player.id, '', p[0], p[1], p[2], 0, [], []), true, node)
+  }
+
   /** The corner button of a world: full screen, or back to the normal screen from it. */
   @Builder
   worldFullButton(node: LiveNode) {
@@ -2444,7 +2540,9 @@ export struct VeraPreview {
                 }, (line: string, index: number) => index.toString() + ':' + line)
               }
               .width('100%')
-              .padding({ left: 24, right: 24, bottom: 16 + this.snackbarRoom() + this.bottomRoom })
+              // Over a world with a player the caption sits above the stick, not under the thumb.
+              .padding({ left: 24, right: 24, bottom: 16 + this.snackbarRoom() + this.bottomRoom +
+                (this.drawnWorld(this.fullWorld!).hasPlayer ? STICK_SIZE + 16 : 0) })
               .hitTestBehavior(HitTestMode.Transparent)
               // The app's name, which the Header gave and full screen leaves out, beside the corner button.
               // Under it, the Header's supporting line: what to do with the world, which nothing else on this screen says.
@@ -5236,6 +5334,9 @@ export struct VeraPreview {
           }
           if (!this.embedded && !this.previewOnly) {
             this.worldFullButton(node)
+          }
+          if (!this.previewOnly && this.drawnWorld(node).hasPlayer) {
+            this.worldStick(node)
           }
         }
         .width('100%')

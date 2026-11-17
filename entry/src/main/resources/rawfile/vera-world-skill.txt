@@ -1,13 +1,14 @@
 3D WORLD APPS
-This request is solid things in 3D: bodies that are thrown, fall, stack, roll and knock into each other, or circle a
-centre. Build it on one ui.World described with std/scene, not on a ui.Surface and not out of buttons and cards drawn
+This request is solid things in 3D: bodies that are thrown, fall, stack, roll and knock into each other, circle a
+centre, walk or drive about by themselves, or are steered by the person. Build it on one ui.World described with std/scene, not on a ui.Surface and not out of buttons and cards drawn
 to look 3D.
 
 Describe the world; never animate it:
 - build(state: AppState): scene.Thing[] returns the whole world -- the camera, the table or floor, every body -- and runs
   only when the state changes, never per frame. There is no frame function. The host moves everything: physics moves
-  loose bodies, the host turns spins and carries orbits. The program never keeps a position, an angle or a velocity in
-  the state to move a body, and never uses a ui.Ticker to animate one.
+  loose bodies, the host turns spins, carries orbits, walks bodies along their routes and steers the player by the
+  stick it draws. The program never keeps a position, an angle or a velocity in the state to move a body, and never
+  uses a ui.Ticker to animate one: moving is a wrapper on the body (scene.path, scene.wander, scene.player ...).
 - Once a loose body exists its x, y, z are only where it started: returning it somewhere else does nothing. To throw it
   again, change its kick trigger (a count in the state, state.throws + 1). To put it back where it started, give it a
   new id: a round number in the id ("r" + ui.numberToString(state.round) + "-" + ...) makes build create it afresh.
@@ -36,10 +37,12 @@ The shape of the program:
   knocked into e.other the hardest of them at e.speed; count e.bodies.length() or keep the hardest, nothing more) or
   "settled" (every loose body at rest after a throw; e.bodies the ids, e.values the face each die shows, and for a body
   that is not a die 1 when it was knocked from where it was built -- moved or tipped over -- and 0 when it still
-  stands). Nothing else is told: not where a body is, not whether it left the table. Score from these (hits, faces,
+  stands), "enter" (e.body came into the zone e.other) or "action" (the player's button was pressed). Nothing else is
+  told: not where a body is, not whether it left the table. Score from these (hits, faces,
   blocks knocked over), and count a settled body once, from that event, not from hits. Return the state unchanged for
   the kinds it does not use: then nothing is built or drawn again.
 - A Button does the main thing too (the throw, putting things back), so the app works without knowing where to tap.
+  A world with a player is played with the stick: its Buttons are extras (faster, start again).
 
 Scale, units and placement:
 - Units are metres and y is up; the floor or the table top is y = 0. Size the scene for the phone, not for reality:
@@ -69,8 +72,8 @@ Scale, units and placement:
   bodies is plenty.
 - The host adds nothing to the scene by itself. Behind the world is the app's background unless scene.sky gives a
   colour and how many stars (a night sky, deep space); an orbit's path is drawn only with scene.trail; a glowing body
-  that stands still lights the bodies round it from where it is (a sun, a lamp). There are no other lines, rings or
-  outlines in 3D: never build stars, a backdrop or a path from bodies (a cylinder is a solid disc).
+  that stands still lights the bodies round it from where it is (a sun, a lamp); a zone is a faint ring on the ground.
+  There are no other lines, rings or outlines in 3D: never build stars, a backdrop or a path from bodies (a cylinder is a solid disc).
 - Colours: theme roles (accent, warning, danger, surface, ink ...) or "#rrggbb". A real thing has its real colours;
   bodies the person should tell apart differ in colour.
 
@@ -80,7 +83,8 @@ above the centre and a little back from it, so the orbits use the tall screen. o
 turn the view and a pinch bring it nearer, both done by the host, for a scene to look round; false when the view is
 part of the play (a table seen from where the player sits). Frame the whole world: the person pinches in to see small
 things.
-Leave the camera out and the host frames everything.
+Leave the camera out and the host frames everything; in a world with a player it follows the player instead, and
+scene.follow(body, distance, height) has it follow any other body that travels.
 
 What a world can do, combined as the request needs:
 - Throwing: scene.kick(scene.loose(body, mass), trigger, vx, vy, vz, spin) throws the body each time trigger changes: a
@@ -103,8 +107,26 @@ What a world can do, combined as the request needs:
   spin(turn(paint(sphere(...), pattern, colour2), 0, 0, tilt), dayS). Wrap the body the person tapped
   (state.selected === its id) in scene.mark(thing, "accent") -- never recolour it, its colours say what it is -- and
   the Text says its name and facts.
+- Walking by itself: a thing that walks, runs, drives or roams about is one body -- a scene.group for an animal or a
+  vehicle, built facing +x (its head or front towards +x) -- in scene.path(body, [x1, z1, x2, z2, ...], speed, true)
+  for a route round the scene, its corners clear of what stands there, or scene.wander(body, radius, speed) to roam
+  round where it is put. Its y is half its height, so its feet are on the ground; it faces the way it goes by itself.
+  Legs swing as it goes: scene.swing(leg, 20 to 30, 0.6 to 1, phase) on each leg part, the legs of a pair opposite
+  (phaseDeg 0 and 180); they stop when it stands. A speed from the state (a Faster button) changes its pace and it
+  goes on from where it is. scene.spin only turns a thing where it stands: never use it for a thing that moves about.
+- Steered by the person: scene.player(body, speed, action), one per world. The host draws the stick and the camera
+  follows the player (leave scene.camera out); action names a button beside the stick, "" for none, heard as
+  e.kind === "action". A jump is the player's own kick, its trigger a count the action adds 1 to:
+  scene.player(scene.kick(body, state.jumps, 0, 4, 0, 0), speed, "Jump"). The player starts on the floor, clear of
+  everything, and does not climb onto bodies: what is in its way is gone round or jumped. Use a floor, not a table
+  (it can go 100 m each way), and the World's style "fill" or "full", so the stick has room.
+- Places on the ground: scene.zone(id, x, z, r, colour) is a circle a body passes through; "enter" says which body
+  came into which zone: a finish, a checkpoint, something to collect (keep the ids collected in the state and leave
+  them out of build). Others that go the same way are bodies on paths through the same zones: the order of their
+  "enter" events is who came first.
 - One thing to look at: the body or bodies it is made of, standing still or turning with scene.spin, an orbiting camera,
-  and Buttons for what the person may change in it.
+  and Buttons for what the person may change in it. A thing asked for as moving, walking or going somewhere is not
+  this: it walks by itself.
 
 A complete example of these parts in one program, with no game in it. Write your own program for the request; take the
 structure and the calls from this, not its bodies.
@@ -209,3 +231,96 @@ function view(state: AppState): ui.View {
   ]);
 }
 --- END EXAMPLE ---
+
+A second example, of things that travel: one walking a route, one roaming, one the person steers, places on the ground.
+
+--- TRAVEL EXAMPLE ---
+// Things that travel, with no game in them: the second example the world guide carries (vera-world-skill.txt).
+//
+// A body of parts, built facing +x, walks a closed route by itself (scene.path), its legs swinging two and two
+// (scene.swing, phases 0 and 180); a smaller one roams round where it is put (scene.wander). The person steers a third
+// with the stick the host draws (scene.player), and its button (here "Jump") throws it up through its kick trigger. Two
+// circles on the ground (scene.zone) tell the program when a body comes into one ("enter"). Faster changes only the
+// speed: the walker goes on from where it is. The program never keeps a position: the host moves everything.
+
+@jsonable
+class AppState {
+  jumps: number;
+  pace: number;
+  round: number;
+  entered: number;
+  last: string;
+}
+
+function init(): AppState {
+  return {jumps: 0, pace: 1, round: 0, entered: 0, last: ""};
+}
+
+function walker(id: string, colour: string): scene.Thing {
+  let parts: scene.Thing[] = [];
+  parts.push(scene.box("body", 0, 0.55, 0, 0.8, 0.3, 0.3, colour));
+  parts.push(scene.box("head", 0.5, 0.75, 0, 0.25, 0.2, 0.2, colour));
+  parts.push(scene.swing(scene.box("leg1", 0.3, 0.2, 0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 0));
+  parts.push(scene.swing(scene.box("leg2", 0.3, 0.2, -0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 180));
+  parts.push(scene.swing(scene.box("leg3", -0.3, 0.2, 0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 180));
+  parts.push(scene.swing(scene.box("leg4", -0.3, 0.2, -0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 0));
+  return scene.group(id, 0, 0, 0, parts);
+}
+
+function build(state: AppState): scene.Thing[] {
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let things: scene.Thing[] = [];
+  things.push(scene.sky("#9fd0f0", 0));
+  things.push(scene.floor("#6aa84f"));
+  // A route round the middle, its corners clear of the post; the walker's y is half its height (its feet on the ground).
+  things.push(scene.path(walker(r + "walker", "#8b5a2b"), [-4, -4, 4, -4, 4, 4, -4, 4], 1.2 * state.pace, true));
+  things.push(scene.wander(scene.sphere(r + "roamer", 6, 0.25, -6, 0.25, "white"), 2, 0.5 * state.pace));
+  things.push(scene.box(r + "post", 0, 0.75, 0, 0.3, 1.5, 0.3, "#5b4636"));
+  // The person's: it starts on the ground, clear of the rest; its kick trigger is the count of jumps.
+  let me: scene.Thing = scene.kick(scene.box(r + "me", -2, 0.3, 2, 0.5, 0.6, 0.4, "accent"), state.jumps, 0, 4, 0, 0);
+  things.push(scene.player(me, 3, "Jump"));
+  things.push(scene.zone(r + "gate", 4, 0, 1.2, "accent"));
+  things.push(scene.zone(r + "spring", -6, -6, 1.2, "warning"));
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "action") {
+    return {jumps: state.jumps + 1, pace: state.pace, round: state.round, entered: state.entered, last: state.last};
+  }
+  if (e.kind === "enter") {
+    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: e.body + " at " + e.other};
+  }
+  return state;
+}
+
+function onFaster(state: AppState, value: number): AppState {
+  let pace: number = state.pace * 1.5;
+  if (pace > 3) {
+    pace = 1;
+  }
+  return {jumps: state.jumps, pace: pace, round: state.round, entered: state.entered, last: state.last};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {jumps: 0, pace: 1, round: state.round + 1, entered: 0, last: ""};
+}
+
+function view(state: AppState): ui.View {
+  let result: string = "Steer with the stick";
+  if (state.last !== "") {
+    result = ui.numberToString(state.entered) + " came in - last " + state.last;
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Field", "", "Steer with the stick, jump with the button", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", result),
+      ui.ActionBar("spread", [
+        ui.Button("primary", "Faster", "onFaster", 0, true),
+        ui.Button("secondary", "Reset", "onReset", 0, state.round >= 0)
+      ])
+    ])
+  ]);
+}
+--- END TRAVEL EXAMPLE ---

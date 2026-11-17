@@ -185,6 +185,12 @@ napi_value PhysMoveKinematic(napi_env env, napi_callback_info info)
     Idle().moveKinematic(I(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4), F(0, 5), F(0, 6), F(0, 7), F(0, 8));
     return nullptr;
 }
+napi_value PhysDrive(napi_env env, napi_callback_info info)
+{
+    ARGS(4);
+    Idle().drive(I(0, 0), F(0, 1), F(0, 2), F(0, 3));
+    return nullptr;
+}
 napi_value PhysStep(napi_env env, napi_callback_info info)
 {
     ARGS(2);
@@ -248,6 +254,7 @@ napi_value Register(napi_env env, napi_value exports)
         D("physSetVelocity", PhysSetVelocity),
         D("physSleep", PhysSleep),
         D("physMoveKinematic", PhysMoveKinematic),
+        D("physDrive", PhysDrive),
         D("physStep", PhysStep),
         D("physStepBegin", PhysStepBegin),
         D("physStepEnd", PhysStepEnd),

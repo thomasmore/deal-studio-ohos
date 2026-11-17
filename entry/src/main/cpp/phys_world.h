@@ -2,8 +2,9 @@
 // host test (tools/phys-world-test.cpp) builds the same code the phone runs.
 //
 // Units are metres, seconds and kilograms; quaternions are x, y, z, w; y is up. A body is named
-// by a dense index that is reused after remove(). Bodies are static (0), dynamic (1) or
-// kinematic (2). Nothing here is thread-safe except the contact buffer: call it from one thread.
+// by a dense index that is reused after remove(). Bodies are static (0), dynamic (1), kinematic (2)
+// or a character (3): a dynamic body that stays upright, turns only about y and is driven (drive()).
+// Nothing here is thread-safe except the contact buffer: call it from one thread.
 #pragma once
 
 #include <Jolt/Jolt.h>
@@ -34,7 +35,7 @@ JPH_SUPPRESS_WARNINGS
 
 namespace vphys {
 
-enum Kind { kStatic = 0, kDynamic = 1, kKinematic = 2 };
+enum Kind { kStatic = 0, kDynamic = 1, kKinematic = 2, kCharacter = 3 };
 
 namespace layers {
 constexpr JPH::ObjectLayer kNonMoving = 0;
@@ -280,15 +281,16 @@ public:
         s.awakeFor = 0;
     }
 
-    // Mass applies to dynamic bodies only (inertia is rescaled with it).
+    // Mass applies to dynamic bodies only (inertia is rescaled with it). A character neither bounces nor grips: its
+    // speed is the one drive() gives it, and friction would eat into that on every substep.
     void setMaterial(int i, float mass, float restitution, float friction)
     {
         if (!Valid(i)) {
             return;
         }
         Slot &s = bodies_[i];
-        BI().SetRestitution(s.id, restitution);
-        BI().SetFriction(s.id, friction);
+        BI().SetRestitution(s.id, s.character ? 0.0f : restitution);
+        BI().SetFriction(s.id, s.character ? 0.0f : friction);
         if (s.kind == kDynamic && mass > 0) {
             JPH::Body *b = system_->GetBodyLockInterfaceNoLock().TryGetBody(s.id);
             if (b && b->GetMotionProperties()) {
@@ -305,6 +307,23 @@ public:
         }
         BI().SetLinearAndAngularVelocity(bodies_[i].id, JPH::Vec3(vx, vy, vz), JPH::Vec3(wx, wy, wz));
         BI().ActivateBody(bodies_[i].id);
+        bodies_[i].awakeFor = 0;
+    }
+
+    // Drives a character: its velocity along the ground (vx, vz) and its turn about y (wy, radians a second); its
+    // vertical velocity is its own, so it falls, lands and jumps as before. Wakes it and restarts its sleep cap; a
+    // character left undriven at rest sleeps as any body does.
+    void drive(int i, float vx, float vz, float wy)
+    {
+        if (!Valid(i) || !bodies_[i].character) {
+            return;
+        }
+        JPH::BodyID id = bodies_[i].id;
+        float vy = BI().GetLinearVelocity(id).GetY();
+        BI().SetLinearAndAngularVelocity(id, JPH::Vec3(vx, vy, vz), JPH::Vec3(0, wy, 0));
+        if (vx != 0 || vz != 0 || wy != 0) {
+            BI().ActivateBody(id);
+        }
         bodies_[i].awakeFor = 0;
     }
 
@@ -426,7 +445,8 @@ public:
         int n = 0;
         for (const JPH::BodyID &id : active) {
             int idx = IndexOf(id);
-            if (idx >= 0 && bodies_[idx].kind == kDynamic) {
+            // A character is the person's to move: one walking about never keeps a throw from settling.
+            if (idx >= 0 && bodies_[idx].kind == kDynamic && !bodies_[idx].character) {
                 n++;
             }
         }
@@ -458,6 +478,7 @@ private:
         bool alive = false;
         float awakeFor = 0;  // seconds awake in a row, for the sleep cap
         bool rolls = false;  // has a round side: a sphere, a cylinder, or parts with one of them
+        bool character = false;  // driven (kCharacter at creation): upright, turning about y only
         float rollRadius = 0.05f;  // its smallest half-extent: how far its surface is from its centre, for rolling
         float home[7] = {0, 0, 0, 0, 0, 0, 1};
     };
@@ -586,7 +607,11 @@ private:
         if (!system_) {
             return -1;
         }
-        kind = std::max(0, std::min(kind, 2));
+        kind = std::max(0, std::min(kind, 3));
+        bool character = kind == kCharacter;
+        if (character) {
+            kind = kDynamic;
+        }
         JPH::EMotionType mt = kind == kStatic ? JPH::EMotionType::Static
             : kind == kDynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Kinematic;
         JPH::BodyCreationSettings s(shape, JPH::RVec3(0, 0, 0), JPH::Quat::sIdentity(), mt,
@@ -595,6 +620,17 @@ private:
         s.mAngularDamping = 0.3f;
         s.mRestitution = 0.3f;
         s.mFriction = 0.5f;
+        if (character) {
+            // Upright whatever hits it, turning only about y; cast along its motion so a quick one does not pass
+            // through a thin wall.
+            s.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY |
+                JPH::EAllowedDOFs::TranslationZ | JPH::EAllowedDOFs::RotationY;
+            s.mRestitution = 0;
+            s.mFriction = 0;
+            s.mAngularDamping = 0;
+            s.mMotionQuality = JPH::EMotionQuality::LinearCast;
+            rolls = false;
+        }
         // A thin moving body (a sheet, a coin) can pass most of its thickness into the ground in one step, deeper than
         // the penetration slop pushes back out of: cast it along its motion instead (Jolt's continuous collision).
         if (kind != kStatic) {
@@ -623,6 +659,7 @@ private:
         slot.alive = true;
         slot.awakeFor = 0;
         slot.rolls = rolls;
+        slot.character = character;
         JPH::Vec3 extent = shape->GetLocalBounds().GetExtent();
         slot.rollRadius = std::max(0.005f, std::min(extent.GetX(), std::min(extent.GetY(), extent.GetZ())));
         const float home[7] = {0, 0, 0, 0, 0, 0, 1};

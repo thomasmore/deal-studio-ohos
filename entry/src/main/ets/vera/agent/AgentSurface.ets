@@ -17,7 +17,7 @@ import { repairProgram } from './AgentRepair'
 import { compileVeraSource, CompileError } from '../VeraCompiler'
 import { smokeRun } from '../VeraSmoke'
 import { playSurface } from '../VeraSurfacePlay'
-import { playWorld } from '../VeraWorldPlay'
+import { playWorld, TRAVEL_KINDS } from '../VeraWorldPlay'
 import { describeCatalogForPrompt } from '../VeraUiCatalog'
 import { asksFor3D } from '../Asks3D'
 
@@ -57,8 +57,8 @@ export function surfaceRouteEnabled(): boolean { return surfaceRoute }
 
 export const SURFACE_CLASSIFY_PROMPT: string = [
   'You decide how an app request on a phone is built, and if the whole screen is drawn, you design it.',
-  'Answer with one JSON object: {"surface": "whole" | "part" | "none", "engine": "flat" | "world", "title": "...", ' +
-    '"design": "...", "scene": "..."}.',
+  'Answer with one JSON object: {"surface": "whole" | "part" | "none", "engine": "flat" | "world", ' +
+    '"travel": "none" | "self" | "steered" | "both", "title": "...", "design": "...", "scene": "..."}.',
   '',
   'surface is "whole" when the heart of the request is something that moves continuously or is touched anywhere on a',
   'drawing, and the whole screen is that: a real-time game, a physics or particle toy, a model or simulation to watch, an',
@@ -76,6 +76,13 @@ export const SURFACE_CLASSIFY_PROMPT: string = [
   'stacks them; "flat" for everything else, drawn in 2D on a surface, whatever it shows. For "part" and "none", engine is',
   '"flat". The request line says which.',
   '',
+  'travel, for engine "world", says what goes from place to place over the ground: "self" when something in the request',
+  'walks, runs, drives, rolls along or roams by itself (an animal moving in a field, traffic, a herd); "steered" when the',
+  'person moves something themselves (they ride it, drive it, steer it, control it, or it is the one they play); "both"',
+  'when there are both; "none" when nothing goes anywhere (things thrown, stacked, knocked over, turning in place, or',
+  'circling a centre). A thing that moves, walks or goes somewhere, with no game or control asked for, is "self". For',
+  'engine "flat", travel is "none".',
+  '',
   'When surface is "whole", title is a short name of your own for the app, and design is a short original design in plain',
   'sentences, at most 12 lines. Make it what the request asks for: a game only when it asks for a game (or names one), a',
   'model or simulation to watch when it names a thing or a system, a toy or a pad when it asks for one. For a game: the',
@@ -92,12 +99,17 @@ export const SURFACE_CLASSIFY_PROMPT: string = [
   '0.3 to 5 m across; bodies circling a centre not to scale: the widest orbit at most 4.5, the centre a tenth of it in radius, each body circling it at least a fiftieth,',
   'for the phone screen is narrow; every body the request implies, as many as the real thing has, made smaller',
   'rather than left out), a real body in its real colours and surface as you know them --',
-  'the design\'s own colours are for made-up worlds and the screen round them; what moves by itself (orbits, spins); what a tap, a swipe and each button do (throw, shoot, add one,',
+  'the design\'s own colours are for made-up worlds and the screen round them; what moves by itself (orbits, spins), and what',
+  'travels by itself and how (along a route round the scene, or roaming an area; legs, arms or a tail that swing as it',
+  'goes); what the person steers, if anything (with the stick the host draws over the world, and at most one button beside',
+  'it, named, such as a jump), the camera then following it; places on the ground to reach, pass or collect (circles the',
+  'world tells the program a body came into); what a tap, a swipe and each button do (throw, shoot, add one,',
   'build again; with an orbiting camera a drag on empty space turns the view and a pinch zooms, both by the host); what',
   'is behind the world (the app\'s background, or a sky of a colour with or without stars) and which orbit paths are',
   'drawn; and what the screen shows from what the world tells: the face of a die, the hits, which bodies were knocked',
   'from where they were built, the body tapped (it never tells where a body is or whether it left the table).',
-  'Nothing moves frame by frame in the program: physics and the host move the bodies.',
+  'Nothing moves frame by frame in the program: physics and the host move the bodies, walk them along their routes and',
+  'steer the one the person steers.',
   'When surface is "part", scene is one or two plain sentences: what the picture shows, what moves or is touched, what',
   'sets it moving, and what it decides or changes on the screen. title and design are "".',
   'When surface is "none", title, design and scene are "".',
@@ -121,6 +133,8 @@ export class SurfaceBrief {
   design: string = ''
   /** For SURFACE_PART: the scene, in words, for the agent's plan. */
   scene: string = ''
+  /** For ENGINE_WORLD: what goes from place to place (VeraWorldPlay TRAVEL_KINDS); the play holds the program to it. */
+  travel: string = 'none'
 }
 
 /** The plan model's answer, or null when it is not one. A bare true or false is read as whole or none. */
@@ -139,6 +153,8 @@ export function parseSurfaceBrief(text: string): SurfaceBrief | null {
     let engine = raw['engine']
     brief.engine = brief.kind === SURFACE_WHOLE && typeof engine === 'string' && (engine as string).trim().toLowerCase() === ENGINE_WORLD ?
       ENGINE_WORLD : ENGINE_FLAT
+    let travel = typeof raw['travel'] === 'string' ? (raw['travel'] as string).trim().toLowerCase() : 'none'
+    brief.travel = brief.engine === ENGINE_WORLD && TRAVEL_KINDS.indexOf(travel) >= 0 ? travel : 'none'
     // A game needs its design; a 3D world can be written from the request and the world guide alone (the plan model
     // has answered "world" with an empty design, and refusing it sent a solar system to the 2D composer).
     if (brief.kind === SURFACE_WHOLE && brief.design.length === 0 && brief.engine !== ENGINE_WORLD) { return null }
@@ -204,13 +220,16 @@ export function checkSurfaceProgram(source: string): string {
   }
 }
 
-/** '' when a 3D program compiles, runs once with every handler tapped, and its world plays (VeraWorldPlay.ets); else what is wrong. */
-export function checkWorldProgram(source: string): string {
+/**
+ * '' when a 3D program compiles, runs once with every handler tapped, and its world plays (VeraWorldPlay.ets); else what
+ * is wrong. travel is what the design says goes from place to place: the play holds the program to it.
+ */
+export function checkWorldProgram(source: string, travel: string = 'none'): string {
   try {
     let compiled = compileVeraSource(source)
     let smoke = smokeRun(compiled)
     if (smoke.length > 0) { return smoke }
-    return playWorld(compiled)
+    return playWorld(compiled, true, null, travel)
   } catch (e) {
     return e instanceof CompileError ? (e as CompileError).message : (e as Error).message
   }
@@ -266,9 +285,13 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
   out.brief = brief
   let world = brief.engine === ENGINE_WORLD
   let system = world ? worldLanguage(host.language, host.worldGuide) : surfaceLanguage(host.language, host.surfaceGuide)
-  let check: (source: string) => string = world ? checkWorldProgram : checkSurfaceProgram
+  let travel = brief.travel
+  let check: (source: string) => string = world ? (source: string): string => checkWorldProgram(source, travel) : checkSurfaceProgram
   let design = brief.design.length > 0 ? brief.design : 'None given: design the scene yourself from the request.'
-  let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + design +
+  let moves = !world || travel === 'none' ? '' : travel === 'self' ? '\nSomething in it travels by itself (scene.path or scene.wander).' :
+    travel === 'steered' ? '\nThe person steers something in it (scene.player).' :
+    '\nSomething in it travels by itself (scene.path or scene.wander), and the person steers something (scene.player).'
+  let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + design + moves +
     '\n\nWrite the complete program for it on one ' + (world ? 'ui.World' : 'ui.Surface') + '. Output the source only.'
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
     checkAgent(host)

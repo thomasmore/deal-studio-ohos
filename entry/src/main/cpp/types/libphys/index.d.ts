@@ -1,5 +1,6 @@
 // Rigid-body physics (Jolt) for the 3D world. Units: metres, seconds, kilograms; y is up;
-// quaternions are ordered x, y, z, w. A body kind is 0 static, 1 dynamic, 2 kinematic.
+// quaternions are ordered x, y, z, w. A body kind is 0 static, 1 dynamic, 2 kinematic, 3 a character: dynamic, kept
+// upright and turning only about y, without friction or bounce, moved by physDrive.
 // Bodies are named by a dense index that is reused after physRemove.
 
 /**
@@ -49,6 +50,12 @@ export const physSetVelocity: (i: number, vx: number, vy: number, vz: number, wx
 export const physSleep: (i: number) => void
 /** Moves a kinematic body to the pose over dt seconds, so it pushes what it touches. Ignored for other kinds. */
 export const physMoveKinematic: (i: number, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number, dt: number) => void
+/**
+ * Drives a character (kind 3): velocity along the ground vx, vz (m/s) and turn about y wy (rad/s); its vertical velocity
+ * is kept, so it still falls and jumps. Wakes it and restarts its sleep cap. Ignored for other kinds. A character is not
+ * counted by physAwakeDynamic.
+ */
+export const physDrive: (i: number, vx: number, vz: number, wy: number) => void
 /**
  * Advances the world by dt seconds in `substeps` collision steps (default 1). Applies the world
  * bound, and puts every dynamic body to sleep once 8 simulated seconds pass without a

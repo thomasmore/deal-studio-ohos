@@ -266,7 +266,8 @@ export const CATALOG: ComponentSpec[] = [
     'a real 3D world with light, shadows and physics, built from std/scene things the host moves by itself, for a request ' +
     'that asks for 3D: dice thrown in 3D, a 3D tower knocked over, a 3D solar system, a 3D cube or ball',
     '',
-    'Only when the request asks for 3D: bodies that fall, roll, bounce and knock into each other, or circle a centre. ' +
+    'Only when the request asks for 3D: bodies that fall, roll, bounce and knock into each other, circle a centre, walk or ' +
+    'drive about by themselves, or are steered by the person. ' +
     'Not for flat games or drawings (ui.Surface) or a card that flips (ui.Transform). height is the box\'s height in points ' +
     '(0 = as tall as it is wide); style fill runs it to the bottom of the screen, above what comes after it; style full opens it ' +
     'over the whole screen, the title of its Header in the corner and the Texts in its column as a caption over its bottom, the Buttons ' +
@@ -274,9 +275,11 @@ export const CATALOG: ComponentSpec[] = [
     'system in motion or a simulation, worked by touching the world. build names function build(state: AppState): ' +
     'scene.Thing[] that describes the whole world -- camera, table or floor, bodies -- and is called only when the state changes, ' +
     'never per frame: there is no frame function, and the program never moves a body itself. A loose body is moved by physics; ' +
-    'an orbit or a spin by the host; a kick throws a loose body each time its trigger number changes. event names function ' +
+    'an orbit, a spin, a path and a wander by the host; a kick throws a loose body each time its trigger number changes; ' +
+    'the player is steered by the person with a stick the host draws over the world, the camera following it. event names function ' +
     'onWorld(state: AppState, e: scene.Event): AppState, called on a tap, a swipe, a hit (at most four a second, every body ' +
-    'knocked since the last one in e.bodies) and when thrown bodies come to rest ' +
+    'knocked since the last one in e.bodies), when a body comes into a scene.zone ("enter"), when the player\'s button is ' +
+    'pressed ("action") and when thrown bodies come to rest ' +
     '("settled": in e.values a die\'s face, any other body 1 when it was knocked from where it was built); pass "" for ' +
     'none. Every body needs an id of its own, at most ' + MAX_WORLD_BODIES.toString() + ' bodies. A throw: ' +
     'scene.kick(scene.loose(body, 1), state.throws, vx, vy, vz, spin), a Button, tap or swipe adding 1 to state.throws, the ' +

@@ -16,7 +16,7 @@
 
 import { ResolvedTheme } from './VeraTheme'
 import { gfxColor } from './GfxPaint'
-import { WorldSpec, BodySpec, CameraSpec, TableSpec, SkySpec } from './VeraScene'
+import { WorldSpec, BodySpec, CameraSpec, TableSpec, SkySpec, FollowSpec, ScenePath, SceneWander, orbitPositions } from './VeraScene'
 import { quatXYZ as shapesQuatXYZ } from './VeraShapes'
 
 /** The sun: a directional light this bright (the kit's default of 1 does practically nothing), from here, at the origin. */
@@ -397,6 +397,13 @@ export function worldBounds(spec: WorldSpec): number[] | null {
       at = centre
       steps++
     }
+    if (b.path !== null) {
+      // A body on a route may be anywhere along it: each corner bounds it.
+      let pts = (b.path as ScenePath).points
+      for (let i = 0; i + 1 < pts.length; i += 2) { spheres.push([pts[i], b.position[1], pts[i + 1], half]) }
+      continue
+    }
+    if (b.wander !== null) { reach = (b.wander as SceneWander).radius }
     spheres.push([at.position[0], at.position[1], at.position[2], half + reach])
   }
   if (spec.table !== null) {
@@ -484,6 +491,12 @@ export function worldFitPoints(spec: WorldSpec): number[][] {
       at = centre
       steps++
     }
+    if (b.path !== null) {
+      let pts = (b.path as ScenePath).points
+      for (let i = 0; i + 1 < pts.length; i += 2) { cube([pts[i], b.position[1], pts[i + 1]], [half, half, half]) }
+      continue
+    }
+    if (b.wander !== null) { reach = (b.wander as SceneWander).radius }
     if (reach <= 0) {
       // A body set square is its own box (a flat disc is not a ball as wide as it); a turned or spinning one, the box round its ball.
       let square = b.spinPeriodS === 0 && b.rings.length === 0 && b.rotation[0] === 0 && b.rotation[1] === 0 && b.rotation[2] === 0
@@ -535,6 +548,10 @@ export function fitDistance(eye: number[], look: number[], points: number[][], a
  * a camera facing away from the world is left as written.
  */
 export function worldCamera(spec: WorldSpec, aspect: number): CameraPose {
+  if (spec.follow !== null) {
+    let start = followTarget(spec)
+    if (start !== null) { return followStart(start, spec.follow as FollowSpec) }
+  }
   if (spec.camera === null) { return defaultCamera(spec, aspect) }
   let c = spec.camera as CameraSpec
   let pose = new CameraPose()
@@ -663,11 +680,68 @@ export function tableParts(table: TableSpec): number[][] {
   ]
 }
 
-/** How wide the floor plane is drawn: far past everything in the world, so its edge stays out of sight. */
+/**
+ * How wide the floor plane is drawn: far past everything in the world, so its edge stays out of sight -- and, in a world
+ * with a player, as wide as the physics floor (WorldSim's, 200 m), since the person can walk it to its edge.
+ */
 export function floorSize(spec: WorldSpec): number {
   let bounds = worldBounds(spec)
   let reach = bounds !== null ? Math.sqrt(bounds[0] * bounds[0] + bounds[2] * bounds[2]) + bounds[3] : 1
-  return Math.max(40, reach * 12)
+  let size = Math.max(40, reach * 12)
+  for (let b of spec.bodies) { if (b.player !== null) { return Math.max(size, PLAYER_FLOOR) } }
+  return size
+}
+
+/** The floor a player walks on, in metres across. */
+export const PLAYER_FLOOR: number = 200
+/** A follow camera looks at this share of its height above the body's centre, and sees this far. */
+export const FOLLOW_LOOK_UP: number = 0.15
+export const FOLLOW_FAR: number = 220
+
+/** Where the followed body starts and the way it faces: [x, y, z, heading in degrees]; null when it is not in the world. */
+export function followTarget(spec: WorldSpec): number[] | null {
+  let f = spec.follow
+  if (f === null) { return null }
+  for (let b of spec.bodies) {
+    if (b.id !== f.target) { continue }
+    if (b.motion === 'kinematic') {
+      let p = orbitPositions(spec, 0).get(b.id)
+      if (p !== undefined) { return [p[0], p[1], p[2], p[4]] }
+    }
+    return [b.position[0], b.position[1], b.position[2], b.rotation[1]]
+  }
+  return null
+}
+
+/** eye - look of a camera following a body that faces heading (degrees): behind it, the follow's distance back and height up. */
+export function followOffset(heading: number, follow: FollowSpec): number[] {
+  let a = heading * Math.PI / 180
+  // The front is (cos a, -sin a); behind is the opposite.
+  return [-Math.cos(a) * follow.distance, follow.height, Math.sin(a) * follow.distance]
+}
+
+/** The point a follow camera looks at for a body at target. */
+export function followLook(target: number[], follow: FollowSpec): number[] {
+  return [target[0], target[1] + follow.height * FOLLOW_LOOK_UP, target[2]]
+}
+
+/** The camera at once behind a body at [x, y, z, heading]. */
+export function followStart(target: number[], follow: FollowSpec): CameraPose {
+  let pose = new CameraPose()
+  let lookAt = followLook(target, follow)
+  let off = followOffset(target[3], follow)
+  pose.look = lookAt
+  pose.eye = [lookAt[0] + off[0], lookAt[1] + off[1], lookAt[2] + off[2]]
+  pose.orbit = true
+  followPlanes(pose)
+  return pose
+}
+
+/** A follow camera's clip planes: near for its distance, far enough to see the whole floor. */
+export function followPlanes(pose: CameraPose): void {
+  let d = Math.hypot(pose.eye[0] - pose.look[0], pose.eye[1] - pose.look[1], pose.eye[2] - pose.look[2])
+  pose.near = Math.max(0.02, Math.min(0.1, d * 0.05))
+  pose.far = FOLLOW_FAR
 }
 
 /**

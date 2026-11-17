@@ -35,6 +35,14 @@ assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surf
   assert.equal(worldExample, worldBasics, 'the world guide carries examples/world-basics.vera as it is (regenerate the rawfile when the example changes)')
   assert.equal(S.checkWorldProgram(worldExample), '', 'the world guide\'s example compiles, runs once and plays')
   assert.match(S.checkWorldProgram(example), /^1:1 P0008 .*shows no ui.World/, 'a flat game is not a 3D program')
+  const tOpen = '--- TRAVEL EXAMPLE ---\n', tClose = '--- END TRAVEL EXAMPLE ---'
+  const travel = worldGuide.slice(worldGuide.indexOf(tOpen) + tOpen.length, worldGuide.indexOf(tClose))
+  assert.equal(travel, fs.readFileSync(path.join(__dirname, 'examples/world-walk.vera'), 'utf8'),
+    'the world guide carries examples/world-walk.vera as it is (regenerate the rawfile when the example changes)')
+  for (const t of ['none', 'self', 'steered', 'both']) {
+    assert.equal(S.checkWorldProgram(travel, t), '', 'the travel example plays for travel ' + t)
+  }
+  assert.match(S.checkWorldProgram(worldExample, 'self'), /P0014 .*goes anywhere by itself/, 'the throwing example has nothing that travels')
 }
 
 // The gate: game words ask, everything else goes straight to the agent.
@@ -58,6 +66,13 @@ assert.equal(S.parseSurfaceBrief('noise {"surface": false, "title": "", "design"
 assert.equal(S.parseSurfaceBrief('{"surface": true, "title": "T", "design": ""}'), null, 'a game with no design is not an answer')
 assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "world", "title": "T", "design": ""}').engine, S.ENGINE_WORLD,
   'a 3D world with no design is still one: the world guide and the request are enough')
+assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "world", "travel": "Self", "title": "T", "design": "D"}').travel, 'self',
+  'what travels is read')
+assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "world", "travel": "walks", "title": "T", "design": "D"}').travel, 'none',
+  'an answer that is not one of the four is none')
+assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "flat", "travel": "steered", "title": "T", "design": "D"}').travel, 'none',
+  'a flat app has no travel')
+for (const w of ['"travel"', '"self"', '"steered"']) assert.ok(S.SURFACE_CLASSIFY_PROMPT.includes(w), 'the classifier says ' + w)
 assert.equal(S.parseSurfaceBrief('not json'), null)
 // The engine: world only for a whole app that says so, flat otherwise.
 assert.equal(S.parseSurfaceBrief('{"surface": "whole", "title": "T", "design": "D"}').engine, S.ENGINE_FLAT, 'no engine is flat')
