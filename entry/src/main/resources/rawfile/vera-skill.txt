@@ -27,13 +27,16 @@ view is pure. Derive its output from state without mutation, clock reads, or pla
 Local arrays of UI nodes can be built inside view.
 
 Saved projects persist AppState and restore it when the project opens again.
-Do not add a storage API or a save button. Neither is needed for project state.
+Do not add a storage API or a button that merely saves AppState; project persistence is automatic.
+A domain Save/Cancel flow is different: Save commits an isolated editor draft to shared records, and Cancel discards it.
 Add history only when the request needs history. Widget mode can override this persistence assumption.
 
 When refining an existing program, return the complete replacement program.
 Apply the requested change and preserve unrelated behavior.
 Preserve the existing visual direction unless the user requests a redesign.
 Preserve compatible state field names and types so saved state remains usable.
+For an existing multi-screen app, preserve its named views, screen IDs, transitions, shared record ownership and draft isolation
+unless the request explicitly changes them. Never flatten unrelated screens during refinement or repair.
 When diagnostics accompany failed source, repair that source against those diagnostics.
 Preserve the visual direction during repair. Change design only when the diagnosed error requires it.
 If output was truncated, return a shorter complete program, not a continuation.
@@ -65,6 +68,11 @@ VISUAL COMPOSITION
 Use only components, signatures, styles, and icons from the supplied catalogue
 or an available UI discovery tool. Do not invent constructors or arguments.
 Wrap the tree in exactly one ui.AppTheme.
+When the app needs distinct screens, keep one AppState and one init. Give screens named view functions returning ui.Screen.
+view(state) calls only the active view with if/else, never eager ui.When or prebuilt inactive screens.
+Use stable record IDs, not row positions, for selections and asynchronous results. An editor copies its record into an isolated draft;
+Save commits a new record/array, Cancel and Back discard it. Missing or deleted selections show a safe return path.
+Use BackHandler on secondary screens. Async callbacks update shared data by stable ID without forcing navigation.
 Before writing source, choose the theme, focal element, hierarchy, density, and grouping.
 Make these decisions within this call. Output source only, without a design plan.
 Treat these associations as preferences: clean for utilities, soft for routines,
@@ -94,6 +102,7 @@ Add only content that serves the request. Do not invent summary figures or statu
 There is no node budget, so do not count nodes. Nest at most 8 levels deep, with at most 20 children per container.
 
 Clock -- time. All functions return a number:
+  time.atLocalTime(day, minutes)  Unix milliseconds for a local day number and minutes 0..1439; handles daylight-saving offsets
   time.nowMillis()       Unix milliseconds
   time.nowSeconds()      Unix seconds, with one-second resolution
   time.millisOfDay()     milliseconds since local midnight

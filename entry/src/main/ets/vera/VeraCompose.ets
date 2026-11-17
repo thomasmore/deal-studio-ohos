@@ -25,6 +25,7 @@
  */
 
 import { http } from '@kit.NetworkKit'
+import { NeedsPlan } from './NeedsPlan'
 import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
 import { requestWithCancellation } from './VeraWebSearch'
 import { FragmentSpec, StateFieldSpec, PortSpec, VetoSpec, fragments, vetoes, LIVE_KIND, liveFigureNumber } from './VeraTemplates'
@@ -4722,6 +4723,10 @@ export function sketchPlan(sketch: Sketch): string {
 // ---- The whole route, as the Generate screen runs it ----
 
 export class ComposeResult {
+  /** A validated multi-screen plan, carried before the one-screen Sketch loses its relationships. */
+  appPlan: NeedsPlan | null = null
+  /** A reply attempted screen structure but none could be validated; do not erase it in a flat fallback. */
+  appPlanFailed: boolean = false
   /** The assembled program; empty when the request cannot be composed. */
   source: string = ''
   /** One line for the trace and the status area: why, or what was chosen. */

@@ -18,6 +18,9 @@ import { smokeRun } from '../VeraSmoke'
 import { playSurface } from '../VeraSurfacePlay'
 import { isScene } from '../VeraCompose'
 import { SCENE_GUIDE, SCENE_TOKENS } from './AgentScene'
+import { NeedsPlan } from '../NeedsPlan'
+import { APP_CONTRACT, appContext, unboundAppAction } from './AgentAppContract'
+import { deserializeVbc2 } from '../VeraInterpreter'
 import { applyRepair, SEARCH_MARK, SPLIT_MARK, REPLACE_MARK } from '../VeraRepair'
 
 /**
@@ -167,6 +170,8 @@ function callProblem(reply: string, found: string[]): string {
 }
 
 export class CustomRequest {
+  /** One whole-app contribution, with the original named views and shared data references. */
+  appPlan: NeedsPlan | null = null
   /** What the section must do, each in words. */
   needs: string[] = []
   /** The person's request. */
@@ -210,7 +215,9 @@ export function verifyRequest(request: CustomRequest, reply: string): string {
   body['model'] = 'jev-latest'
   // What the code does not show: the runtime keeps the app's state between visits by itself.
   body['state'] = 'Request: ' + request.prompt + '\nThe app\'s state (every field) is saved and restored by the phone between ' +
-    'visits without any code for it.\nThe section, as code:\n' + reply
+    'visits without any code for it.\n' + (request.appPlan === null ? '' :
+      'This is one shared-state app. Unless the request explicitly names an external app, actions on its records mean local AppState changes, not changes in another phone app. ' +
+      'A handler declaration alone is not a user action: check that a reachable control calls it.\n') + 'The section, as code:\n' + reply
   body['questions'] = questions
   return JSON.stringify(body)
 }
@@ -356,11 +363,15 @@ function quoted(source: string, errors: string): string {
  * '' when the program compiles and runs, else what went wrong with the lines it points at. A section with a scene is also
  * played: fingers on it, then each button pressed, every frame drawn.
  */
-function check(source: string, scene: boolean = false, unreadToo: boolean = true): string {
+function check(source: string, scene: boolean = false, unreadToo: boolean = true, app: NeedsPlan | null = null): string {
   try {
     let compiled = compileVeraSource(source)
-    let ran = smokeRun(compiled)
+    let ran = app === null ? smokeRun(compiled) : smokeRun(compiled, true, app.screens.map((s): string => s.id), app.startScreen)
     if (ran.length > 0) { return quoted(source, ran) }
+    if (app !== null) {
+      let unbound = unboundAppAction(deserializeVbc2(compiled.vbc2))
+      if (unbound.length > 0) { return unbound }
+    }
     if (scene) {
       let played = playSurface(compiled, true, true)
       if (played.length > 0) { return quoted(source, played) }
@@ -392,7 +403,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
   let found = foundTargets(request.phone)
   let phone = found.length > 0 ? request.phone : ''
   let scene = request.needs.some((n: string): boolean => isScene(n))
-  let system = language + CONTRACT + phoneRule(phone) + ASK_RULE + (scene ? SCENE_GUIDE : '')
+  let system = language + (request.appPlan === null ? CONTRACT : APP_CONTRACT) + phoneRule(phone) + ASK_RULE + (scene ? SCENE_GUIDE : '')
   let asked = 'Request: ' + request.prompt + '\n\nThe section must do:\n- ' + request.needs.join('\n- ') +
     (request.inputs.length > 0 ? '\n\nThe person sets these on the screen and nothing else uses them yet; the section uses them:\n- ' +
       request.inputs.join('\n- ') : '') +
@@ -402,8 +413,9 @@ export async function writeSection(request: CustomRequest, language: string, ask
       'already has one (two empty states one under the other read as a broken screen).' : '') +
     (request.facts.length > 0 ? '\n\nFixed numbers the app uses:\n- ' + request.facts.join('\n- ') : '') +
     (phone.length > 0 ? '\n\nPhone functions found (the only targets the section may call):\n' + phone : '') +
-    (request.whole ? '\n\nThe program has nothing yet but its header: your section is the whole screen, everything the request ' +
-      'asks for. It may push several ui.Section(...) in its view.' : '') +
+    (request.appPlan !== null ? appContext(request.appPlan!) :
+      (request.whole ? '\n\nThe program has nothing yet but its header: your section is the whole screen, everything the request ' +
+        'asks for. It may push several ui.Section(...) in its view.' : '')) +
     '\n\nThe program so far, which the section joins (do not repeat it):\n' + request.compose(null)
   let user = asked
   // The best section that compiled and ran but that Jev reads as missing a need: kept, in case no try does them all.
@@ -427,7 +439,9 @@ export async function writeSection(request: CustomRequest, language: string, ask
   // The first try written whole, then mended by edits (cheap: 2-4 s against 10-18 s for a whole one), a quick whole try when
   // edits do not apply, and last the thinking try written whole: slower, for what the rest got wrong. Edit rounds do not use
   // up the quick tries: counted as tries, two of them sent the next straight to a 33 s thinking try (Timetable on the phone).
-  for (let attempt = 0; attempt < MAX_ASKS; attempt++) {
+  // A failed app already used the whole contribution: never repeat a full pipeline for each screen.
+  let asks = request.appPlan === null ? MAX_ASKS : 3
+  for (let attempt = 0; attempt < asks; attempt++) {
     throwIfCancelled(cancellation)
     let editing = mending.length > 0
     let think = !editing && wholes > 0 && (editRounds >= EDIT_ROUNDS || wholes > REPAIRS)
@@ -435,7 +449,8 @@ export async function writeSection(request: CustomRequest, language: string, ask
     result.attempts = attempt + 1
     result.thought = think
     let tryStart = Date.now()
-    let budget: number = (request.whole || truncated) ? SCREEN_TOKENS : (scene ? SCENE_TOKENS : SECTION_TOKENS)
+    let budget: number = request.appPlan !== null ? Math.min(16000, SCREEN_TOKENS + (request.appPlan!.screens.length - 1) * 1200) :
+      ((request.whole || truncated) ? SCREEN_TOKENS : (scene ? SCENE_TOKENS : SECTION_TOKENS))
     throwIfCancelled(cancellation)
     let answer: string | null = await ask(system, user, editing ? editBudget : (think ? budget * THINKING_ROOM : budget), think)
     throwIfCancelled(cancellation)
@@ -485,7 +500,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
     // Asked for twice at most: a section that still makes its own clock or list is better than none, so it is then taken as it is.
     let again = section === null || attempt >= 2 ? '' : repeats(section, request)
     let problem = section === null ? 'The answer was not in the form asked for: <classes>, <fields>, <functions> and <view>.' :
-      (calls.length > 0 ? calls : (again.length > 0 ? again : check(request.compose(section), scene, !unreadAsked)))
+      (calls.length > 0 ? calls : (again.length > 0 ? again : check(request.compose(section), scene, !unreadAsked, request.appPlan)))
     if (problem.startsWith(UNREAD_PROBLEM)) { unreadAsked = true }
     if (problem.length === 0) {
       // It compiles and runs; whether it does what it is for is Jev's reading. One it reads as not doing a need is asked
@@ -498,6 +513,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
         let part = new CustomRequest()
         part.prompt = request.prompt
         part.needs = doing
+        part.appPlan = request.appPlan
         throwIfCancelled(cancellation)
         unread = undone(part, await request.verify!(verifyRequest(part, reply)))
         throwIfCancelled(cancellation)

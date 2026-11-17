@@ -370,7 +370,7 @@ if (!baseline) {
      }},setInterval(callback,interval){assert.equal(interval,16);const handle=++nextHandle;scheduled.set(handle,callback);events.push(['start']);return handle},clearInterval(handle){assert(scheduled.delete(handle));events.push(['stop'])}}
      const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
      probe=new Probe()
-     Object.assign(probe,{destinationHidden:false,previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',darkListener:null,pending:null,
+     Object.assign(probe,{destinationHidden:false,previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',darkListener:null,pending:null,surfaceInputs:new Map(),
       stopAllTimers(){events.push(['cleanup',this.disposed,this.pageHidden]);this.stopSurfaceLoop()},watchDarkMode(){events.push(['dark',this.disposed,this.pageHidden])},restoreState(){return null},seeded:value=>value,notifyStateSnapshot(){events.push(['snapshot'])},persistState(){events.push(['persist'])},paintSurfaces(){events.push(['paint'])},drainEffects(){events.push(['drain'])},countFrame(){events.push(['count'])},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},reconcileBackHandler(){},cancelFields(){},reconcileFields(){},scheduleFieldActions(){},renderingDepth:0,flushFields(){},controller:null})
      probe.vbc2=C.compileVeraSource(`
 @jsonable class AppState { n: number; }
@@ -516,7 +516,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
         const field=renderer.match(new RegExp('^  private '+name+':[^\\n]+(?:\\n    [^\\n]+)*','m'));assert(field,name)
         return field[0].replace('  private ','')
        }).join('\n')
-       const names=['fieldCurrent','markLiveNodeGeneration','isLiveNode','recordFieldInput','refreshFieldIssue','refreshFieldIssues','textFieldIssue','cancelField','cancelFields','fieldController','endFieldEditing','reconcileFields','changeField','commitField','flushFields','flushUserFields','finishField','invalidateEffects','load','renderView','handleAction','handleBoolAction','handleStringAction','fieldFormOf','pathTo','hasField','collectFieldDependencies','fieldActionState','fieldActionCurrent','releaseSurfaceAction','scheduleFieldActions','captureFieldAction','enqueueFieldAction','dispatchFieldAction','resumeFieldActions','dispatch','surfaceTouch','surfaceMove','stateKeys','stamp','persistState','notifyStateSnapshot','reconcileBackHandler','findBackHandlerAction','startTimer','stopTimer','runEffect']
+       const names=['fieldCurrent','markLiveNodeGeneration','isLiveNode','recordFieldInput','refreshFieldIssue','refreshFieldIssues','textFieldIssue','cancelField','cancelFields','fieldController','endFieldEditing','reconcileFields','changeField','commitField','flushFields','flushUserFields','finishField','invalidateEffects','load','renderView','handleAction','handleBoolAction','handleStringAction','fieldFormOf','pathTo','hasField','collectFieldDependencies','fieldActionState','fieldActionCurrent','releaseSurfaceAction','scheduleFieldActions','captureFieldAction','enqueueFieldAction','dispatchFieldAction','resumeFieldActions','dispatch','surfaceTouch','surfaceMove','stateKeys','stamp','persistState','notifyStateSnapshot','reconcileBackHandler','findBackHandlerAction','startTimer','dispatchTickerAction','stopTimer','runEffect']
        const body=names.map(name=>declaration(renderer,'  private '+name+'(').replace('  private ','')).concat(['aboutToAppear','aboutToDisappear','onBackPressSignal'].map(name=>declaration(renderer,'  '+name+'('))).join('\n')
        const sliderSource=renderer.slice(renderer.indexOf("} else if (node.kind === 'slider') {"),renderer.indexOf("} else if (node.kind === 'select') {"))
        const callback='sliderChange(node: LiveNode) { return '+declaration(sliderSource,'.onChange(').slice('.onChange('.length)+' }'
@@ -1835,7 +1835,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
     function cancel(handle) { stops.push(handle);scheduled.delete(handle) }
     const Probe=new Function('setInterval','clearInterval','Date','VeraNumberValue',compiled.outputText+'; return Probe')(schedule,cancel,{now:()=>now},V.VeraNumberValue)
     const probe=new Probe()
-    Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),sceneFrames:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
+    Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},dispatchTickerAction(id,config,value){this.dispatchFieldAction(config.action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),sceneFrames:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
     function advance(ms) {
      const end=now+ms
      while(true) {

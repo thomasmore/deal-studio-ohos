@@ -126,6 +126,8 @@ class FieldAction {
   dependencyCancellations: number[] = []
   surfaceInput: SurfaceInput | null = null
   surfaceId: number = -1
+  tickerId: string = ''
+  tickerConfig: TimerConfig | null = null
   constructor(action: string, payload: RuntimeValue, generation: number,
     persist: boolean = true, node: LiveNode | null = null) {
     this.action = action
@@ -575,7 +577,7 @@ export struct VeraPreview {
     'numbertext', 'numberstat', 'numberfield', 'timefield', 'datefield', 'numberlistitem', 'actionbar',
     'kvgroup', 'kvitem', 'icon', 'iconbutton', 'badge', 'clocktext',
     'timeline', 'timelineitem', 'skeleton', 'timer', 'spinner', 'snackbar', 'sparkline', 'backhandler',
-    'table', 'tablerow', 'motion', 'layers', 'transform', 'stage', 'surface']
+    'table', 'tablerow', 'motion', 'layers', 'transform', 'stage', 'surface', 'screen']
 
   aboutToAppear(): void {
     this.disposed = false
@@ -700,8 +702,11 @@ export struct VeraPreview {
     let ids = Array.from(wanted.keys())
     for (let id of ids) {
       let config = wanted.get(id) as TimerConfig
+      // The config object is the running interval's lifetime token. Preserve it
+      // through ordinary redraws; stop/start creates a new token, even for the same ID.
       if (this.timers.has(id)) {
-        this.timerConfigs.set(id, config)
+        let current = this.timerConfigs.get(id)
+        if (current !== undefined) { current.action = config.action }
         continue
       }
       this.startTimer(id, config)
@@ -973,12 +978,14 @@ export struct VeraPreview {
     }
   }
 
-  private collectTickers(node: VeraUiNode, wanted: Map<string, TimerConfig>): void {
+  private collectTickers(node: VeraUiNode, wanted: Map<string, TimerConfig>, screen: string = ''): void {
+    let scope = node.kind === 'screen' ? node.screenId : screen
     if (node.kind === 'ticker' && node.checked && node.minimum > 0 &&
         node.tickerId.length > 0 && node.action.length > 0) {
-      wanted.set(node.tickerId, new TimerConfig(node.minimum, node.action))
+      let id = scope.length > 0 ? JSON.stringify([scope, node.tickerId]) : node.tickerId
+      wanted.set(id, new TimerConfig(node.minimum, node.action))
     }
-    for (let child of node.children) { this.collectTickers(child, wanted) }
+    for (let child of node.children) { this.collectTickers(child, wanted, scope) }
   }
 
   private startTimer(id: string, config: TimerConfig): void {
@@ -992,7 +999,7 @@ export struct VeraPreview {
       // resume carries the whole gap, and the app does not write state while a card may be changing it.
       if (this.ticking || this.appForeground === false) { return }
       let current = this.timerConfigs.get(id)
-      if (current === undefined) { return }
+      if (current === undefined || current !== config) { return }
       // Do not queue a tick while an IME composition is active: keep its elapsed time for the next deliverable tick.
       for (let edit of this.fieldEdits.values()) {
         if (edit.composing) { return }
@@ -1008,7 +1015,7 @@ export struct VeraPreview {
       try {
         let payload = new VeraNumberValue(Math.round(elapsed))
         if (current.interval >= SLOW_TICK_MS) {
-          this.dispatchFieldAction(current.action, payload)
+          this.dispatchTickerAction(id, current, payload)
         } else {
           this.dispatch(current.action, payload)
         }
@@ -1017,6 +1024,13 @@ export struct VeraPreview {
       }
     }, safe)
     this.timers.set(id, handle)
+  }
+
+  private dispatchTickerAction(id: string, config: TimerConfig, payload: RuntimeValue): void {
+    let next = this.captureFieldAction(config.action, payload)
+    next.tickerId = id
+    next.tickerConfig = config
+    this.enqueueFieldAction(next)
   }
 
   private stopTimer(id: string): void {
@@ -1191,6 +1205,11 @@ export struct VeraPreview {
     }
     for (let node of Array.from(this.surfaces.keys())) {
       if (found.indexOf(node) < 0) { this.surfaces.delete(node) }
+    }
+    // A screen can disappear before its active fingers send touch-up. Do not
+    // retain those controllers (or revive their gestures on a later screen).
+    for (let node of Array.from(this.surfaceInputs.keys())) {
+      if (found.indexOf(node) < 0) { this.surfaceInputs.delete(node) }
     }
     // A timer's controller lives as long as its node is in the tree.
     for (let node of Array.from(this.textTimers.keys())) {
@@ -1663,6 +1682,8 @@ export struct VeraPreview {
 
   private fieldActionCurrent(next: FieldAction): boolean {
     if (next.generation !== this.effectGeneration || this.disposed || this.previewOnly) { return false }
+    if (next.tickerConfig !== null &&
+        (this.timerConfigs.get(next.tickerId) !== next.tickerConfig || next.action !== next.tickerConfig!.action)) { return false }
     for (let i = 0; i < next.dependencies.length; i++) {
       if (next.dependencies[i].fieldCancellation !== next.dependencyCancellations[i]) { return false }
     }
@@ -3084,6 +3105,21 @@ export struct VeraPreview {
       .width('100%')
       .alignItems(HorizontalAlign.Start)
       .backgroundColor(this.t().background)
+    } else if (node.kind === 'screen') {
+      // Keep the boundary itself observable, but remount native controls when
+      // its identity changes. Same-screen state updates still reconcile in place.
+      ForEach([node.screenId], (_id: string) => {
+        Column() {
+          this.renderChildren(node)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .onAppear(() => {
+          if (!this.embedded) { this.rootScroller.scrollTo({ xOffset: 0, yOffset: 0 }) }
+          this.readingDown = false
+          this.onReadingDown(false)
+        })
+      }, (id: string) => id)
     } else if (node.kind === 'scroll') {
       // Rendered as a plain Column until now, so a program asking for a
       // scrolling region got one that could not scroll and simply grew.

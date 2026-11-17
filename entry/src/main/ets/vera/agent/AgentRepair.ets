@@ -10,6 +10,10 @@ import { AgentHost, checkAgent, agentCancellation } from './AgentHost'
 import { repairPrompt, applyRepair } from '../VeraRepair'
 import { compileVeraSource, CompileError } from '../VeraCompiler'
 import { smokeRun } from '../VeraSmoke'
+import { NeedsPlan } from '../NeedsPlan'
+import { appContext, unboundAppAction } from './AgentAppContract'
+import { deserializeVbc2 } from '../VeraInterpreter'
+import { describeComponents } from '../VeraUiCatalog'
 
 const ROUNDS: number = 2
 /** Room for the edits: a few blocks of a few lines each. */
@@ -27,9 +31,11 @@ export class Repaired {
 }
 
 /** The program's diagnostics: '' when it compiles and runs once with every handler tapped. */
-export function checkProgram(source: string): string {
+export function checkProgram(source: string, app: NeedsPlan | null = null): string {
   try {
-    return smokeRun(compileVeraSource(source))
+    let compiled = compileVeraSource(source)
+    let ran = app === null ? smokeRun(compiled) : smokeRun(compiled, true, app.screens.map((s): string => s.id), app.startScreen)
+    return ran.length > 0 || app === null ? ran : unboundAppAction(deserializeVbc2(compiled.vbc2))
   } catch (e) {
     return e instanceof CompileError ? (e as CompileError).message : (e as Error).message
   }
@@ -54,18 +60,20 @@ export class Settled {
  * An assembled program, checked -- compiled, then run once with every handler tapped -- and, if it fails, repaired by
  * edits. Every program the agent or the blocks serve passes through here, whoever assembled it.
  */
-export async function settleProgram(source: string, prompt: string, host: AgentHost): Promise<Settled> {
+export async function settleProgram(source: string, prompt: string, host: AgentHost, app: NeedsPlan | null = null): Promise<Settled> {
   checkAgent(host)
   let out = new Settled()
   out.source = source
   let checkStart = Date.now()
-  out.errors = checkProgram(source)
+  let check: ProgramCheck = (text: string): string => checkProgram(text, app)
+  out.errors = check(source)
   out.checkMs = Date.now() - checkStart
   // What the assembly got wrong is repaired by edits to it, not by building it again.
   if (out.errors.length > 0 && host.askCode !== null && host.language.length > 0 && !host.cancelled()) {
     host.status('Repairing the program...')
     checkAgent(host)
-    let repaired = await repairProgram(source, out.errors, prompt, host.language, host.askCode!, checkProgram, agentCancellation(host))
+    let language = host.language + (app === null ? '' : appContext(app) + '\nPreserve the named views, shared state and transitions when repairing the assembled program.\n' + describeComponents(['Screen', 'BackHandler']))
+    let repaired = await repairProgram(source, out.errors, prompt, language, host.askCode!, check, agentCancellation(host))
     checkAgent(host)
     out.repair = repaired
     if (repaired.source.length > 0) {

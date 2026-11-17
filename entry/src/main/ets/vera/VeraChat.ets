@@ -18,6 +18,7 @@ import { GenerateRequest } from './LlamaEngine'
 import { compileVeraSource, CompileError } from './VeraCompiler'
 import { applyRepair, repairPrompt, RepairOutcome } from './VeraRepair'
 import { smokeRun } from './VeraSmoke'
+import { smokeRefinement, appRefinementNote } from './VeraAppRefine'
 import { composeEnabled, ComposeResult } from './VeraCompose'
 import { AgentRequest, AgentResult, runAgent } from './agent/VeraAgent'
 import { appAgentHost } from './agent/AgentAppHost'
@@ -839,7 +840,7 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
     let doing = attempt === 1 ? 'Building a widget' : 'Fixing the widget (' + attempt.toString() + '/' + MAX_ATTEMPTS.toString() + ')'
     if (!isCancelled(cancellation)) { onStatus(doing + '...') }
     let request = new GenerateRequest()
-    request.systemPrompt = systemPrompt
+    request.systemPrompt = systemPrompt + appRefinementNote(previousSource)
     request.uiTool = false
     request.temperature = 0.2
     request.maxTokens = DEEPSEEK_GENERATION_MAX_TOKENS
@@ -914,7 +915,7 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
       let compiled = compileVeraSource(text)
       // As on the Generate screen: run once before serving, and repair a runtime error like a compile error.
       let smokeStart = Date.now()
-      let ran = smokeRun(compiled)
+      let ran = smokeRefinement(compiled, previousSource)
       throwIfCancelled(cancellation)
       logStep('smoke', smokeStart, 'src=widget attempt=' + attempt.toString() + ' ok=' + (ran.length === 0).toString())
       if (ran.length > 0) { throw new Error(ran) }

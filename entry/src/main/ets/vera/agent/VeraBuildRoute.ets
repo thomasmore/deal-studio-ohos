@@ -61,6 +61,8 @@ async function writeWholeScreen(request: RouteRequest, host: AgentHost, outcome:
   checkAgent(host)
   let agent = outcome.agent
   if (!wholeScreen || request.agent === null || agent === null || request.mode !== 'deepseek') { return false }
+  // The app writer already had the whole shared module; a flat fallback would silently erase its screens.
+  if (agent!.composed.appPlan !== null || agent!.composed.appPlanFailed) { return false }
   let prompt = request.agent!.prompt
   let sketch = agent!.composed.parsed
   let plan: ScreenPlan

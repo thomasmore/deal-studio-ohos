@@ -17,6 +17,7 @@ import { engine, LlamaEngine, GenerateRequest, GenerateResult, loadRawfileText }
 import { compileVeraSource, CompileError, spliceWidget, appUsesWidgetError, carryWidget, withoutWidget, widgetRefinementError } from '../vera/VeraCompiler'
 import { applyRepair, repairPrompt } from '../vera/VeraRepair'
 import { smokeRun } from '../vera/VeraSmoke'
+import { appRefinementNote, removedAppScreens, smokeRefinement, sourceScreenIds } from '../vera/VeraAppRefine'
 import { logMark, logStep, initTrace, trace, traceCompile } from '../vera/VeraTiming'
 import { deepseek, DEEPSEEK_GENERATION_MAX_TOKENS, SideCall } from '../vera/DeepSeekEngine'
 import { OperationController, throwIfCancelled } from '../vera/OperationCancellation'
@@ -1348,7 +1349,7 @@ export struct GeneratePage {
       let genStart = Date.now()
       // Refinement: send the base version's source so the server can edit it
       // instead of regenerating from scratch.
-      let requested = this.pendingHistory + (this.makeWidget ? '\n\n' + widgetRefinementPrompt() : '')
+      let requested = this.pendingHistory + (this.makeWidget ? '\n\n' + widgetRefinementPrompt() : '') + appRefinementNote(this.previousSource)
       let requestBody: string = requested
       let contentType: string = 'text/plain; charset=utf-8'
       if (this.previousSource.length > 0) {
@@ -1378,14 +1379,14 @@ export struct GeneratePage {
           return
         }
         this.generatedSource = decoded.source
-        if (this.makeWidget) {
+        if (this.makeWidget || sourceScreenIds(this.previousSource).length > 1) {
           // A widget is spliced into the saved program here, so the server's bytecode is not the program's: it is compiled
           // and held to the widget's checks on the phone. Any other server result is taken as the server built it.
-          decoded.source = spliceWidget(this.widgetBase, decoded.source)
+          if (this.makeWidget) { decoded.source = spliceWidget(this.widgetBase, decoded.source) }
           this.generatedSource = decoded.source
           let local = compileVeraSource(decoded.source)
-          let validation = smokeRun(local)
-          if (validation.length === 0) { validation = await validateWidgetOffMain(this.widgetBase, decoded.source, local.vbc2) }
+          let validation = smokeRefinement(local, this.previousSource)
+          if (validation.length === 0 && this.makeWidget) { validation = await validateWidgetOffMain(this.widgetBase, decoded.source, local.vbc2) }
           if (validation.length > 0) { throw new Error(validation) }
           decoded.bytecode = local.vbc2
         }
@@ -1475,7 +1476,7 @@ export struct GeneratePage {
     metrics.attempt = this.attempt
 
     let request = new GenerateRequest()
-    request.systemPrompt = this.systemPrompt + (this.makeWidget ? '\n\n' + widgetRefinementPrompt() : '')
+    request.systemPrompt = this.systemPrompt + (this.makeWidget ? '\n\n' + widgetRefinementPrompt() : '') + appRefinementNote(this.previousSource)
     request.uiSelected = this.uiSelected
     request.uiTool = this.uiSelected.length > 0
     request.grammar = this.grammar
@@ -1605,7 +1606,21 @@ export struct GeneratePage {
       // Run once before serving: a program that compiles can still stop at its first tap, and that is
       // repaired here like a compile error rather than found on the screen.
       let smokeStart = Date.now()
-      errors = smokeRun(result)
+      let removed = removedAppScreens(this.previousSource, result)
+      let allowed: string[] = []
+      if (removed.length > 0) {
+        // The model cannot authorize losing unrelated views. Only the person may allow this structural change.
+        try {
+          let answer = await this.getUIContext().getPromptAction().showDialog({
+            title: 'Remove app screens?',
+            message: 'This change removes these screens: ' + removed.join(', ') + '. Allow this only if you asked to remove or combine them.',
+            buttons: [{ text: 'Keep screens', color: '#334155' }, { text: 'Allow removal', color: '#B91C1C' }]
+          })
+          if (answer.index === 1) { allowed = removed }
+        } catch (_e) { /* Dismissing the dialog never permits a removal. */ }
+        if (this.disposed || run !== this.runId || operation.isCancelled()) { return }
+      }
+      errors = smokeRefinement(result, this.previousSource, allowed)
       if (errors.length === 0 && this.makeWidget) {
         errors = await validateWidgetOffMain(this.widgetBase, this.generatedSource.trim(), result.vbc2)
       }

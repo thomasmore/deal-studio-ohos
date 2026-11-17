@@ -1,0 +1,74 @@
+<classes>
+@jsonable class C_Note { id: number; text: string; }
+</classes>
+<fields>
+c_screen: string = "home"
+c_notes: C_Note[] = []
+c_nextId: number = 1
+c_editId: number = 0
+c_draft: string = ""
+c_error: boolean = false
+</fields>
+<functions>
+function c_home(state: AppState, value: number): AppState {
+  return {c_screen: "home"__PASSTHROUGH__};
+}
+function c_list(state: AppState, value: number): AppState {
+  return {c_screen: "notes"__PASSTHROUGH__};
+}
+function c_edit(state: AppState, value: number): AppState {
+  let text: string = "";
+  for (let note: C_Note of state.c_notes) { if (note.id === value) { text = note.text; } }
+  return {c_screen: "editor", c_editId: value, c_draft: text, c_error: false__PASSTHROUGH__};
+}
+function c_type(state: AppState, value: string): AppState {
+  return {c_draft: value__PASSTHROUGH__};
+}
+function c_cancel(state: AppState, value: number): AppState {
+  return {c_screen: "notes", c_draft: "", c_editId: 0, c_error: false__PASSTHROUGH__};
+}
+function c_save(state: AppState, value: number): AppState {
+  if (strings.trim(state.c_draft) === "") { return {c_error: true__PASSTHROUGH__}; }
+  let notes: C_Note[] = [];
+  let found: boolean = state.c_editId === 0;
+  for (let note: C_Note of state.c_notes) {
+    if (note.id === state.c_editId) { notes.push({id: note.id, text: strings.trim(state.c_draft)}); found = true; }
+    else { notes.push(note); }
+  }
+  if (!found) { return {c_error: true__PASSTHROUGH__}; }
+  let next: number = state.c_nextId;
+  if (state.c_editId === 0) { notes.push({id: next, text: strings.trim(state.c_draft)}); next = next + 1; }
+  return {c_screen: "notes", c_notes: notes, c_nextId: next, c_draft: "", c_editId: 0, c_error: false__PASSTHROUGH__};
+}
+function c_remove(state: AppState, value: number): AppState {
+  let notes: C_Note[] = [];
+  for (let note: C_Note of state.c_notes) { if (note.id !== value) { notes.push(note); } }
+  return {c_notes: notes__PASSTHROUGH__};
+}
+function c_view_home(state: AppState): ui.View {
+  let children: ui.View[] = [ui.Text("heading", "Notes overview"), ui.Text("body", ui.numberToString(state.c_notes.length()) + " notes")];
+  for (let note: C_Note of state.c_notes) { children.push(ui.Text("body", note.text)); }
+  children.push(ui.Button("primary", "Notes", "c_list", 0, true));
+  return ui.Screen("home", children);
+}
+function c_view_notes(state: AppState): ui.View {
+  let children: ui.View[] = [ui.Text("heading", "Notes"), ui.Button("primary", "Add note", "c_edit", 0, true), ui.Button("secondary", "Overview", "c_home", 0, true)];
+  for (let note: C_Note of state.c_notes) {
+    children.push(ui.Text("body", note.text));
+    children.push(ui.Button("secondary", "Edit", "c_edit", note.id, true));
+    children.push(ui.Button("secondary", "Remove", "c_remove", note.id, true));
+  }
+  children.push(ui.BackHandler("c_home"));
+  return ui.Screen("notes", children);
+}
+function c_view_editor(state: AppState): ui.View {
+  let children: ui.View[] = [ui.Text("heading", "Edit note"), ui.TextField("default", "Note", state.c_draft, "c_type"), ui.Button("primary", "Save", "c_save", 0, true), ui.Button("secondary", "Cancel", "c_cancel", 0, true), ui.BackHandler("c_cancel")];
+  if (state.c_error) { children.push(ui.Text("body", "Enter a note or return to the list.")); }
+  return ui.Screen("editor:" + ui.numberToString(state.c_editId), children);
+}
+</functions>
+<view>
+if (state.c_screen === "notes") { sections.push(c_view_notes(state)); }
+else if (state.c_screen === "editor") { sections.push(c_view_editor(state)); }
+else { sections.push(c_view_home(state)); }
+</view>

@@ -534,6 +534,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
       widgetRefinementError: loadVera('VeraCompiler').widgetRefinementError,
       validateWidgetOffMain: async (...args) => validateWidgetRefinement(...args),
       compileVeraSource, spliceWidget, smokeRun, widgetRefinementPrompt, Curve: {EaseInOut: 'ease-in-out'},
+      ...loadVera('VeraAppRefine'),
       serverUrl: () => 'http://fixture.invalid', http: {RequestMethod: {POST: 'POST'}, createHttp: () => ({
         async request(url, options) { serverRequests.push({url, ...options}); assert(serverResponse); return serverResponse },
         destroy() {}

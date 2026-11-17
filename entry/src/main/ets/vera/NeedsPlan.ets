@@ -39,6 +39,10 @@ const QUANTITIES: string[][] = [['clock.remaining', 'remaining'], ['clock.elapse
   ['entries.count', 'entryCount'], ['entries.total', 'entryTotal']]
 
 export class Need {
+  /** Stable within a plan; old one-screen replies receive a positional id. */
+  id: string = ''
+  /** References to needs whose data this presentation uses, not copies of their collections. */
+  uses: string[] = []
   /** One of NEED_TYPES. */
   type: string = NEED_OTHER
   /** The need's own words: what it is, for the question of what does it. */
@@ -55,10 +59,29 @@ export class Need {
   from: string = ''
 }
 
+export class NeedScreen {
+  id: string = ''
+  needs: string[] = []
+}
+
+export class NeedTransition {
+  from: string = ''
+  to: string = ''
+  on: string = ''
+  /** Optional need id followed by .id: the selected record, never its array position. */
+  record: string = ''
+}
+
 export class NeedsPlan {
+  /** Effective request after blocking questions, set by composeNeeds before the app handoff. */
+  request: string = ''
   /** Title, eyebrow, subtitle, inputs, constants, questions: as the composer's plan has them. */
   base: Record<string, Object> = {}
   needs: Need[] = []
+  /** Omitted in old replies and ordinary one-screen apps. */
+  screens: NeedScreen[] = []
+  startScreen: string = ''
+  transitions: NeedTransition[] = []
 }
 
 /**
@@ -87,7 +110,7 @@ export const NEEDS_PROMPT: string =
   '    "unit": the currency or unit it is shown in, "query": 3 to 8 words a web search finds it with as it is now},\n' +
   '   {"type": "countdown", "label": what is being timed, "length": the id of the input, constant or figure that sets how long it runs},\n' +
   '   {"type": "stopwatch", "label": what is being timed},\n' +
-  '   {"type": "entries", "label": what the entries are, "fields": what each entry holds, up to 4: [{"id": camelCase, "label": shown label,\n' +
+  '   {"type": "entries", "label": what the entries are, "fields": what each entry holds, up to 4 for a one-screen app: [{"id": camelCase, "label": shown label,\n' +
   '    "kind": "text" | "number" | "time" | "date" | "toggle" ("date" for a calendar day: an expiry, a due date, a birthday), "measure": ' +
   'for a number, as for inputs, "unit": as for inputs, "value": starting value,\n' +
   '    "decimals": for a plain number, as for a figure}] (no fields when adding an entry takes only a tap)},\n' +
@@ -108,6 +131,15 @@ export const NEEDS_PROMPT: string =
   'The quantities a figure may read: entries.count and entries.total (the first number field of the entries added up) when there are entries; ' +
   'clock.remaining, clock.elapsed and clock.duration, in seconds, when there is a countdown; clock.elapsed, in seconds, when there is a stopwatch. ' +
   'The app keeps its state between visits. ' +
+  'When the request needs distinct screens or an editor/detail flow, add optional top-level screens, startScreen and transitions to this SAME reply. ' +
+  'Do not add screens to an ordinary calculator, form, timer or simple list just to separate related information. Never add screens for a chat widget. ' +
+  'For a multi-screen app give EVERY need a unique camelCase id (including entries, content and other). Each collection has ONE owning need; ' +
+  'another presentation, editor, summary or history refers to that need with uses: [need ids], never duplicates its records. ' +
+  'screens: [{"id": camelCase, "needs": [need ids shown or edited here]}], startScreen: one screen id, ' +
+  'transitions: [{"from": screen id, "to": screen id, "on": what the person does, "record": optional "owningNeed.id"}]. ' +
+  'Use 2 to 8 screens only when warranted. Every screen is reachable from startScreen through these transitions. ' +
+  'Include navigation, selected-record behavior and Save/Cancel in the relevant needs, not external phone actions. ' +
+  'A list shown on several screens or in an editor remains one collection with stable record IDs. ' +
   'A live figure is a number of the real world that changes by itself and that the app fetches from the internet as it is now and keeps up to date: ' +
   'a price, an exchange rate, an index, the weather now, a live score; at most 3, and the app shows each with where and when it was read. ' +
   'It is never also a figure or content; a figure worked out from it (what the person\'s coins are worth) is a figure whose formula reads its id, and ' +
@@ -210,13 +242,17 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
   let keep: string[] = ['title', 'eyebrow', 'subtitle', 'inputs', 'constants', 'questions']
   for (let key of keep) { if (o[key] !== undefined) { plan.base[key] = o[key] } }
   let needs = o['needs']
-  if (!Array.isArray(needs)) { return plan }
+  if (!Array.isArray(needs)) { return o['screens'] === undefined ? plan : null }
   for (let item of needs as Object[]) {
     if (item === null || typeof item !== 'object') { continue }
     let raw = item as Record<string, Object>
     let type = text(raw, 'type')
     if (NEED_TYPES.indexOf(type) < 0) { continue }
     let need = new Need()
+    need.id = text(raw, 'id') || 'need' + plan.needs.length.toString()
+    let uses = raw['uses']
+    if (uses !== undefined && (!Array.isArray(uses) || (uses as Object[]).some((v: Object): boolean => typeof v !== 'string'))) { return null }
+    need.uses = uses === undefined ? [] : (uses as string[]).slice()
     need.type = type
     need.raw = raw
     if (type === NEED_FIGURE) {
@@ -237,7 +273,63 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
     }
     plan.needs.push(need)
   }
+  if (!readScreens(plan, o)) { return null }
   return plan
+}
+
+/** Screen plans are validated before they can bypass the one-screen composer. No guessed dangling references. */
+function readScreens(plan: NeedsPlan, raw: Record<string, Object>): boolean {
+  let screens = raw['screens']
+  if (screens === undefined) { return raw['startScreen'] === undefined && raw['transitions'] === undefined }
+  if (!Array.isArray(screens) || screens.length < 1 || screens.length > 8) { return false }
+  let validId = (id: string): boolean => /^[a-z][A-Za-z0-9_]{0,47}$/.test(id)
+  let ids: string[] = []
+  for (let n of plan.needs) {
+    if (!validId(text(n.raw, 'id')) || ids.indexOf(n.id) >= 0) { return false }
+    ids.push(n.id)
+  }
+  for (let n of plan.needs) {
+    if (n.uses.some((id: string): boolean => ids.indexOf(id) < 0 || id === n.id)) { return false }
+  }
+  let screenIds: string[] = []
+  for (let item of screens as Object[]) {
+    if (item === null || typeof item !== 'object') { return false }
+    let value = item as Record<string, Object>
+    let screen = new NeedScreen()
+    screen.id = text(value, 'id')
+    if (!validId(screen.id) || screenIds.indexOf(screen.id) >= 0) { return false }
+    let refs = value['needs']
+    if (!Array.isArray(refs) || refs.some((id: Object): boolean => typeof id !== 'string' || ids.indexOf(id as string) < 0)) { return false }
+    screen.needs = (refs as string[]).slice()
+    screenIds.push(screen.id)
+    plan.screens.push(screen)
+  }
+  plan.startScreen = text(raw, 'startScreen')
+  if (screenIds.indexOf(plan.startScreen) < 0) { return false }
+  let transitions = raw['transitions']
+  if (transitions !== undefined && !Array.isArray(transitions)) { return false }
+  for (let item of (transitions ?? []) as Object[]) {
+    if (item === null || typeof item !== 'object') { return false }
+    let value = item as Record<string, Object>
+    let t = new NeedTransition()
+    t.from = text(value, 'from'); t.to = text(value, 'to'); t.on = text(value, 'on'); t.record = text(value, 'record')
+    if (value['record'] !== undefined && typeof value['record'] !== 'string') { return false }
+    // A bare declared owner names the same record source. Canonicalize locally rather than buying another plan.
+    if (ids.indexOf(t.record) >= 0) { t.record += '.id' }
+    if (screenIds.indexOf(t.from) < 0 || screenIds.indexOf(t.to) < 0 || t.on.length === 0) { return false }
+    if (t.record.length > 0 && (!t.record.endsWith('.id') || ids.indexOf(t.record.substring(0, t.record.length - 3)) < 0)) { return false }
+    plan.transitions.push(t)
+  }
+  let reached: string[] = [plan.startScreen]
+  for (let i = 0; i < screenIds.length; i++) {
+    for (let t of plan.transitions) { if (reached.indexOf(t.from) >= 0 && reached.indexOf(t.to) < 0) { reached.push(t.to) } }
+  }
+  return reached.length === screenIds.length
+}
+
+/** Only metadata and questions, not the lossy one-list/one-clock projection, for the app-plan handoff. */
+export function planningSketch(plan: NeedsPlan): Sketch | null {
+  return plan.screens.length > 1 ? parseSketch(JSON.stringify(plan.base)) : sketchFrom(plan)
 }
 
 /** The first need of a type, or null. One countdown, one stopwatch and one list of entries make a screen: a second is left to `other`. */
@@ -377,6 +469,13 @@ export function dropUnasked(plan: NeedsPlan, request: string): string[] {
     }
   }
   plan.needs = kept
+  // Do not hand a writer references to a need the request never asked for.
+  let ids = kept.map((n: Need): string => n.id)
+  for (let n of kept) { n.uses = n.uses.filter((id: string): boolean => ids.indexOf(id) >= 0) }
+  for (let s of plan.screens) { s.needs = s.needs.filter((id: string): boolean => ids.indexOf(id) >= 0) }
+  for (let t of plan.transitions) {
+    if (t.record.length > 0 && ids.indexOf(t.record.substring(0, t.record.length - 3)) < 0) { t.record = '' }
+  }
   return dropped
 }
 

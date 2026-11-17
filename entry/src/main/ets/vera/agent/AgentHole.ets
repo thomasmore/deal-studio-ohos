@@ -145,6 +145,7 @@ export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[
     return none
   }
   let asked = new CustomRequest()
+  asked.appPlan = plan.appPlan
   asked.needs = slots.map((s: PlanSlot): string => s.need)
   asked.prompt = prompt
   asked.inputs = hints
