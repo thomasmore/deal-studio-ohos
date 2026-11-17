@@ -15,6 +15,7 @@ import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { decodeGfx, pointerValue } from './VeraGfx'
 import { checkWidget } from './VeraWidgetRefine'
+import { checkScreenReachability } from './VeraReachability'
 
 /** Twice through the handlers: a list's second entry, a toggle switched back. */
 const PASSES: number = 2
@@ -87,6 +88,12 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
     if (requireContent && nodes < 2) { return 'The program compiled, but view() drew an empty screen' }
   } catch (e) {
     return diagnostic(e as Error, 'when the program starts')
+  }
+  // Reachability starts from fresh state and uses only rendered controls, never the synthetic
+  // all-handler state below. Return its diagnostic through the same existing repair loop.
+  if (screens.length > 1) {
+    let reach = checkScreenReachability(compiled.vbc2, screens)
+    if (reach.diagnostic.length > 0) { return reach.diagnostic }
   }
   let tapped: string[] = []
   for (let pass = 0; pass < PASSES; pass++) {

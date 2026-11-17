@@ -57,6 +57,9 @@ async function main() {
   const filtered = parse(withExtra); assert.equal(np.dropUnasked(filtered, 'Notes with an editor').length, 1); assert.ok(!filtered.screens[0].needs.includes('extra')); assert.deepEqual(filtered.needs[1].uses, ['notes']); checks++
   const {host, seen} = hostFor(); const built = await run(host); assert.equal(built.kind, 'agent', built.reason); assert.ok(built.agent.vbc2, built.agent.errors); assert.equal(seen.plans.length, 1); assert.equal(seen.code.length, 1); assert.equal(seen.holes, 1); assert.equal(seen.fills, 0); assert.equal(built.agent.record, null); assert.equal(built.agent.composed.parsed, null); assert.equal(built.agent.blocks.length, 0); assert.equal(built.agent.composed.appPlan.screens.length, 3); checks++
   assert.match(seen.code[0].system, /Declaring a handler is not enough/); assert.match(seen.code[0].system, /Screen\(/); assert.match(seen.code[0].system, /BackHandler/); assert.match(seen.code[0].user, /"uses":\["notes"\]/); assert.doesNotMatch(seen.code[0].system, /no second view/); assert.ok(seen.code[0].budget < 3 * 8000); checks++
+  assert.match(seen.code[0].system, /date drafts start at time\.daysSinceEpoch\(\)/)
+  assert.match(seen.code[0].system, /reset to time\.daysSinceEpoch\(\) after Add\/Save\/reset/)
+  assert.match(seen.code[0].system, /Editing copies the saved date unchanged/); checks++
   const compiled = compileVeraSource(built.agent.source); assert.equal(smokeRun(compiled), ''); const env = new UiHostEnvironment(); const vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), env); let state = vm.execute('init')
   const field = key => state.fields.get('c_' + key)
   const tap = (handler, value = 0) => { state = vm.execute(handler, [state, typeof value === 'string' ? new VeraStringValue(value) : new VeraNumberValue(value)]) }
@@ -80,6 +83,12 @@ async function main() {
   const dead = await run(hostFor(plan(), unbound).host); assert.equal(dead.kind, 'not-built'); assert.match(dead.reason, /c_remove has no control or caller reference/); checks++
   const retryHost = hostFor(plan(), n => n === 1 ? unbound : good); const retried = await run(retryHost.host); assert.equal(retried.kind, 'agent', retried.reason); assert.equal(retryHost.seen.code.length, 2); checks++
   const custom = loadVera('agent/AgentCustom'); const verification = new custom.CustomRequest(); verification.appPlan = parse(plan()); verification.needs = ['Delete a record']; assert.match(JSON.parse(custom.verifyRequest(verification, good)).state, /local AppState changes/); checks++
+  const blockedNavigation = good.replace('"Notes", "c_list", 0, true', '"Notes", "c_list", 0, false')
+  const reachRetry = hostFor(plan(), n => n === 1 ? blockedNavigation : good)
+  const reachRepaired = await run(reachRetry.host)
+  assert.equal(reachRepaired.kind, 'agent', reachRepaired.reason); assert.equal(reachRetry.seen.code.length, 2)
+  assert.match(reachRetry.seen.code[1].user, /Screen reachability check failed/)
+  assert.match(reachRetry.seen.code[1].user, /notes, editor/); checks++
   const qPlan = n => Object.assign(plan(), n === 1 ? {questions: [{id: 'subject', ask: 'Which notes?', options: ['Work', 'Home'], default: 0}]} : {})
   const clarified = hostFor(qPlan); clarified.host.askJev = async body => JSON.parse(body).questions['blocking.0'] ? '{"answers":{"blocking.0":{"probabilities":{"ask":1,"skip":0}}}}' : ''; clarified.host.ask = async () => 1
   const q = await run(clarified.host); assert.equal(q.kind, 'agent', q.reason); assert.equal(clarified.seen.plans.length, 2); assert.match(clarified.seen.code[0].user, /Which notes\? Home/); assert.equal(q.agent.asked.length, 1); checks++

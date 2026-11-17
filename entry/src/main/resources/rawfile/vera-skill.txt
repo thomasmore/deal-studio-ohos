@@ -114,6 +114,9 @@ Clock -- time. All functions return a number:
   time.monthOfYear()     1..12
   time.year()
 Read the clock in init or handlers and store results in state, never in view.
+Date defaults: initialize every new date draft to time.daysSinceEpoch(), unless the request specifies another date.
+After Add/Save/reset, reset the new-record date draft to time.daysSinceEpoch(), never 0.
+Zero is a real day (1 Jan 1970), not an empty date or today. When editing, copy and preserve the record's stored date, including 0 if intentional; do not replace existing dates with today.
 Store needed calendar fields when an entry is created. A stored day number has no date conversion API.
 Use ui.Ticker for a displayed timer, with its catalogue signature and a number elapsedMs handler.
 Accumulate elapsedMs, not the number of callbacks. Match the interval to the displayed precision.

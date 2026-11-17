@@ -434,7 +434,7 @@ export const CATALOG: ComponentSpec[] = [
     [style('datefield'), new PropSpec('label', 'string'), new PropSpec('value', 'number'),
       new PropSpec('action', 'string')],
     'a calendar date, as a local day number; the handler takes (state, value: number)', 'number',
-    'For a date the person chooses -- a due date, a birthday, a trip. The value is the day number time.daysSinceEpoch() returns, so start it at today with time.daysSinceEpoch(), compare it with today directly, and subtract two of them for a count of days. ui.dateToString(day) writes it as "30 Oct 2026" inside another component\'s text; (day + 4) % 7 is its weekday, 0=Sunday, as time.weekday() counts. Pair it with ui.TimeField for a date and a time.'),
+    'For a date the person chooses -- a due date, a birthday, a trip. The value is the day number time.daysSinceEpoch() returns, so initialize new date drafts AND reset them after Add/Save with time.daysSinceEpoch(), never 0 (which means 1 Jan 1970), unless another default is explicitly requested. When editing, preserve the stored date. Read the clock in init or handlers, not view. Compare it with today directly, and subtract two of them for a count of days. ui.dateToString(day) writes it as "30 Oct 2026" inside another component\'s text; (day + 4) % 7 is its weekday, 0=Sunday, as time.weekday() counts. Pair it with ui.TimeField for a date and a time.'),
   new ComponentSpec('NumberListItem', 'numberlistitem',
     [style('numberlistitem'), new PropSpec('title', 'string'), new PropSpec('subtitle', 'string'),
       new PropSpec('value', 'number'), new PropSpec('prefix', 'string'),
