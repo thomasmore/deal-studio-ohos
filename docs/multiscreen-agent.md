@@ -22,6 +22,18 @@ Current checks: **38 app-plan checks**, the same 16 existing suites, and a nativ
 
 This is a demo-scoped review candidate, not a product-quality sign-off. Remaining observed break: heuristic semantic verification can still reject a multi-screen editor. No further machinery was added to chase this result.
 
+## Deterministic reachability gate (subsequent local change)
+
+`VeraReachability.ets` now drives fresh VM state through the actual decoded UI. A bounded breadth-first search fills visible fields and executes enabled controls with their rendered payloads. Each declared screen must be observed through `view()`; directly invoking a `c_view_*` function is not evidence of reachability. `smokeRun` returns missing-screen diagnostics through the existing writer/repair/refinement validation paths. No additional model stage or model-authored test journey.
+
+The reported book-lending bug is reproduced: stored `"loan-1"` becomes row payload `0`, and the details view is never reached. The check rejects that exact generated source. A disposable host-only copy using a numeric-compatible ID passes with a concrete fill → Add → row-tap witness. The user's phone app and record were not modified.
+
+Run `node tools/vera-harness/reachability-check.js /path/app.vera` (with the existing `VERA_TYPESCRIPT_PATH` environment). JSON includes reached/missing screens, witness paths, observations and search limits; exit 1 means repair is needed. Bare invocation runs regressions. The clock and traversal order are fixed; branches are deep-cloned and external effects are never executed. Bounds are 192 states, 768 actions, depth 16 and 2M aggregate VM steps checked between calls, with 100K steps per call. This is a deterministic acceptance gate, not proof of impossibility: unusual input requirements or external prerequisites can produce a missing-witness diagnostic.
+
+Generation instructions in the language skill, UI catalogue and shared-app contract also require new date drafts to initialize and reset to `time.daysSinceEpoch()`, rather than `0` (1 January 1970). Editing preserves the stored date, including intentional epoch dates. This is prompt guidance, not renderer coercion or a guarantee that every model output complies.
+
+These changes are later than the benchmarked PR build; earlier measurements do not include them. Both changes were built with 0 diagnostics and installed in place on the phone, preserving app identity and first-install time. Host validation: 11 reachability regressions, 40 app-plan checks and 19 other suites. The book-ID bug is rejected and a corrected disposable host copy passes; six historical multi-screen sources also pass. No successful live LLM repair caused by this gate has yet been demonstrated: the observed phone retry chose the legacy single-screen path and bypassed the gate. The gate requires declared/inferred named screens; navigation hidden in a flat single-screen composition is not covered.
+
 ## Implementation
 
 - `NeedsPlan.ets` adds stable need IDs, `uses` references, optional `screens`, `startScreen` and `transitions` to the existing planning reply. There is no extra planning round solely to discover screens. IDs, ownership references, starting screen, transitions and reachability are checked locally. A bare declared record owner is normalized to `owner.id`; invalid/non-string references are rejected.

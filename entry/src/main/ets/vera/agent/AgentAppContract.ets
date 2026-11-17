@@ -24,6 +24,8 @@ export const APP_CONTRACT: string = '\n\nWrite ONE shared contribution implement
   'Never make a separate authoritative collection for each presentation. Use stable generated record IDs, never positions, for selection, edits and callbacks.\n' +
   '- Opening an editor copies record fields into isolated draft fields. Typing never changes a saved record. Save validates and commits a copied record/array. ' +
   'Cancel and Back discard the draft. A new editor starts fresh. Domain Save is required when requested; project persistence itself needs no Save button.\n' +
+  '- New-record date drafts start at time.daysSinceEpoch() and reset to time.daysSinceEpoch() after Add/Save/reset, unless another default is explicitly requested. ' +
+  'Never use 0 as an empty date or today: it means 1 Jan 1970. Editing copies the saved date unchanged, including an intentional 0. Read the clock in init or handlers, not views.\n' +
   '- Every named view must draw safely with the initial empty state or a missing/deleted selection, even when it is not the starting view: show an empty state or a return path, never index an absent record. ' +
   'Keep validation near the action and show errors only after a commit attempt. Empty user-owned collections have a way to add records.\n' +
   '- Keep immutable state: copy arrays and records before changes. Async results update shared records by stable ID, keep failure/pending states visible, ' +
