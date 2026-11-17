@@ -167,9 +167,12 @@ function withAlpha(color: string, alpha: number): string {
   return '#' + (a.length < 2 ? '0' + a : a) + color.substring(1)
 }
 
-/** Whether a handler gave back the state it was given: the same value, or one that encodes the same (a small state, cheap). */
-function sameState(a: RuntimeValue, b: RuntimeValue): boolean {
-  return a === b || JSON.stringify(encodeRuntimeValue(a)) === JSON.stringify(encodeRuntimeValue(b))
+/**
+ * A state as it encodes, for telling whether a handler changed it. Taken before the handler runs: a handler may change
+ * the state it was given in place and give back that same object, so the object itself proves nothing afterwards.
+ */
+function stateCode(state: RuntimeValue): string {
+  return JSON.stringify(encodeRuntimeValue(state))
 }
 
 /** Whether a moving part's trigger is the one it last had: NaN (a trigger worked out as math.sqrt of a negative number) is the same as NaN, or it would restart every paint. */
@@ -583,6 +586,8 @@ export struct VeraPreview {
   private lastFrameAt: number = 0
   private lastViewAt: number = 0
   private lastSurfaceSave: number = 0
+  /** A world's knock changed the state and it has not been saved since (it is saved with the next event, save or exit). */
+  private worldUnsaved: boolean = false
   private framing: boolean = false
   /** Frames since the last VERA-SURFACE rate line, and the ms they spent in the program and painting, worst included. */
   private frameCount: number = 0
@@ -998,8 +1003,9 @@ export struct VeraPreview {
     this.stopAllTimers()
     // Each world's scene goes once its Component3D has (WorldBox.retire).
     this.retireWorlds()
-    // A running surface saves every few seconds; the frames since the last save would otherwise be lost.
-    if (this.liveSurfaces.length > 0 && !this.previewOnly) { this.persistState() }
+    // A running surface saves every few seconds, and a world's knocks with the next event; what came since the last save
+    // would otherwise be lost.
+    if ((this.liveSurfaces.length > 0 || this.worldUnsaved) && !this.previewOnly) { this.persistState() }
     // The same applies to the dark-mode listener: it holds this component, and
     // its callback re-enters the VM.
     if (this.darkListener !== null) {
@@ -1074,6 +1080,7 @@ export struct VeraPreview {
       let encoded = JSON.stringify(encodeRuntimeValue(this.currentState!))
       store.saveState(keys[0], keys[1], this.stamp(), encoded)
       this.diskState = encoded
+      this.worldUnsaved = false
       scheduleCardRefresh(keys[0])
     } catch (e) {
       // A program holding something unsaveable should still run; it just will
@@ -1421,7 +1428,14 @@ export struct VeraPreview {
     if (!this.liveSurfaces.some((node: LiveNode): boolean => node.action.length > 0)) {
       this.tickWorlds(now, elapsed)
       // Nothing moves any more (the dice lie still, nothing orbits): the next state change starts the loop again.
-      if (!this.disposed && !this.worldsNeedFrames()) { this.stopSurfaceLoop() }
+      let stopping = !this.disposed && !this.worldsNeedFrames()
+      // Knocks the program counted are saved every few seconds, and when the world comes to rest.
+      if (this.worldUnsaved && !this.disposed && this.fieldEdits.size === 0 &&
+        (stopping || now - this.lastSurfaceSave >= SURFACE_SAVE_MS)) {
+        this.lastSurfaceSave = now
+        this.persistState()
+      }
+      if (stopping) { this.stopSurfaceLoop() }
       return
     }
     this.framing = true
@@ -2227,11 +2241,14 @@ export struct VeraPreview {
     try {
       if (this.host !== null) { this.host!.effectsAllowed = true }
       let before = this.currentState!
+      let beforeCode = skipIfSame ? stateCode(before) : ''
       this.currentState = this.vm!.execute(action, [before, payload])
       if (this.host !== null) { this.host!.effectsAllowed = false }
       // A world's event that left the state as it was (a hit the program does not count, a tap on nothing) changes
-      // nothing on the screen: no build, no render, no save -- only what it asked of the phone, if anything.
-      if (skipIfSame && sameState(before, this.currentState!)) {
+      // nothing on the screen: no build, no render -- only what it asked of the phone, if anything. One that is saved
+      // (a settle, a tap) still saves what the knocks before it changed.
+      if (skipIfSame && stateCode(this.currentState!) === beforeCode) {
+        if (persist && this.worldUnsaved) { this.persistState() }
         this.drainEffects()
         return
       }
@@ -2241,7 +2258,12 @@ export struct VeraPreview {
       // What this tap makes appear -- a card it opens, a banner with its result -- is brought into view.
       armReveal(true)
       try { this.renderView() } finally { armReveal(false) }
-      if (persist) { this.persistState() }
+      if (persist) {
+        this.persistState()
+      } else {
+        // A knock is saved with the next settle, tap or periodic save, or when the screen goes (worldUnsaved).
+        this.worldUnsaved = true
+      }
       this.drainEffects()
     } catch (e) {
       if (this.host !== null) {
