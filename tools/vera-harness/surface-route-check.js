@@ -232,8 +232,10 @@ const brief = JSON.stringify({surface: true, title: 'Star Catch', design: 'Catch
 
   // Without "3D" in the request, a world brief is written flat: dice, planets or a tower may well be wanted in 2D. The
   // classifier is told which, and the host holds to it whatever it answers.
-  for (const p of ['3D dice game', 'a 3d solar system', 'three-dimensional tower', '三维骰子', '3D骰子', 'dice in 3 d']) assert.ok(S.asksFor3D(p), p + ' asks for 3D')
-  for (const p of ['dice game', 'solar system', 'knock down the tower', 'roll five dice', '3Dish', 'a d3 roller', 'roll 3d6 for my stats', 'roll 3 d20', '3D6 damage']) assert.ok(!S.asksFor3D(p), p + ' does not')
+  for (const p of ['3D dice game', 'a 3d solar system', 'three-dimensional tower', '三维骰子', '3D骰子', 'dice in 3 d', 'a 3-dimensional cube I can spin',
+    '3 dimensional maze', 'threedimensional planets', 'a 3D game with a 3D-printed look']) assert.ok(S.asksFor3D(p), p + ' asks for 3D')
+  for (const p of ['dice game', 'solar system', 'knock down the tower', 'roll five dice', '3Dish', 'a d3 roller', 'roll 3d6 for my stats', 'roll 3 d20', '3D6 damage',
+    'track my 3D-printer filament', 'log my 3D printing jobs', 'a list of 3D printed parts', 'a 13-dimensional table']) assert.ok(!S.asksFor3D(p), p + ' does not')
   host = mockHost({brief: worldBrief, code: ['```vera\n' + example + '\n```']})
   outcome = await route.buildScreen(request('dice game'), host)
   assert.equal(outcome.kind, route.OUTCOME_AGENT)

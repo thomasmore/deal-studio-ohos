@@ -182,7 +182,11 @@ const FAKE_WAKE_SPEED: number = 0.5
 const FAKE_SLEEP_SPEED: number = 0.05
 const FAKE_SLEEP_SPIN: number = 0.5
 const FAKE_SLEEP_AFTER_S: number = 0.5
-/** As the native library: every dynamic body sleeps this long after the last setVelocity. */
+/**
+ * As the native library: a dynamic body awake this long in a row while touching something is put to sleep. Each body
+ * has its own time, started again whenever it sleeps or is woken, placed, kicked or sent back by the bound; free flight
+ * does not count.
+ */
 const FAKE_SLEEP_CAP_S: number = 8
 
 class FakeBody {
@@ -200,6 +204,8 @@ class FakeBody {
   friction: number = 0.5
   awake: boolean = false
   still: number = 0
+  /** Seconds awake in a row while touching something, for the sleep cap. */
+  awakeFor: number = 0
   seed: number = 0
   /** Made as PHYS_CHARACTER: upright, turning about y only, no friction or bounce. */
   character: boolean = false
@@ -255,7 +261,6 @@ export class FakePhys implements PhysEngine {
   private lastActive: number[] = []
   private touching: Set<string> = new Set<string>()
   private contacts: number[] = []
-  private sinceVelocity: number = 0
   private serial: number = 0
   /** Simulated seconds so far, for checks. */
   simSeconds: number = 0
@@ -269,7 +274,6 @@ export class FakePhys implements PhysEngine {
     this.lastActive = []
     this.touching = new Set<string>()
     this.contacts = []
-    this.sinceVelocity = 0
   }
 
   setGravity(y: number): void { this.gravity = y }
@@ -361,7 +365,6 @@ export class FakePhys implements PhysEngine {
     b.v = [vx, vy, vz]
     b.w = b.character ? [0, wy, 0] : [wx, wy, wz]
     if (b.kind === PHYS_DYNAMIC) { this.wake(b) }
-    this.sinceVelocity = 0
   }
 
   drive(i: number, vx: number, vz: number, wy: number): void {
@@ -369,10 +372,7 @@ export class FakePhys implements PhysEngine {
     let b = this.bodies[i]
     b.v = [vx, b.v[1], vz]
     b.w = [0, wy, 0]
-    if (vx !== 0 || vz !== 0 || wy !== 0) {
-      this.wake(b)
-      this.sinceVelocity = 0
-    }
+    if (vx !== 0 || vz !== 0 || wy !== 0) { this.wake(b) }
   }
 
   sleep(i: number): void {
@@ -397,6 +397,7 @@ export class FakePhys implements PhysEngine {
   private wake(b: FakeBody): void {
     b.awake = true
     b.still = 0
+    b.awakeFor = 0
   }
 
   private extents(b: FakeBody): void {
@@ -525,6 +526,7 @@ export class FakePhys implements PhysEngine {
   private fallAsleep(b: FakeBody): void {
     b.awake = false
     b.still = 0
+    b.awakeFor = 0
     b.v = [0, 0, 0]
     b.w = [0, 0, 0]
     if (!b.character) { this.snap(b) }
@@ -582,8 +584,12 @@ export class FakePhys implements PhysEngine {
         for (let j of fixed) { this.resolve(i, b, j, this.bodies[j], 1 / b.mass, 0, h, now, pen) }
       }
     }
-    this.sinceVelocity += dt
     this.simSeconds += dt
+    let touched = new Set<number>()
+    now.forEach((c: number[]) => {
+      touched.add(c[0])
+      touched.add(c[1])
+    })
     let reset: number[] = []
     for (let i of moving) {
       let b = this.bodies[i]
@@ -601,7 +607,8 @@ export class FakePhys implements PhysEngine {
       let speed = Math.sqrt(b.v[0] * b.v[0] + b.v[1] * b.v[1] + b.v[2] * b.v[2])
       let spin = Math.sqrt(b.w[0] * b.w[0] + b.w[1] * b.w[1] + b.w[2] * b.w[2])
       b.still = speed < FAKE_SLEEP_SPEED && spin < FAKE_SLEEP_SPIN ? b.still + dt : 0
-      if (b.still >= FAKE_SLEEP_AFTER_S || this.sinceVelocity > FAKE_SLEEP_CAP_S) { this.fallAsleep(b) }
+      if (touched.has(i)) { b.awakeFor += dt }
+      if (b.still >= FAKE_SLEEP_AFTER_S || b.awakeFor > FAKE_SLEEP_CAP_S) { this.fallAsleep(b) }
     }
     let active: number[] = []
     for (let i of moving) { if (this.bodies[i].awake) { active.push(i) } }
@@ -1030,7 +1037,10 @@ export class WorldSim {
       this.held = true
     }
     let first = this.spec === null
-    if (first || diff.tableChanged || diff.floorChanged) { this.buildGround(next) }
+    if (first || diff.tableChanged || diff.floorChanged) {
+      this.buildGround(next)
+      if (!first) { this.wakeResting() }
+    }
     let freed = new Set<number>()
     // The player made again (a new mark, a new shape, or a body that only now became it) stays where the person took
     // it, not where it was built, and facing the way it faced -- but stood upright: a character turns only about y, so
@@ -1043,6 +1053,10 @@ export class WorldSim {
     }
     for (let id of diff.remove) { this.removeBody(id, freed) }
     for (let b of diff.recreate) { this.removeBody(b.id, freed) }
+    // A body to create that the engine already has: an apply that stopped half-way (the renderer's 3D side failed after
+    // this ran) is given again from the spec before it. Made again, not twice -- a second body under one id would stay
+    // in the engine, colliding, with nothing to draw it or remove it.
+    for (let b of diff.create) { this.removeBody(b.id, freed) }
     if (this.held && freed.size > 0) { this.dropPoses(freed) }
     let created: BodySpec[] = []
     for (let b of diff.recreate) {
@@ -1357,6 +1371,19 @@ export class WorldSim {
     } else {
       this.engine.setGravity(0)
       this.engine.setBound(-50, 50, 50)
+    }
+  }
+
+  /**
+   * The bodies at rest, woken after the ground they lay on was made again: taking a body away does not wake what rests
+   * on it, so dice on a table top that moved or went would stay asleep in the air until something hit them. A body still
+   * moving is left as it goes.
+   */
+  private wakeResting(): void {
+    for (let id of this.loose) {
+      let i = this.index.get(id)
+      if (i === undefined || this.engine.readVelocity(i, this.one) !== 1) { continue }
+      if (Math.hypot(this.one[0], this.one[1], this.one[2]) < 1e-6) { this.engine.setVelocity(i, 0, 0, 0, 0, 0, 0) }
     }
   }
 

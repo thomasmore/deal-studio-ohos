@@ -217,6 +217,11 @@ function nextFrame(): Promise<void> {
   return new Promise<void>((resolve: () => void) => { setTimeout(resolve, 16) })
 }
 
+/**
+ * Whether a world has something the host moves each frame without physics: an orbit, a spin, a route, a wander -- all
+ * kinematic. A swinging leg is not by itself: it swings only while its body goes (writeSwing), and asks for frames only
+ * then.
+ */
 function hasKinematic(spec: WorldSpec | null): boolean {
   if (spec === null) { return false }
   for (let b of spec.bodies) { if (b.motion === 'kinematic') { return true } }
@@ -226,16 +231,6 @@ function hasKinematic(spec: WorldSpec | null): boolean {
 function hasLoose(spec: WorldSpec | null): boolean {
   if (spec === null) { return false }
   for (let b of spec.bodies) { if (b.motion === 'loose') { return true } }
-  return false
-}
-
-/**
- * Whether a world has something the host moves each frame without physics: an orbit, a spin, a route. A swinging leg is
- * not by itself: it swings only while its body goes (writeSwing), and asks for frames only then.
- */
-function hasMoves(spec: WorldSpec | null): boolean {
-  if (spec === null) { return false }
-  for (let b of spec.bodies) { if (b.motion === 'kinematic') { return true } }
   return false
 }
 
@@ -1165,7 +1160,7 @@ export class WorldBox {
     }
     if (backdropChanged && !themeChanged) { this.writeBackground(theme) }
     this.showing = next
-    this.showingMoves = hasMoves(next)
+    this.showingMoves = hasKinematic(next)
     let player = playerOf(next)
     this.hasPlayer = player !== null
     this.action = player !== null ? (player.player as ScenePlayer).action : ''
@@ -1181,7 +1176,11 @@ export class WorldBox {
       this.removeBody(b.id)
       creating.push(b)
     }
-    for (let b of diff.create) { creating.push(b) }
+    for (let b of diff.create) {
+      // Already here after an apply that failed half-way (applied was left at the spec before it): made again, not twice.
+      if (this.bodies.has(b.id)) { this.removeBody(b.id) }
+      creating.push(b)
+    }
     // Every body still here takes the spec it now has (orbits, spins and later physics read it).
     let fresh = new Set<string>()
     for (let b of creating) { fresh.add(b.id) }

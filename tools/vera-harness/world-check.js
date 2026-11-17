@@ -682,12 +682,14 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     assert.deepEqual(boxPose.slice(3), [0, 0, 0, 1], 'a box that is not a die starts as written')
   }
   // Six hundred throws of world-dice on FakePhys (whose dice tumble only roughly and lie flat by a snap): the faces spread.
+  // Ten seconds a throw: two dice caught jittering on each other are stopped by each one's own sleep cap (8 s of touching),
+  // one after the other, so the rare throw that ends that way settles a little after 9 s.
   {
     const counts = [0, 0, 0, 0, 0, 0, 0]
     let repeats = 0, last = 0
     const presses = new Set()
-    for (let k = 0; k < 600; k++) presses.add(30 + k * 540)
-    const {log} = play('world-dice', {frames: 30 + 600 * 540, onFrame: (f, st, vm) => presses.has(f) ? vm.execute('onThrow', [st, new VeraNumberValue(0)]) : null})
+    for (let k = 0; k < 600; k++) presses.add(30 + k * 600)
+    const {log} = play('world-dice', {frames: 30 + 600 * 600, onFrame: (f, st, vm) => presses.has(f) ? vm.execute('onThrow', [st, new VeraNumberValue(0)]) : null})
     const settles = log.filter(e => e.kind === 'settled')
     assert.equal(settles.length, 600, 'six hundred throws, six hundred settles')
     for (const e of settles) { const v = e.values[0]; counts[v]++; repeats += v === last ? 1 : 0; last = v }
@@ -1211,6 +1213,66 @@ assert.ok(/stopped when the program starts/.test(smoke) && /two bodies have the 
   assert.ok(/\*length = vphys::FloatCapacity\(jsLength, reported, bufferBytes, offset\)/.test(fa), 'FloatArray sizes by FloatCapacity')
   assert.ok(/napi_get_typedarray_info\(env, v, &type, &reported,/.test(fa), "the typed array's own length is only an upper bound")
   assert.ok(!/napi_get_typedarray_info\([^)]*\blength\b/.test(glue), 'no write is sized by the reported length')
+}
+
+// FakePhys's sleep cap as the native one's: each body's own, counting only time spent touching something.
+{
+  const P = loadVera('VeraPhysics')
+  const fp = new P.FakePhys()
+  fp.setGravity(-9.81)
+  fp.setBound(-5, 99, 99)
+  const floor = fp.addBox(50, 0.5, 50, P.PHYS_STATIC)
+  fp.setPose(floor, 0, -0.5, 0, 0, 0, 0, 1)
+  const a = fp.addBox(0.05, 0.05, 0.05, P.PHYS_DYNAMIC)
+  fp.setPose(a, 0, 0.05, 0, 0, 0, 0, 1)
+  fp.setVelocity(a, 0, 0, 0, 0, 0, 0)
+  for (let k = 0; k < 600; k++) fp.step(1 / 60, 1)
+  const b = fp.addBox(0.05, 0.05, 0.05, P.PHYS_DYNAMIC)
+  fp.setPose(b, 2, 1, 0, 0, 0, 0, 1)
+  for (let k = 0; k < 60; k++) fp.step(1 / 60, 1)
+  const out = new Float32Array(7)
+  fp.readPose(b, out)
+  assert.ok(out[1] < 0.1, 'FakePhys: a body added 10 s after the last kick still falls: ' + out[1])
+  // No gravity, nothing to touch: a thrown body drifts on past the cap.
+  const space = new P.FakePhys()
+  space.setGravity(0)
+  space.setBound(-50, 50, 50)
+  const d = space.addBox(0.05, 0.05, 0.05, P.PHYS_DYNAMIC)
+  space.setPose(d, 0, 0, 0, 0, 0, 0, 1)
+  space.setVelocity(d, 1, 0, 0, 0, 0, 0)
+  for (let k = 0; k < 720; k++) space.step(1 / 60, 1)
+  space.readPose(d, out)
+  assert.ok(out[0] > 8 && space.awakeDynamic() === 1, 'FakePhys: free flight is not stopped by the sleep cap: ' + out[0])
+}
+// The ground made again (a table that goes, a new floor): bodies resting on the old one are woken to fall or settle on the
+// new one, instead of hanging asleep where the old ground was. A body still moving is left as it goes.
+{
+  const P = loadVera('VeraPhysics')
+  const fp = new P.FakePhys()
+  const sim = new P.WorldSim(fp)
+  const dice = [call('loose', call('die', 'd1', 0, 0.15, 0, 0.3, 'white'), 1)]
+  const onTable = world([call('table', 1.2, 0.9, 'surface'), call('floor', 'surface'), ...dice])
+  sim.apply(S.diffWorld(null, onTable), onTable)
+  for (let k = 0; k < 120; k++) sim.step(1000 / 60, k / 60)
+  const die = () => fp.bodies.find(b => b.alive && b.kind === P.PHYS_DYNAMIC)
+  assert.equal(die().awake, false, 'the die rests asleep on the table')
+  const noTable = world([call('floor', 'surface'), ...dice])
+  sim.apply(S.diffWorld(onTable, noTable), noTable)
+  assert.equal(die().awake, true, 'the table gone, the die resting on it is woken')
+  for (let k = 0; k < 180; k++) sim.step(1000 / 60, 2 + k / 60)
+  assert.equal(die().awake, false, 'and settles again on the floor')
+}
+// An apply given again after one that stopped half-way (the 3D side failed): bodies already made are made again, not twice.
+{
+  const P = loadVera('VeraPhysics')
+  const fp = new P.FakePhys()
+  const sim = new P.WorldSim(fp)
+  const w1 = world([call('floor', 'surface')])
+  const w2 = world([call('floor', 'surface'), call('loose', call('box', 'x', 0, 0.5, 0, 0.2, 0.2, 0.2, 'ink'), 1)])
+  sim.apply(S.diffWorld(null, w1), w1)
+  sim.apply(S.diffWorld(w1, w2), w2)
+  sim.apply(S.diffWorld(w1, w2), w2)
+  assert.equal(fp.bodies.filter(b => b.alive && b.kind === P.PHYS_DYNAMIC).length, 1, 'one body for x, not two')
 }
 
 console.log('world-check ok')

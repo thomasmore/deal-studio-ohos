@@ -546,6 +546,21 @@ void TestSleepCap()
     }
     std::printf("      on a shaking paddle: awake %d of %d steps\n", awakeSteps, 60 * 12);
     Check(awakeSteps > 60 * 8 - 10, "sleep cap: a body pushed all along stays awake up to its cap");
+    // In a world without gravity a thrown body drifts on (slowed only by its damping, 9 m in 12 s): free flight is not
+    // counted by the cap.
+    vphys::PhysWorld g;
+    g.init(64, 0);
+    g.setGravity(0);
+    g.setBound(-50, 50, 50);
+    int d = g.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    g.setPose(d, 0, 0, 0, 0, 0, 0, 1);
+    g.setVelocity(d, 1, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 60 * 12; i++) {
+        g.step(kDt, 1);
+    }
+    g.readPose(d, p);
+    std::printf("      drifting without gravity for 12 s: x = %.2f, awake %d\n", p[0], g.awakeDynamic());
+    Check(p[0] > 8.5f && g.awakeDynamic() == 1, "sleep cap: a body in free flight is not stopped in mid-air");
 }
 
 // Bodies of any shape: records of convex parts (PhysWorld::addParts), one rigid body. A prism is an outline's corners at

@@ -377,14 +377,17 @@ public:
         // The sleep cap is per body: one awake for kSleepCapSeconds in a row (jittering, or kept
         // awake by a neighbour that never rests) is put to sleep. Its time restarts whenever it
         // sleeps or is placed, created or kicked, so a new body or one woken by a push still moves.
+        // Only time spent touching something counts: a body in free flight (thrown high, or drifting
+        // in a world without gravity, which the bound brings back) is never stopped in mid-air.
         for (size_t i = 0; i < bodies_.size(); i++) {
             Slot &s = bodies_[i];
             if (!s.alive || s.kind != kDynamic) {
                 continue;
             }
+            bool touches = i < touchCount_ && touching_[i].load(std::memory_order_relaxed) != 0;
             if (!BI().IsActive(s.id)) {
                 s.awakeFor = 0;
-            } else if ((s.awakeFor += dt) > kSleepCapSeconds) {
+            } else if (touches && (s.awakeFor += dt) > kSleepCapSeconds) {
                 BI().DeactivateBody(s.id);
                 s.awakeFor = 0;
             }
@@ -714,6 +717,9 @@ private:
                                             JPH::Quat(s.home[3], s.home[4], s.home[5], s.home[6]),
                                             JPH::EActivation::Activate);
                 BI().SetLinearAndAngularVelocity(s.id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+                // Put back as setPose puts it: its sleep cap starts again, or one sent back late in its
+                // time would be frozen where it was built (in mid-air, for a body dropped from a height).
+                s.awakeFor = 0;
                 moved.push_back(static_cast<int>(i));
             }
         }
