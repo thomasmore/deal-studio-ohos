@@ -143,7 +143,7 @@ if (!baseline) {
    let change, renders=0, density=1
    const listener={matches:true,on(event,cb){events.push(event);change=cb},off(event){events.push('off:'+event)}}
    probe.getUIContext=()=>({getMediaQuery:()=>({matchMediaSync(query){queries.push(query);return listener}}),vp2px:value=>value*density})
-    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.invalidateEffects=()=>{};probe.flushFields=()=>{};probe.controller=null;probe.dark=false;probe.disposed=false;probe.liveSurfaces=[]
+    probe.renderView=()=>renders++;probe.stopAllTimers=()=>events.push('stop');probe.retireWorlds=()=>{};probe.invalidateEffects=()=>{};probe.flushFields=()=>{};probe.controller=null;probe.dark=false;probe.disposed=false;probe.liveSurfaces=[]
    probe.watchDarkMode();assert.deepEqual(queries,['(dark-mode: true)']);assert.equal(probe.dark,true);assert.equal(probe.darkListener,listener)
    change({matches:true});assert.equal(renders,0);change({matches:false});assert.equal(renders,1);assert.equal(probe.dark,false)
    for(density of [1,2,3.5]) {
@@ -184,7 +184,7 @@ if (!baseline) {
     const mocks={UiHostEnvironment:U.UiHostEnvironment,VirtualMachine:Machine,deserializeVbc2:V.deserializeVbc2,VeraStringValue:V.VeraStringValue,runRawIntent:(...args)=>call('intent',...args),runSdkAdapter:(...args)=>call('sdk',...args),catalogKinds:()=>{events.push(['catalogue',probe.disposed]);return []},consent:{remember:(...args)=>events.push(['remember',...args])},armReveal:value=>events.push(['reveal',value]),console:{info(){},error(){},warn(){}}}
     const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
     probe=new Probe()
-    Object.assign(probe,{pending:null,programId:7,revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
+    Object.assign(probe,{pending:null,programId:7,retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},revision:0,previewOnly:false,liveRoot:null,hasRoot:false,error:'',vbc2:'',destinationHidden:false,pageHidden:false,darkListener:null,liveSurfaces:[],stopAllTimers(){events.push(['stop',this.disposed,this.effectGeneration])},restoreState(){return null},seeded(value){return value},notifyStateSnapshot(){events.push(['snapshot'])},renderView(){events.push(['render'])},persistState(){events.push(['persist'])},watchDarkMode(){events.push(['dark',this.disposed])},needsConsent:effect=>!!effect.ask,consentTitle:effect=>effect.rawTarget,consentTarget:effect=>effect.rawTarget,consentKey:effect=>effect.rawTarget,stamp:()=>probe.vbc2,cancelFields(){},reconcileFields(){},flushFields(){},dispatchFieldAction(action,value,persist=true){if(!this.disposed&&!this.previewOnly)this.dispatch(action,value,persist)},controller:null})
     const bytecode=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
     function load() { probe.vbc2=bytecode;probe.load() }
     function observeDispatch() { probe.dispatch=(action,value)=>{assert(value instanceof V.VeraStringValue);delivered.push([action,value.value])} }
@@ -371,7 +371,7 @@ if (!baseline) {
      const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks))
      probe=new Probe()
      Object.assign(probe,{destinationHidden:false,previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',darkListener:null,pending:null,
-      stopAllTimers(){events.push(['cleanup',this.disposed,this.pageHidden]);this.stopSurfaceLoop()},watchDarkMode(){events.push(['dark',this.disposed,this.pageHidden])},restoreState(){return null},seeded:value=>value,notifyStateSnapshot(){events.push(['snapshot'])},persistState(){events.push(['persist'])},paintSurfaces(){events.push(['paint'])},drainEffects(){events.push(['drain'])},countFrame(){events.push(['count'])},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},reconcileBackHandler(){},cancelFields(){},reconcileFields(){},scheduleFieldActions(){},renderingDepth:0,flushFields(){},controller:null})
+      stopAllTimers(){events.push(['cleanup',this.disposed,this.pageHidden]);this.stopSurfaceLoop()},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){events.push(['dark',this.disposed,this.pageHidden])},restoreState(){return null},seeded:value=>value,notifyStateSnapshot(){events.push(['snapshot'])},persistState(){events.push(['persist'])},paintSurfaces(){events.push(['paint'])},drainEffects(){events.push(['drain'])},countFrame(){events.push(['count'])},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},reconcileBackHandler(){},cancelFields(){},reconcileFields(){},scheduleFieldActions(){},renderingDepth:0,flushFields(){},controller:null})
      probe.vbc2=C.compileVeraSource(`
 @jsonable class AppState { n: number; }
 function init(): AppState { return {n: 0}; }
@@ -551,7 +551,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.Surfac
       const Probe=new Function(...Object.keys(mocks),compiled.outputText+'; const VeraPreview=Probe; return Probe')(...Object.values(mocks)), probe=new Probe()
        Object.assign(probe,{previewOnly:false,programId:0,revision:0,liveRoot:null,hasRoot:false,error:'',pending:null,darkListener:null,liveSurfaces:[],destinationHidden:false,pageHidden:false,persistKey:'fixture/version',controller,
          onStateSnapshot(encoded){snapshots.push(encoded)},
-        stopAllTimers(){for(const id of [...this.timers.keys()])this.stopTimer(id)},watchDarkMode(){},restoreState(){return null},seeded:value=>value,runWidgetRefresh(){},drainEffects(){},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},onBackHandlerChanged(){},reconcileSurfaces(){},paintSurfaces(){}})
+        stopAllTimers(){for(const id of [...this.timers.keys()])this.stopTimer(id)},retireWorlds(){},reconcileWorlds(){},worldsNeedFrames(){return false},tickWorlds(){},watchDarkMode(){},restoreState(){return null},seeded:value=>value,runWidgetRefresh(){},drainEffects(){},reconcileTheme(){},reconcileTimers(){},reconcileSpin(){},reconcileMotion(){},onBackHandlerChanged(){},reconcileSurfaces(){},paintSurfaces(){}})
       if(!fieldBytecode)fieldBytecode=C.compileVeraSource(`
 import * as ui from "std/ui"
 @jsonable class AppState { first: string; second: string; note: string; saved: string; }
@@ -1835,7 +1835,7 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
     function cancel(handle) { stops.push(handle);scheduled.delete(handle) }
     const Probe=new Function('setInterval','clearInterval','Date','VeraNumberValue',compiled.outputText+'; return Probe')(schedule,cancel,{now:()=>now},V.VeraNumberValue)
     const probe=new Probe()
-    Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),sceneFrames:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
+    Object.assign(probe,{fieldEdits:new Map(),dispatchFieldAction(action,value){this.dispatch(action,value)},spinTimer:-1,spinPeriod:0,motionTimer:-1,motionTriggers:new Map(),poseAnims:new Map(),stopSurfaceLoop(){surfaceStops++},dispatch(action,value){assert(value instanceof V.VeraNumberValue);calls.push({action,elapsed:value.value,at:now})}})
     function advance(ms) {
      const end=now+ms
      while(true) {
@@ -1949,10 +1949,10 @@ function view(state: AppState): ui.View { return ui.Column("default", [ui.TextFi
     probe.reconcileTimers(tickerTree([ticker('one',1000,'oneTick'),ticker('two',1500,'twoTick')]))
     probe.spinTimer=f.schedule(()=>assert.fail('spin survived cleanup'),16);probe.spinPeriod=1000
     probe.motionTimer=f.schedule(()=>assert.fail('motion survived cleanup'),16)
-    for(const name of ['motionTriggers','poseAnims','sceneFrames'])probe[name].set('fixture',{})
+    for(const name of ['motionTriggers','poseAnims'])probe[name].set('fixture',{})
     probe.stopAllTimers();assertNoTickers(probe);assert.equal(scheduled.size,0);assert.equal(stops.length,4)
     assert.equal(probe.spinTimer,-1);assert.equal(probe.spinPeriod,0);assert.equal(probe.motionTimer,-1);assert.equal(f.surfaceStops(),1)
-    for(const name of ['motionTriggers','poseAnims','sceneFrames'])assert.equal(probe[name].size,0,name)
+    for(const name of ['motionTriggers','poseAnims'])assert.equal(probe[name].size,0,name)
     advance(3000);assert.equal(calls.length,0)
     probe.stopAllTimers();assertNoTickers(probe);assert.equal(stops.length,4);assert.equal(f.surfaceStops(),2)
    })

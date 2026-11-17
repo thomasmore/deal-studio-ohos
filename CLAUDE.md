@@ -36,6 +36,13 @@ no model support: embedding search for SDK functions and intents falls back to
 keywords, and the Generate and Chat screens say so in their status line. After
 fetching it, delete `entry/.cxx` once so CMake sees it.
 
+Physics is the same kind of thing: **Jolt** (v5.6.0) under `entry/src/main/cpp/JoltPhysics` (git-ignored),
+commands in the comment near the end of `entry/src/main/cpp/CMakeLists.txt`; without it `libphys.so` is a
+stub and `physInit()` returns 0. Host test, no phone: `cmake -S tools/phys-world-test -B /tmp/phys-world-test-build
+&& cmake --build /tmp/phys-world-test-build -j && /tmp/phys-world-test-build/phys_world_test`. The step runs on a
+thread of its own (`phys_stepper.h`: `physStepBegin` in one frame, `physStepEnd` in the next; every other NAPI call
+waits for it first); its host test, with the ThreadSanitizer line at its top, is `tools/phys-stepper-test.cpp`.
+
 **If any of them prints an ERROR line, stop and ask the person working with you
 — do not guess a path and do not install anything.** Ask exactly this:
 
@@ -203,6 +210,7 @@ minute-long generations does not converge — that mistake has been made here.
 | `entry/src/main/ets/vera/VeraUiCatalog.ets` | the one description of `std/ui`: components, styles, icons, composition rules. The compiler interface, the validator and the model's prompt are all generated from it |
 | `entry/src/main/ets/vera/VeraTheme.ets` | six presets, light and dark, and every colour and size the renderer uses |
 | `entry/src/main/ets/vera/VeraGfx.ets` | `std/gfx`, what a `ui.Surface` draws frame by frame: the function table the compiler and the prompt are generated from, the shapes, colours through the theme, fitting, and `paintGfx`, the one painter both the phone's `Canvas` and the host SVG proofs (`tools/vera-harness/gfx-run.js`, `gfx-check.js`) use |
+| `entry/src/main/ets/vera/VeraLocomotion.ets` | moving through a 3D world, the host's side: the player driven by the stick (`PlayerDrive`, Jolt's `kCharacter` and `physDrive`), the follow camera, zones that tell `enter`, a part's swing. `scene.path` / `scene.wander` themselves are pure functions of time in `VeraScene.ets` (`pathPose`, `wanderPose`). Host check `tools/vera-harness/locomotion-check.js`; play codes P0011–P0014 in `VeraWorldPlay.ets` |
 | `entry/src/main/ets/vera/VeraIcons.ets` | sixteen icons as path data, normalised to one optical size |
 | `entry/src/main/resources/rawfile/vera-skill.txt` | the prompt, with `{{UI_CATALOG}}` spliced in |
 | `docs/demo-prompts.md` | the prompts this is demonstrated with, and what to check in the output |

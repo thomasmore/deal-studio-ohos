@@ -1,0 +1,98 @@
+// The parts of a world, with no game in them: the example the world guide carries (vera-world-skill.txt).
+//
+// Three loose bodies stand on a floor, made in a loop. Throw (the button, or a flick of a body) adds 1 to state.throws,
+// the kick trigger of each, so the physics throws them again from where they lie, each time the other way. When all
+// have come to rest the world sends "settled" and the program reads it. Reset adds 1 to state.round, which is in every
+// id, so the bodies are made afresh where they were written. A tap names a body and marks it. The program never moves
+// a body itself.
+
+@jsonable
+class AppState {
+  throws: number;
+  read: number;
+  round: number;
+  moved: number;
+  picked: string;
+}
+
+function init(): AppState {
+  return {throws: 0, read: 0, round: 0, moved: 0, picked: ""};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 0.9, 1.4, 0, 0.05, 0, true));
+  things.push(scene.floor("surface"));
+  // Each throw goes the other way, so the bodies stay near the middle however often they are thrown.
+  let way: number = 1;
+  if (state.throws % 2 === 1) {
+    way = -1;
+  }
+  let colours: string[] = ["accent", "warning", "#22c55e"];
+  let i: number = 0;
+  while (i < 3) {
+    let id: string = "r" + ui.numberToString(state.round) + "-" + ui.numberToString(i);
+    let x: number = (i - 1) * 0.3;
+    let body: scene.Thing = scene.box(id, x, 0.05, 0, 0.1, 0.1, 0.1, colours[i]);
+    if (i === 1) {
+      body = scene.cylinder(id, x, 0.06, 0, 0.05, 0.12, colours[i]);
+    } else if (i === 2) {
+      body = scene.sphere(id, x, 0.05, 0, 0.05, colours[i]);
+    }
+    if (state.picked === id) {
+      body = scene.mark(body, "accent");
+    }
+    things.push(scene.kick(scene.loose(body, 1), state.throws, 0.3 * way, 2, 0.2 * way, 1));
+    i = i + 1;
+  }
+  return things;
+}
+
+function onThrow(state: AppState, value: number): AppState {
+  return {throws: state.throws + 1, read: state.read, round: state.round, moved: state.moved, picked: state.picked};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {throws: state.throws, read: state.throws, round: state.round + 1, moved: 0, picked: ""};
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "swipe") {
+    return onThrow(state, 0);
+  }
+  if (e.kind === "tap") {
+    return {throws: state.throws, read: state.read, round: state.round, moved: state.moved, picked: e.body};
+  }
+  if (e.kind !== "settled") {
+    return state;
+  }
+  // For a body that is not a die, e.values says 1 when it was knocked from where it was built.
+  let moved: number = 0;
+  for (let v: number of e.values) {
+    moved = moved + v;
+  }
+  return {throws: state.throws, read: state.throws, round: state.round, moved: moved, picked: state.picked};
+}
+
+function view(state: AppState): ui.View {
+  let result: string = "Throw them, or tap one";
+  if (state.throws > state.read) {
+    result = "In the air...";
+  } else if (state.throws > 0) {
+    result = ui.numberToString(state.moved) + " of 3 moved";
+  }
+  if (state.picked !== "") {
+    result = result + " - picked " + state.picked;
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Bodies", "", "Flick one or press Throw", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", result),
+      ui.ActionBar("spread", [
+        ui.Button("primary", "Throw", "onThrow", 0, true),
+        ui.Button("secondary", "Reset", "onReset", 0, state.round >= 0)
+      ])
+    ])
+  ]);
+}

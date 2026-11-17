@@ -1,0 +1,71 @@
+// Two dice thrown on a table, as a ui.World: the physics throws them, the host reads the faces.
+//
+// Throw (the button, or a tap or a flick on the table) adds 1 to state.throws, the kick trigger of both dice, so the
+// host throws them again from where they lie. When both have come to rest the world sends "settled" with
+// the face each shows, and the program adds them up. It never moves a die itself.
+
+@jsonable
+class AppState {
+  throws: number;
+  read: number;
+  total: number;
+  faces: string;
+}
+
+function init(): AppState {
+  return {throws: 0, read: 0, total: 0, faces: ""};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 1.25, 0.85, 0, 0, 0, false));
+  things.push(scene.table(1.2, 0.9, "surface"));
+  // Each throw goes the other way across the table, so the dice stay on it however often they are thrown.
+  let way: number = 1;
+  if (state.throws % 2 === 1) {
+    way = -1;
+  }
+  things.push(scene.kick(scene.loose(scene.die("d1", -0.2, 0.3, 0.1, 0.16, "white"), 1), state.throws, 0.5 * way, 2.2, -0.4 * way, 2));
+  things.push(scene.kick(scene.loose(scene.die("d2", 0.2, 0.3, 0.1, 0.16, "#f43f5e"), 1), state.throws, 0.4 * way, 2.4, 0.3 * way, 2.5));
+  return things;
+}
+
+function onThrow(state: AppState, value: number): AppState {
+  return {throws: state.throws + 1, read: state.read, total: state.total, faces: state.faces};
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "tap" || e.kind === "swipe") {
+    return onThrow(state, 0);
+  }
+  if (e.kind !== "settled") {
+    return state;
+  }
+  let total: number = 0;
+  let faces: string = "";
+  for (let v: number of e.values) {
+    total = total + v;
+    if (faces !== "") {
+      faces = faces + " + ";
+    }
+    faces = faces + ui.numberToString(v);
+  }
+  return {throws: state.throws, read: state.throws, total: total, faces: faces};
+}
+
+function view(state: AppState): ui.View {
+  let result: string = "Throw the dice";
+  if (state.throws > state.read) {
+    result = "Rolling...";
+  } else if (state.throws > 0) {
+    result = state.faces + " = " + ui.numberToString(state.total);
+  }
+  return ui.AppTheme("playful", "", [
+    ui.Column("default", [
+      ui.Header("default", "Dice", "", "", ""),
+      ui.World("default", 0, "build", "onWorld"),
+      ui.Text("metric", result),
+      ui.Button("primary", "Throw", "onThrow", 0, true)
+    ])
+  ]);
+}

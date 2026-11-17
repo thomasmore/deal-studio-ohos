@@ -22,6 +22,8 @@ const language = fs.readFileSync(path.join(__dirname, '../../entry/src/main/reso
   .replace('{{UI_CATALOG}}', describeCatalogForPrompt()).replace('{{UI_TOOL_NOTE}}\n', '')
 // How a game is written on a ui.Surface (agent/AgentSurface.ets): with -r, a game is written whole from it.
 const surfaceGuide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-surface-skill.txt'), 'utf8')
+// How a 3D program is written on a ui.World: with -r, a 3D request is written whole from it.
+const worldGuide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-world-skill.txt'), 'utf8')
 
 const args = process.argv.slice(2)
 const option = (flag, fallback) => { const i = args.indexOf(flag); if (i < 0) return fallback; const v = args[i + 1]; args.splice(i, 2); return v }
@@ -91,6 +93,7 @@ function host(log) {
   h.fillBlocks = request => fillSections(request, calls)
   h.language = language
   h.surfaceGuide = surfaceGuide
+  h.worldGuide = worldGuide
   // Every written hole and how it ended (agent/AgentHole.ets), for tools/vera-harness/hole-report.py.
   h.onHole = r => (log.holes = log.holes || []).push(Object.assign({}, r))
   // AGENT_ANSWER=other picks an answer other than the suggested one, to exercise drawing the plan again; else the default.
@@ -127,7 +130,7 @@ async function one([label, prompt]) {
     holesMs: fill ? fill.holesMs : 0, custom: r.custom ? {attempts: r.custom.attempts, ms: r.custom.ms, failed: r.custom.failed} : null,
     planned: (JSON.parse(c.sketch || '{}').questions || []).length, asked: r.asked.map(a => a.question + ' -> ' + a.answer), replanned: c.replanned,
     ms: Date.now() - started, answers: c.answers}
-  if (o) { result.route = o.kind }
+  if (o) { result.route = o.kind; try { result.engine = JSON.parse(c.sketch || '{}').engine } catch (e) {} }
   fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(result, null, 1))
   if (o) {
     return console.log(label.padEnd(24), o.kind.padEnd(9), (result.ms / 1000).toFixed(1).padStart(5) + 's',

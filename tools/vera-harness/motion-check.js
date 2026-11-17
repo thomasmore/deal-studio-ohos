@@ -101,7 +101,7 @@ assert.equal(run(program('nonsense', good)).out.find(n => n.kind === 'motion').s
 assert.throws(() => compileVeraSource(program('tumble', 'ui.Motion("tumble", state.roll, [ui.Motion("pop", state.roll, [ui.Text("body", "x")])])')),
   e => (e.diagnostics || []).length > 0, 'a Motion inside a Motion is refused')
 
-// ui.Transform and ui.Stage: compile, decode with pose / duration / perspective / children, and the child rules
+// ui.Transform: compile, decode with pose / duration / children, and the child rules; ui.Stage is refused
 const scene = inner => `import * as ui from "std/ui"
 
 @jsonable
@@ -130,56 +130,36 @@ const decodeScene = src => {
 let nodes = decodeScene(scene('ui.Transform("default", [0, state.turn], 500, 0, [ui.Text("body", "card")])'))
 let t = nodes.find(n => n.kind === 'transform')
 assert.deepEqual(t.series, [0, 0]); assert.equal(t.numberValue, 500); assert.equal(t.children.length, 1); assert.equal(t.style, 'default')
-nodes = decodeScene(scene('ui.Stage("default", 700, 0, [ui.Transform("default", [10, 20], 900, 0, [ui.Transform("solid", [0, 0, 0, 0, 0, 60], 0, 120, [ui.Text("body", "front")])])])'))
-const stage = nodes.find(n => n.kind === 'stage')
-assert.equal(stage.numberValue, 700); assert.equal(stage.children[0].kind, 'transform'); assert.equal(stage.children[0].children[0].style, 'solid')
-assert.deepEqual(stage.children[0].children[0].series, [0, 0, 0, 0, 0, 60]); assert.equal(stage.children[0].children[0].minimum, 120, 'the layer side rides minimum')
-assert.throws(() => compileVeraSource(scene('ui.Stage("default", 0, 0, [ui.Text("body", "x")])')), e => (e.diagnostics || []).length > 0, 'a Stage holds Transforms only')
-assert.throws(() => compileVeraSource(scene('ui.Transform("default", [], 0, 0, [ui.Stage("default", 0, 0, [])])')), e => (e.diagnostics || []).length > 0, 'a Stage inside a Transform is refused')
-assert.throws(() => compileVeraSource(scene('ui.Stage("default", 0, 0, [ui.Transform("default", [], 0, 0, [ui.Stage("default", 0, 0, [])])])')), e => (e.diagnostics || []).length > 0, 'a Stage inside a Stage is refused')
-// the cube example of the Stage guidance, written out as a whole program: it compiles and draws six faces
+const refused = (inner, why) => assert.throws(() => compileVeraSource(scene(inner)), e => (e.diagnostics || []).length > 0, why)
+refused('ui.Stage("default", 0, 0, [ui.Text("body", "x")])', 'ui.Stage is gone from the language')
+refused('ui.Transform("default", [], 0, 0, [ui.Transform("default", [], 0, 0, [ui.Text("body", "x")])])', 'a Transform inside a Transform is refused')
 {
-  const faceFn = 'ui.Text("display", ui.numberToString(n))'
-  const cube = `import * as ui from "std/ui"
-import * as math from "std/math"
+  // a flip card: the front and the back by ui.When on the same state, turning on a handler
+  const flip = `import * as ui from "std/ui"
 
 @jsonable
-class AppState { seed: number; face: number; turnX: number; turnY: number; rolls: number; }
+class AppState { turn: number; }
 
-function init(): AppState { return { seed: 7, face: 1, turnX: 0, turnY: 0, rolls: 0 }; }
+function init(): AppState { return { turn: 0 }; }
 
-function faceView(n: number): ui.View { return ${faceFn}; }
-
-function face(turnX: number, turnY: number, n: number): ui.View {
-  return ui.Transform("default", [turnX, turnY], 0, 0, [ui.Transform("solid", [0, 0, 0, 0, 0, 60], 0, 120, [faceView(n)])]);
-}
-
-function roll(state: AppState, _v: number): AppState {
-  let seed: number = math.randomStep(state.seed);
-  let v: number = math.randomBelow(seed, 6) + 1;
-  let rolls: number = state.rolls + 1;
-  return { seed: seed, face: v, turnX: -90 + 720 * rolls, turnY: 720 * rolls, rolls: rolls };
-}
+function onFlip(state: AppState, _v: number): AppState { return { turn: state.turn + 180 }; }
 
 function view(state: AppState): ui.View {
   return ui.AppTheme("clean", "", [
     ui.Column("spacious", [
-      ui.Stage("floor", 0, 260, [ui.Transform("default", [state.turnX, state.turnY], 900, 0, [
-        face(0, 0, 1), face(0, 180, 6), face(0, 90, 3), face(0, -90, 4), face(90, 0, 2), face(-90, 0, 5)
-      ])]),
-      ui.Button("primary", "Roll", "roll", 0, true)
+      ui.Transform("default", [0, state.turn], 500, 0, [
+        ui.Card("default", [ui.Text("body", "Question")])
+      ]),
+      ui.Button("primary", "Flip", "onFlip", 0, true)
     ])
   ]);
 }`
-  const r = compileVeraSource(cube)
+  const r = compileVeraSource(flip)
   const vm = new VirtualMachine(deserializeVbc2(r.vbc2 !== undefined ? r.vbc2 : r), new UiHostEnvironment())
   const all = []
   const walk = n => { all.push(n); (n.children || []).forEach(walk) }
-  const st = vm.execute('roll', [vm.execute('init'), 0])
-  walk(decodeVeraUi(vm.execute('view', [st]))[0])
-  const solids = all.filter(n => n.kind === 'transform' && n.style === 'solid')
-  assert.equal(solids.length, 6); assert.ok(solids.every(n => n.minimum === 120 && n.series[5] === 60))
-  const stageNode = all.find(n => n.kind === 'stage'); assert.equal(stageNode.style, 'floor'); assert.equal(stageNode.minimum, 260, 'the scene height rides minimum')
-  assert.equal(all.find(n => n.kind === 'transform' && n.style === 'default').series[1], 720)
+  walk(decodeVeraUi(vm.execute('view', [vm.execute('onFlip', [vm.execute('init'), 0])]))[0])
+  const card = all.find(n => n.kind === 'transform')
+  assert.deepEqual(card.series, [0, 180]); assert.equal(card.numberValue, 500); assert.equal(card.children.length, 1)
 }
 console.log('motion-check ok')

@@ -12,12 +12,15 @@ const E = loadVera('agent/AgentSurfaceEdit')
 const game = fs.readFileSync(path.join(__dirname, 'examples/surface-catch.vera'), 'utf8')
 const scene = fs.readFileSync(path.join(__dirname, 'examples/surface-roulette.vera'), 'utf8')
 const guide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-surface-skill.txt'), 'utf8')
+const dice = fs.readFileSync(path.join(__dirname, 'examples/world-dice.vera'), 'utf8')
+const worldGuide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-world-skill.txt'), 'utf8')
 const edit = (search, replace) => '<<<<<<< SEARCH\n' + search + '\n=======\n' + replace + '\n>>>>>>> REPLACE'
 
 function host(replies) {
   const h = new AgentHost()
   h.language = 'LANGUAGE {{UI_CATALOG}} Clock -- time. rest'
   h.surfaceGuide = guide
+  h.worldGuide = worldGuide
   h.asks = []
   h.askCode = async (system, user, budget, think) => { h.asks.push({system, user, budget, think}); return replies.shift() ?? null }
   return h
@@ -76,6 +79,27 @@ function host(replies) {
   assert.ok(h.asks[0].system.includes('A SCENE IN THIS SECTION') && h.asks[0].system.includes('writes every field out'))
   assert.ok(!h.asks[0].system.includes('FULL-CANVAS APPS'))
   assert.equal(E.checkSceneProgram(scene), '')
+
+  // A 3D program: the world guide, and the change is played on the host's physics -- one that stops reading the dice is
+  // repaired against that play.
+  assert.ok(E.drawsSurface(dice) && E.isWorld(dice) && !E.isWorld(game))
+  const bigger = edit('  things.push(scene.table(1.2, 0.9, "surface"));', '  things.push(scene.table(1.4, 1.0, "surface"));')
+  h = host([bigger])
+  r = await E.editSurfaceProgram(dice, 'a bigger table', 'dice game', h)
+  assert.equal(r.failed, '')
+  assert.ok(r.world && r.game)
+  assert.ok(r.source.includes('scene.table(1.4, 1.0, "surface")'))
+  assert.ok(h.asks[0].system.includes('3D WORLD APPS') && !h.asks[0].system.includes('FULL-CANVAS APPS'))
+  const forget = edit('  return {throws: state.throws, read: state.throws, total: total, faces: faces};', '  return state;')
+  const remember = edit('  return state;\n}\n\nfunction view', '  return {throws: state.throws, read: state.throws, total: total, faces: faces};\n}\n\nfunction view')
+  h = host([forget, remember])
+  r = await E.editSurfaceProgram(dice, 'something', 'dice game', h)
+  assert.equal(r.failed, '')
+  assert.equal(r.rounds, 1, 'the unread settle was caught by the world\'s play and repaired')
+  assert.equal(r.source.trim(), dice.trim())
+  h = host([bigger]); h.worldGuide = ''
+  r = await E.editSurfaceProgram(dice, 'a bigger table', 'dice game', h)
+  assert.match(r.failed, /no model or guide/)
 
   console.log('surface-edit-check ok')
 })().catch(e => { console.error(e); process.exit(1) })
