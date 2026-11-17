@@ -14,11 +14,13 @@ const interfaces = {
   AcquireOptions: ['mode:RuntimeMode', 'persistKey:string', 'seedState:string'],
   ActorHandle: ['appId:string', 'vmGeneration:number', 'leaseId:string'],
   DrawRequest: ['nodeId:number', 'entry:string'],
-  SurfaceFrameEvent: ['elapsed:number', 'actions:string[]', 'draws:DrawRequest[]'],
-  InputPayload: ['kind:string', 'num:number', 'str:string', 'bool:boolean', 'phase:string', 'id:number', 'x:number', 'y:number'],
-  InputEvent: ['appId:string', 'vmGeneration:number', 'kind:string', 'action:string', 'payload:InputPayload', 'persist:boolean', 'draws:DrawRequest[]'],
+  SurfaceFrameEvent: ['elapsed:number', 'actions:string[]', 'draws:DrawRequest[]', 'loopStartedAt?:number', 'worldOnly?:boolean', 'worldStopping?:boolean'],
+  SceneEventPayload: ['kind:string', 'body:string', 'other:string', 'x:number', 'y:number', 'z:number', 'speed:number', 'bodies:string[]', 'values:number[]'],
+  InputPayload: ['kind:string', 'num:number', 'str:string', 'bool:boolean', 'phase:string', 'id:number', 'x:number', 'y:number', 'scene?:SceneEventPayload'],
+  InputEvent: ['appId:string', 'vmGeneration:number', 'kind:string', 'action:string', 'payload:InputPayload', 'persist:boolean', 'draws:DrawRequest[]', 'skipIfSame?:boolean'],
   TickEvent: ['tickerId:string', 'action:string', 'elapsed:number'],
-  FrameEnvelope: ['appId:string', 'vmGeneration:number', 'frameSeq:number', 'appliedSeq:number', 'reveal:boolean', 'view:Object|null', 'gfx:Object[]', 'timing:number[]'],
+  SceneDraw: ['nodeId:number', 'spec:WorldSpec'],
+  FrameEnvelope: ['appId:string', 'vmGeneration:number', 'frameSeq:number', 'appliedSeq:number', 'reveal:boolean', 'view:Object|null', 'gfx:Object[]', 'timing:number[]', 'scenes?:SceneDraw[]'],
   EffectRequest: ['appId:string', 'vmGeneration:number', 'effectId:number', 'kind:string', 'rawTarget:string', 'params:string[]', 'resultHandler:string', 'mode:string'],
   AppSubscriber: ['onViewFrame(frame:FrameEnvelope):void', 'onError(kind:string,message:string,inputSeq?:number):void', 'onStateSnapshot(encoded:string):void', 'onStateSaved(projectId:string):void', 'onEffectRequest(effect:EffectRequest):void', 'flushPendingInputFor(appId:string):void|Promise<void>', 'onMailboxWritable():void'],
   AcceptedAdmission: ["status:'ACCEPTED'", 'inputSeq?:number'],
@@ -41,12 +43,15 @@ function typecheck(text) {
   const host = ts.createCompilerHost(options)
   const originalGet = host.getSourceFile.bind(host), originalExists = host.fileExists.bind(host)
   const files = new Map([[virtual, source], [consumer, text]])
-  host.fileExists = name => files.has(name) || originalExists(name)
+  const ets = name => name.replace(/\.ts$/, '.ets')
+  host.fileExists = name => files.has(name) || originalExists(name) || originalExists(ets(name))
   host.getSourceFile = (name, languageVersion, onError, shouldCreateNewSourceFile) => files.has(name)
     ? ts.createSourceFile(name, files.get(name), languageVersion, true)
-    : originalGet(name, languageVersion, onError, shouldCreateNewSourceFile)
+    : originalExists(ets(name)) ? ts.createSourceFile(name, fs.readFileSync(ets(name), 'utf8'), languageVersion, true)
+      : originalGet(name, languageVersion, onError, shouldCreateNewSourceFile)
   const program = ts.createProgram([virtual, consumer], options, host)
-  return ts.getPreEmitDiagnostics(program).filter(d => d.category === ts.DiagnosticCategory.Error)
+  return ts.getPreEmitDiagnostics(program).filter(d => d.category === ts.DiagnosticCategory.Error &&
+    (!d.file || d.file.fileName === virtual || d.file.fileName === consumer))
 }
 const fixture = `
 import * as M from './Messages'
@@ -56,6 +61,7 @@ const options: M.AcquireOptions = { mode: modes[0], persistKey: '', seedState: '
 const handle: M.ActorHandle = { appId: 'app', vmGeneration: 1, leaseId: 'opaque' }
 const draw: M.DrawRequest = { nodeId: 7, entry: 'draw' }
 const surface: M.SurfaceFrameEvent = { elapsed: 16, actions: ['animate'], draws: [draw] }
+const startedSurface: M.SurfaceFrameEvent = { ...surface, loopStartedAt: 1000 }
 const numeric: M.InputPayload = { kind: 'NUMBER', num: 42, str: '', bool: false, phase: '', id: 0, x: 0, y: 0 }
 const back: M.InputPayload = { ...numeric, num: 0 }
 const bool: M.InputPayload = { ...numeric, kind: 'BOOLEAN', bool: true }
@@ -66,6 +72,12 @@ const input: M.InputEvent = { appId: 'app', vmGeneration: 1, kind: 'BACK', actio
 const tick: M.TickEvent = { tickerId: 'clock', action: 'advance', elapsed: 16 }
 const frame: M.FrameEnvelope = { appId: 'app', vmGeneration: 1, frameSeq: 2, appliedSeq: 1, reveal: true, view: null, gfx: [], timing: [1, 2, 3] }
 const weakFrame: M.FrameEnvelope = { ...frame, view: { arbitrary: true }, gfx: [{ deliberatelyUntyped: true }] }
+const sceneEvent: M.SceneEventPayload = { kind: 'hit', body: 'a', other: 'b', x: 1, y: 2, z: 3, speed: 4, bodies: ['a'], values: [6] }
+const scenePayload: M.InputPayload = { ...numeric, kind: 'SCENE', scene: sceneEvent }
+const sceneInput: M.InputEvent = { ...input, kind: 'SCENE', payload: scenePayload, skipIfSame: true }
+const sceneDraw: M.SceneDraw = { nodeId: 1, spec: { camera: null, floor: null, table: null, sky: null, bodies: [], zones: [], follow: null } }
+const sceneFrame: M.FrameEnvelope = { ...frame, scenes: [sceneDraw] }
+const worldFrame: M.SurfaceFrameEvent = { ...surface, worldOnly: true, worldStopping: true }
 const effect: M.EffectRequest = { appId: 'app', vmGeneration: 1, effectId: 3, kind: 'intent', rawTarget: 'target', params: ['name', 'value'], resultHandler: 'done', mode: 'future' }
 const subscriber: M.AppSubscriber = {
   onViewFrame(frame: M.FrameEnvelope): void {},
@@ -93,8 +105,13 @@ function check(name, text, valid = true) {
 test('exact exported plain boundary inventories', () => {
   const syntax = ts.createSourceFile(virtual, source, ts.ScriptTarget.Latest, true)
   assert(!/@ts-(ignore|expect-error|nocheck)/.test(source), 'Suppressed diagnostics')
-  assert.deepEqual(syntax.statements.map(s => s.name && s.name.text).sort(), [...Object.keys(interfaces), ...Object.keys(aliases)].sort())
-  for (const node of syntax.statements) {
+  const imports = syntax.statements.filter(ts.isImportDeclaration)
+  assert.equal(imports.length, 1)
+  assert.equal(imports[0].moduleSpecifier.text, '../../vera/VeraScene')
+  assert.equal(compact(imports[0].importClause), '{WorldSpec}')
+  const declarations = syntax.statements.filter(node => !ts.isImportDeclaration(node))
+  assert.deepEqual(declarations.map(s => s.name && s.name.text).sort(), [...Object.keys(interfaces), ...Object.keys(aliases)].sort())
+  for (const node of declarations) {
     assert.deepEqual((node.modifiers || []).map(m => m.kind), [ts.SyntaxKind.ExportKeyword])
     assert(!node.typeParameters && !node.heritageClauses, node.name.text)
     if (ts.isInterfaceDeclaration(node)) {
@@ -146,7 +163,19 @@ const invalid = [
   ['tick is not input', `const bad: M.InputEvent = tick`],
   ['string tick elapsed', `const bad: M.TickEvent = { ...tick, elapsed: '16' }`],
   ['string draw node', `const bad: M.DrawRequest = { ...draw, nodeId: '7' }`],
+  ['string surface loop start', `const bad: M.SurfaceFrameEvent = { ...surface, loopStartedAt: '1000' }`],
   ['string timing', `const bad: M.FrameEnvelope = { ...frame, timing: ['1'] }`],
+  ['string scene coordinate', `const bad: M.SceneEventPayload = { ...sceneEvent, z: '3' }`],
+  ['numeric scene body', `const bad: M.SceneEventPayload = { ...sceneEvent, body: 1 }`],
+  ['numeric scene bodies', `const bad: M.SceneEventPayload = { ...sceneEvent, bodies: [1] }`],
+  ['string scene values', `const bad: M.SceneEventPayload = { ...sceneEvent, values: ['6'] }`],
+  ['incomplete scene', `const bad: M.InputPayload = { ...numeric, scene: { kind: 'hit' } }`],
+  ['string skipIfSame', `const bad: M.InputEvent = { ...input, skipIfSame: 'true' }`],
+  ['string worldOnly', `const bad: M.SurfaceFrameEvent = { ...surface, worldOnly: 'true' }`],
+  ['numeric worldStopping', `const bad: M.SurfaceFrameEvent = { ...surface, worldStopping: 1 }`],
+  ['string scene node', `const bad: M.SceneDraw = { ...sceneDraw, nodeId: '1' }`],
+  ['untyped scene spec', `const bad: M.SceneDraw = { ...sceneDraw, spec: {} }`],
+  ['null scenes', `const bad: M.FrameEnvelope = { ...frame, scenes: [null] }`],
   ['null gfx element', `const bad: M.FrameEnvelope = { ...frame, gfx: [null] }`],
   ['Map effect params', `const bad: M.EffectRequest = { ...effect, params: new Map<string, string>() }`],
   ['RuntimeValue effect params', `interface RuntimeValue { tag: number; value: string }; const values: RuntimeValue[] = [{ tag: 1, value: 'x' }]; const bad: M.EffectRequest = { ...effect, params: values }`],

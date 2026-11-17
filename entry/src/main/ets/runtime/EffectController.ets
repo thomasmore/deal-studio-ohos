@@ -76,6 +76,7 @@ export class EffectController {
   private execute: EffectExecutor
   private epoch: number = 0
   private heldEffects: EffectWork[] = []
+  private heldIndex: number = 0
   private executing: Set<EffectWork> = new Set<EffectWork>()
   private pending: EffectWork | null = null
   private draining: boolean = false
@@ -100,10 +101,11 @@ export class EffectController {
 
   invalidate(): void {
     this.epoch++
-    let held = this.heldEffects
+    let held = this.heldEffects.slice(this.heldIndex)
     let pending = this.pending
     let executing = this.executing
     this.heldEffects = []
+    this.heldIndex = 0
     this.pending = null
     this.executing = new Set<EffectWork>()
     for (let work of held) { this.discard(work) }
@@ -217,8 +219,9 @@ export class EffectController {
     if (this.draining) { return }
     this.draining = true
     try {
-      while (this.heldEffects.length > 0 && this.pending === null) {
-        let work = this.heldEffects.shift()!
+      while (this.heldIndex < this.heldEffects.length && this.pending === null) {
+        let work = this.heldEffects[this.heldIndex]
+        this.heldIndex++
         if (!this.current(work)) { this.discard(work); continue }
         try {
           let effect = work.effect
@@ -234,6 +237,10 @@ export class EffectController {
         } catch (e) { this.fail(work, e as Error) }
       }
     } finally {
+      if (this.heldIndex > 0) {
+        this.heldEffects = this.heldEffects.slice(this.heldIndex)
+        this.heldIndex = 0
+      }
       this.draining = false
     }
   }

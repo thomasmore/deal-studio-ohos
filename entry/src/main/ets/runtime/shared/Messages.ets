@@ -1,3 +1,5 @@
+import { WorldSpec } from '../../vera/VeraScene'
+
 export interface ProgramRef {
   vbc2: string
   stamp: string
@@ -26,6 +28,21 @@ export interface SurfaceFrameEvent {
   elapsed: number
   actions: string[]
   draws: DrawRequest[]
+  loopStartedAt?: number
+  worldOnly?: boolean
+  worldStopping?: boolean
+}
+
+export interface SceneEventPayload {
+  kind: string
+  body: string
+  other: string
+  x: number
+  y: number
+  z: number
+  speed: number
+  bodies: string[]
+  values: number[]
 }
 
 export interface InputPayload {
@@ -37,6 +54,7 @@ export interface InputPayload {
   id: number
   x: number
   y: number
+  scene?: SceneEventPayload
 }
 
 export interface InputEvent {
@@ -47,12 +65,18 @@ export interface InputEvent {
   payload: InputPayload
   persist: boolean
   draws: DrawRequest[]
+  skipIfSame?: boolean
 }
 
 export interface TickEvent {
   tickerId: string
   action: string
   elapsed: number
+}
+
+export interface SceneDraw {
+  nodeId: number
+  spec: WorldSpec
 }
 
 export interface FrameEnvelope {
@@ -64,6 +88,7 @@ export interface FrameEnvelope {
   view: Object | null
   gfx: Object[]
   timing: number[]
+  scenes?: SceneDraw[]
 }
 
 export interface EffectRequest {

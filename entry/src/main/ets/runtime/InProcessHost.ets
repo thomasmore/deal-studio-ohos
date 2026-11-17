@@ -1,10 +1,11 @@
 import { AppActor, AppActorCallbacks } from './AppActor'
 import { AcquireOptions, ActorHandle, AdmissionResult, AppSubscriber, DrawRequest,
   EffectRequest, FrameEnvelope, HostOperationError, InputEvent, InputPayload,
-  ProgramRef, RuntimeMode, SurfaceFrameEvent, TickEvent } from './shared/Messages'
+  ProgramRef, RuntimeMode, SceneDraw, SceneEventPayload, SurfaceFrameEvent, TickEvent } from './shared/Messages'
 import { RuntimeValue, VeraNumberValue, VeraStringValue, VeraBooleanValue } from '../vera/VeraInterpreter'
-import { HostEffect } from '../vera/VeraUi'
+import { HostEffect, VeraUiNode } from '../vera/VeraUi'
 import { GfxOp, pointerValue } from '../vera/VeraGfx'
+import { sceneEventValue } from '../vera/VeraScene'
 import { StageTrace } from './trace/StageTrace'
 import { EffectResultHost } from './HostEffectsBridge'
 
@@ -238,12 +239,14 @@ export class InProcessHost implements EffectResultHost {
     if (input.appId !== handle.appId || input.vmGeneration !== handle.vmGeneration) {
       return { status: 'REJECTED', reason: 'STALE_EVENT' }
     }
-    if (input.kind !== 'HANDLER' && input.kind !== 'FIELD' && input.kind !== 'BACK' &&
+    if (input.kind !== 'HANDLER' && input.kind !== 'FIELD' && input.kind !== 'BACK' && input.kind !== 'SCENE' &&
         input.kind !== 'SURFACE_DOWN' && input.kind !== 'SURFACE_MOVE' &&
         input.kind !== 'SURFACE_UP' && input.kind !== 'SURFACE_CANCEL') {
       return { status: 'REJECTED', reason: 'INVALID_INPUT' }
     }
-    if (!this.validPayload(input.payload) || input.action.length === 0) {
+    if (!this.validPayload(input.payload) || input.action.length === 0 ||
+        (input.kind === 'SCENE' && input.payload.kind !== 'SCENE') ||
+        (input.skipIfSame !== undefined && typeof input.skipIfSame !== 'boolean')) {
       return { status: 'REJECTED', reason: 'INVALID_INPUT' }
     }
     let entry = new MailboxEntry(input.kind === 'SURFACE_MOVE' ? 'MOVE' : 'INPUT', lease)
@@ -252,9 +255,16 @@ export class InProcessHost implements EffectResultHost {
       bool: input.payload.bool, phase: input.payload.phase, id: input.payload.id,
       x: input.payload.x, y: input.payload.y
     }
+    if (input.payload.scene !== undefined) {
+      let scene = input.payload.scene
+      payload.scene = { kind: scene.kind, body: scene.body, other: scene.other,
+        x: scene.x, y: scene.y, z: scene.z, speed: scene.speed,
+        bodies: scene.bodies.slice(), values: scene.values.slice() }
+    }
     entry.input = {
       appId: input.appId, vmGeneration: input.vmGeneration, kind: input.kind,
-      action: input.action, payload: payload, persist: input.persist, draws: this.copyDraws(input.draws)
+      action: input.action, payload: payload, persist: input.persist, draws: this.copyDraws(input.draws),
+      skipIfSame: input.skipIfSame
     }
     entry.coalescing = entry.kind === 'MOVE'
     entry.key = input.action + ':' + input.payload.id.toString()
@@ -264,7 +274,9 @@ export class InProcessHost implements EffectResultHost {
   postTick(handle: ActorHandle, tick: TickEvent, ordered: boolean): AdmissionResult {
     let lease = this.liveLease(handle)
     if (lease === null) { return this.rejected(handle) }
-    if (tick.action.length === 0) { return { status: 'REJECTED', reason: 'INVALID_TICK' } }
+    if (tick.action.length === 0 || tick.tickerId.length === 0) {
+      return { status: 'REJECTED', reason: 'INVALID_TICK' }
+    }
     let entry = new MailboxEntry('TICK', lease)
     entry.tick = { tickerId: tick.tickerId, action: tick.action, elapsed: tick.elapsed }
     entry.coalescing = !ordered
@@ -276,9 +288,11 @@ export class InProcessHost implements EffectResultHost {
     let lease = this.liveLease(handle)
     if (lease === null) { return this.rejected(handle) }
     let entry = new MailboxEntry('SURFACE_FRAME', lease)
-    entry.surface = { elapsed: frame.elapsed, actions: frame.actions.slice(), draws: this.copyDraws(frame.draws) }
-    entry.coalescing = true
-    entry.key = 'surface'
+    entry.surface = { elapsed: frame.elapsed, actions: frame.actions.slice(), draws: this.copyDraws(frame.draws),
+      loopStartedAt: frame.loopStartedAt, worldOnly: frame.worldOnly, worldStopping: frame.worldStopping }
+    entry.coalescing = frame.worldOnly !== true && frame.worldStopping !== true
+    entry.critical = frame.worldStopping === true
+    entry.key = frame.worldOnly === true ? 'world' : 'surface'
     return this.admit(lease.record!, entry, false)
   }
 
@@ -304,23 +318,25 @@ export class InProcessHost implements EffectResultHost {
   }
 
   requestDraw(handle: ActorHandle, draws: DrawRequest[]): AdmissionResult {
-    let lease = this.liveLease(handle)
+    let lease = this.activeLease(handle)
     if (lease === null) { return this.rejected(handle) }
-    let record = lease.record!
-    if (draws.length === 0) {
-      let entry = new MailboxEntry('DRAW', lease)
-      entry.coalescing = true
-      entry.key = 'empty'
-      return this.admit(record, entry, false)
+    if (!lease.record!.initialized || !lease.record!.actor!.ready()) {
+      return { status: 'REJECTED', reason: 'ACTOR_NOT_READY' }
     }
+    let record = lease.record!
+    if (draws.length === 0) { return { status: 'ACCEPTED' } }
     let unique: Map<number, DrawRequest> = new Map<number, DrawRequest>()
     for (let draw of this.copyDraws(draws)) { unique.set(draw.nodeId, draw) }
+    let index: Map<number, MailboxEntry> = new Map<number, MailboxEntry>()
+    for (let candidate of record.mailbox) {
+      if (candidate.kind === 'DRAW' && candidate.lease === lease && candidate.segment === record.segment) {
+        for (let prior of candidate.draws) { index.set(prior.nodeId, candidate) }
+      }
+    }
     let missing: DrawRequest[] = []
     let touched: Set<MailboxEntry> = new Set<MailboxEntry>()
     unique.forEach((draw: DrawRequest) => {
-      let match = record.mailbox.find((candidate: MailboxEntry): boolean =>
-        candidate.kind === 'DRAW' && candidate.lease === lease && candidate.segment === record.segment &&
-        candidate.draws.some((prior: DrawRequest): boolean => prior.nodeId === draw.nodeId))
+      let match = index.get(draw.nodeId)
       if (match === undefined) { missing.push(draw) }
       else { touched.add(match) }
     })
@@ -466,7 +482,25 @@ export class InProcessHost implements EffectResultHost {
     return { status: 'REJECTED', reason: 'ACTOR_NOT_READY' }
   }
 
+  private validScene(scene: SceneEventPayload | undefined): boolean {
+    if (scene === undefined || scene === null || typeof scene !== 'object' ||
+        typeof scene.kind !== 'string' || typeof scene.body !== 'string' || typeof scene.other !== 'string' ||
+        typeof scene.x !== 'number' || !Number.isFinite(scene.x) ||
+        typeof scene.y !== 'number' || !Number.isFinite(scene.y) ||
+        typeof scene.z !== 'number' || !Number.isFinite(scene.z) ||
+        typeof scene.speed !== 'number' || !Number.isFinite(scene.speed) ||
+        !Array.isArray(scene.bodies) || !Array.isArray(scene.values)) { return false }
+    for (let body of scene.bodies) { if (typeof body !== 'string') { return false } }
+    for (let value of scene.values) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) { return false }
+    }
+    return true
+  }
+
   private validPayload(payload: InputPayload): boolean {
+    if (payload === null || payload === undefined ||
+        (payload.scene !== undefined && !this.validScene(payload.scene))) { return false }
+    if (payload.kind === 'SCENE') { return this.validScene(payload.scene) }
     return payload.kind === 'NONE' || payload.kind === 'NUMBER' || payload.kind === 'STRING' ||
       payload.kind === 'BOOLEAN' || payload.kind === 'POINTER'
   }
@@ -477,6 +511,11 @@ export class InProcessHost implements EffectResultHost {
       case 'STRING': return new VeraStringValue(payload.str)
       case 'BOOLEAN': return new VeraBooleanValue(payload.bool)
       case 'POINTER': return pointerValue(payload.phase, payload.id, payload.x, payload.y)
+      case 'SCENE': {
+        let scene = payload.scene!
+        return sceneEventValue(scene.kind, scene.body, scene.other, scene.x, scene.y, scene.z,
+          scene.speed, scene.bodies, scene.values)
+      }
       default: return new VeraNumberValue(0)
     }
   }
@@ -516,7 +555,10 @@ export class InProcessHost implements EffectResultHost {
             elapsed: prior.tick!.elapsed + entry.tick!.elapsed }
         } else if (entry.kind === 'SURFACE_FRAME') {
           prior.surface = { elapsed: Math.min(100, prior.surface!.elapsed + entry.surface!.elapsed),
-            actions: entry.surface!.actions, draws: entry.surface!.draws }
+            actions: entry.surface!.actions, draws: entry.surface!.draws,
+            loopStartedAt: entry.surface!.loopStartedAt !== undefined
+              ? entry.surface!.loopStartedAt : prior.surface!.loopStartedAt,
+            worldOnly: entry.surface!.worldOnly, worldStopping: entry.surface!.worldStopping }
         } else if (entry.kind === 'MOVE') {
           prior.input = entry.input
         }
@@ -528,11 +570,6 @@ export class InProcessHost implements EffectResultHost {
     if (!this.capacity(record, entry.critical)) { return { status: 'BACKPRESSURE' } }
     this.enqueueEvent(record, entry, ordered)
     let result: AdmissionResult = { status: 'ACCEPTED', inputSeq: entry.inputSeq }
-    if (entry.kind === 'EFFECT_RESULT') {
-      StageTrace.emit(record, 'EFFECT_RESULT', { id: entry.effectId,
-        resultHandler: record.effects.get(entry.effectId)!.handler, generation: entry.handle.vmGeneration,
-        outcome: entry.text.startsWith('declined') ? 'DECLINED' : entry.text.startsWith('error') ? 'ERROR' : 'OK' })
-    }
     this.kick(record)
     return result
   }
@@ -661,7 +698,7 @@ export class InProcessHost implements EffectResultHost {
         return
       case 'INPUT':
         actor.dispatch(entry.input!.action, this.payload(entry.input!.payload), entry.input!.persist,
-          entry.input!.kind === 'FIELD' ? 'FIELD' : 'HANDLER')
+          entry.input!.kind, entry.input!.skipIfSame || false)
         return
       case 'TICK':
         actor.dispatch(entry.tick!.action, new VeraNumberValue(entry.tick!.elapsed), true, 'TICK')
@@ -670,6 +707,9 @@ export class InProcessHost implements EffectResultHost {
         let effect = record.effects.get(entry.effectId)
         record.effects.delete(entry.effectId)
         if (effect === undefined) { return }
+        StageTrace.emit(record, 'EFFECT_RESULT', { id: entry.effectId, resultHandler: effect.handler,
+          generation: entry.handle.vmGeneration,
+          outcome: entry.text.startsWith('declined') ? 'DECLINED' : entry.text.startsWith('error') ? 'ERROR' : 'OK' })
         actor.dispatch(effect.handler, new VeraStringValue(entry.text), true, 'EFFECT_RESULT')
         return
       }
@@ -684,16 +724,33 @@ export class InProcessHost implements EffectResultHost {
         return
       case 'SURFACE_FRAME': {
         let started = this.now()
+        if (entry.surface!.loopStartedAt !== undefined) { actor.beginSurfaceLoop(entry.surface!.loopStartedAt!) }
+        if (entry.surface!.worldOnly === true) {
+          let save = actor.worldSave(Date.now(), this.editsPending(record), entry.surface!.worldStopping === true)
+          StageTrace.emit(record, 'SURFACE_FRAME', { actions: [], draws: [], save: save })
+          return
+        }
+        let actions: string[] = entry.surface!.actions
+        let frameDraws: DrawRequest[] = entry.surface!.draws
+        let save = 'NOT_DUE'
         try {
-          actor.frameHandlers(entry.surface!.actions, entry.surface!.elapsed)
+          actor.frameHandlers(actions, entry.surface!.elapsed)
         } catch (e) {
           actor.clearEffects()
           this.report(record, 'frame', (e as Error).message)
           return
         }
         if (this.disposed) { return }
-        this.surfaceRender(record, entry.surface!.draws, actor.viewDue(this.now()), this.now() - started)
-        if (!record.turnFailed && !this.disposed) { actor.surfaceSave(this.now(), this.editsPending(record)) }
+        this.surfaceRender(record, frameDraws, actor.viewDue(this.now()), this.now() - started)
+        if (!record.turnFailed && !this.disposed) {
+          save = actor.surfaceSave(this.now(), this.editsPending(record))
+        }
+        if (save === 'NOT_SAVED') { save = 'NOT_DUE' }
+        StageTrace.emit(record, 'SURFACE_FRAME', {
+          actions: actions,
+          draws: frameDraws.map((draw: DrawRequest): string => draw.entry),
+          save: save
+        })
         return
       }
       case 'MOVE': {
@@ -788,6 +845,9 @@ export class InProcessHost implements EffectResultHost {
           record.frameSeq === (entry.kind === 'REPLACE' ? 0 : oldFrameSeq)) {
         throw new HostOperationFailure('ACTOR_NOT_READY')
       }
+      if (entry.kind === 'REPLACE' && oldOptions.mode === 'LIVE_PERSISTENT' && oldActor.worldDirty()) {
+        if (!oldActor.saveNow()) { throw new HostOperationFailure('ACTOR_NOT_READY') }
+      }
       record.requiringFirstFrame = false
       let deliveries = record.deliveries!
       record.deliveries = null
@@ -795,13 +855,16 @@ export class InProcessHost implements EffectResultHost {
         leaseId: entry.lease.handle.leaseId }
       entry.lease.handle = handle
       if (entry.kind === 'REPLACE') { entry.lease.editsPending = false }
-      record.effects.clear()
       if (identity !== oldAppId) { this.registry.delete(oldAppId) }
       this.discard(record, (pending: MailboxEntry): boolean => pending.kind !== 'RELEASE' &&
         pending.kind !== 'PROMOTE' && pending.kind !== 'REPLACE', 'INVALID_HANDLE')
       for (let pending of record.mailbox) {
-        if (pending.kind === 'RELEASE' && pending.lease === entry.lease) { pending.handle = handle }
+        if ((pending.kind === 'RELEASE' || pending.kind === 'PROMOTE' || pending.kind === 'REPLACE') &&
+            pending.lease === entry.lease) { pending.handle = handle }
       }
+      // A promote changes the appId (and may change the mode), so effects admitted under the old
+      // identity can no longer be matched by the bridge; drop them with the old handle.
+      record.effects.clear()
       committed = true
       if (entry.kind === 'REPLACE') { oldActor.dispose() }
       record.transitioning = false
@@ -937,13 +1000,16 @@ export class InProcessHost implements EffectResultHost {
     if (this.disposed || record.destroyed) { return }
     let gfx: Object[] = []
     let started = this.now()
+    let current: DrawRequest | null = null
     try {
       for (let draw of draws) {
+        current = draw
         let item: SurfaceGfx = { nodeId: draw.nodeId, ops: record.actor!.draw(draw.entry) }
         gfx.push(item)
         StageTrace.emit(record, 'DRAW', { nodeId: draw.nodeId, result: 'OK' })
       }
     } catch (e) {
+      if (current !== null) { StageTrace.emit(record, 'DRAW', { nodeId: current.nodeId, result: 'ERROR' }) }
       record.actor!.clearEffects()
       this.report(record, 'draw', (e as Error).message)
       return
@@ -962,10 +1028,36 @@ export class InProcessHost implements EffectResultHost {
   private deliverFrame(record: ActorRecord, view: Object | null, gfx: Object[], reveal: boolean,
       timing: number[]): void {
     if (this.disposed || record.destroyed || record.subscriber === null) { return }
+    let scenes: SceneDraw[] = []
+    if (view !== null) {
+      let nodes: VeraUiNode[] = [view as VeraUiNode]
+      let nextId = 1
+      try {
+        while (nodes.length > 0) {
+          let node = nodes.pop()!
+          node.id = nextId++
+          if (node.kind === 'world') {
+            scenes.push({ nodeId: node.id, spec: record.actor!.buildScene(node.label) })
+          }
+          for (let index = node.children.length - 1; index >= 0; index--) { nodes.push(node.children[index]) }
+        }
+      } catch (e) {
+        record.actor!.clearEffects()
+        if (record.requiringFirstFrame) {
+          record.firstFrameFailed = true
+          if (record.current!.kind === 'INITIALIZE' || record.current!.kind === 'REPLACE') {
+            record.actor!.cancel()
+          }
+        }
+        this.report(record, 'WORLD', 'World error: ' + (e as Error).message)
+        return
+      }
+    }
     let frame: FrameEnvelope = { appId: record.appId, vmGeneration: record.vmGeneration,
       frameSeq: ++record.frameSeq, appliedSeq: record.appliedSeq, reveal: reveal,
       view: view === null ? null : JSON.parse(JSON.stringify(view)) as Object,
-      gfx: JSON.parse(JSON.stringify(gfx)) as Object[], timing: timing }
+      gfx: JSON.parse(JSON.stringify(gfx)) as Object[], timing: timing,
+      scenes: view === null ? undefined : JSON.parse(JSON.stringify(scenes)) as SceneDraw[] }
     StageTrace.frame(record, view, reveal)
     this.deliver(record, () => record.subscriber!.onViewFrame(frame))
   }
@@ -1006,11 +1098,18 @@ export class InProcessHost implements EffectResultHost {
   }
 
   private report(record: ActorRecord, kind: string, message: string): void {
-    let normalized = kind.toLowerCase()
-    if (normalized === 'field' || normalized === 'tick' || normalized === 'effect_result') {
+    let normalized: string = kind.toLowerCase()
+    if (normalized === 'field' || normalized === 'tick' || normalized === 'effect_result' ||
+        normalized === 'back' || normalized === 'surface_down' || normalized === 'surface_up' ||
+        normalized === 'surface_cancel') {
       normalized = 'handler'
     }
-    if (normalized === 'handler' || normalized === 'frame' || normalized === 'move' || normalized === 'draw') {
+    if (normalized === 'view' || normalized === 'draw' || normalized === 'move' || normalized === 'frame' ||
+        normalized === 'world') {
+      StageTrace.emit(record, 'ERROR', { kind: normalized.toUpperCase() })
+    }
+    if (normalized === 'handler' || normalized === 'frame' || normalized === 'move' || normalized === 'draw' ||
+        normalized === 'world' || normalized === 'scene') {
       record.turnFailed = true
       if (record.deliveries === null) {
         this.discard(record, (entry: MailboxEntry): boolean => entry.kind === 'TICK' ||
@@ -1044,6 +1143,12 @@ export class InProcessHost implements EffectResultHost {
       this.complete(entry)
       if (entry.kind === 'INITIALIZE' || entry.kind === 'ACQUIRE') {
         this.removeLease(record, entry.lease)
+      }
+      if (entry.kind === 'EFFECT_RESULT') {
+        let effect = record.effects.get(entry.effectId)
+        StageTrace.emit(record, 'EFFECT_RESULT', {id: entry.effectId,
+          resultHandler: effect == undefined ? '' : effect.handler,
+          generation: entry.handle.vmGeneration, outcome: 'DROPPED_STALE' })
       }
       if (entry.reject !== null) { entry.reject!(new HostOperationFailure(code) as Error) }
     }

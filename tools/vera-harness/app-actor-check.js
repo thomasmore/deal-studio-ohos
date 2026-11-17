@@ -324,9 +324,12 @@ test('current-source identity and private ownership; preview has no second execu
     assert(field && field.modifiers.some(modifier => modifier.kind === ts.SyntaxKind.PrivateKeyword), name + ' is private')
   }
   const preview = fs.readFileSync(path.join(root, 'components/VeraPreview.ets'), 'utf8')
-  assert.match(preview, /import\s*\{[^}]*AppActor[^}]*\}\s*from\s*['"]\.\.\/runtime\/AppActor['"]/m)
-  assert(!/\bnew\s+(VirtualMachine|UiHostEnvironment)\b|\bvm!?\.execute\s*\(|\bcurrentState\b|\bcarryState\s*\(|\bstore\.(loadState|saveState)\s*\(/.test(preview))
-  for (const method of ['initialize', 'view', 'dispatch', 'draw', 'move', 'frameHandlers']) assert(preview.includes('.' + method + '('), method + ' delegated')
+  assert.match(preview, /import\s*\{[^}]*InProcessHost[^}]*\}\s*from\s*['"]\.\.\/runtime\/InProcessHost['"]/m)
+  assert.match(preview, /class\s+PreviewSubscriber\s+implements\s+AppSubscriber/)
+  assert(!/\bAppActor\b|\bRuntimeValue\b|\bnew\s+(VirtualMachine|UiHostEnvironment)\b|\bvm!?\.execute\s*\(|\bcurrentState\b|\bcarryState\s*\(|\bstore\.(loadState|saveState)\s*\(/.test(preview))
+  for (const method of ['acquire', 'promote', 'replaceProgram', 'release', 'postInput', 'postTick', 'postSurfaceFrame', 'requestDraw', 'requestSnapshot']) {
+    assert(preview.includes('this.runtime.' + method + '('), method + ' delegated to host')
+  }
   const gfx = fs.readFileSync(path.join(root, 'vera/GfxPaint.ets'), 'utf8')
   assert(!/from\s+['"](?:@kit\.|@ohos\.|.*VeraInterpreter)/.test(gfx))
   assert.match(gfx, /from ['"]\.\/VeraTheme['"]/)

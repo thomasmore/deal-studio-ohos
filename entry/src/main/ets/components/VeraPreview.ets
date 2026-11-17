@@ -10,8 +10,7 @@
  * one in place.
  */
 
-import { RuntimeValue, VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraObjectValue } from '../vera/VeraInterpreter'
-import { HostEffect, VeraUiNode, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
+import { VeraUiNode, formatVeraNumber, formatVeraClock, formatVeraDate, unitAfter, keepUnits } from '../vera/VeraUi'
 import { veraStateStamp } from '../vera/VeraStateStamp'
 import { scheduleCardRefresh } from '../vera/FormUpdater'
 import { LengthMetrics, mediaquery, matrix4 } from '@kit.ArkUI'
@@ -21,20 +20,135 @@ import { iconPath, ICON_STROKE, ICON_VIEWPORT, ICON_ORIGIN } from '../vera/VeraI
 import { ResolvedTheme, resolveTheme, containerFill, toneFill, toneEdge, toneInk,
   textSize, textWeight, textInk, buttonFill, buttonInk, pathFill, densityPad,
   densityGap, spacerSize, readableInk } from '../vera/VeraTheme'
-import { LiveNode, toLive, reconcile, armReveal, markIconRoom } from './VeraLiveTree'
+import { LiveNode, toLive, cloneLiveTree, reconcile, armReveal, markIconRoom } from './VeraLiveTree'
 import { MotionPose, motionPose, motionDuration, pivotPercent, poseMatrix, poseFromArray, multiplyMatrices, perspectiveMatrix,
   columnMajor, poseToPixels, samePose, animatedPose, TRANSFORM_DISTANCE, MOTION_BUDGET_MS } from '../vera/VeraMotion'
 import { displaySync } from '@kit.ArkGraphics2D'
-import { decodeGfx, paintGfx, pointerValue, gfxFit, gfxToSurface, gfxNaturalHeight, GfxOp } from '../vera/VeraGfx'
+import { paintGfx, gfxFit, gfxToSurface, gfxNaturalHeight, GfxOp } from '../vera/GfxPaint'
 import { TimerFace, timerFace } from '../widget/CardModel'
-import { sceneEventValue } from '../vera/VeraScene'
+import { WorldSpec } from '../vera/VeraScene'
 import { worldBackgroundRgba, isDarkRgba } from '../vera/VeraLook3D'
 import { WorldBox, WorldPick, WorldGesture, playerOf } from './VeraWorld3D'
 import { SimEvent } from '../vera/VeraPhysics'
 import { StageTrace } from '../runtime/trace/StageTrace'
-import { AppActor, AppActorCallbacks } from '../runtime/AppActor'
-import { ProgramRef, AcquireOptions, EffectRequest } from '../runtime/shared/Messages'
-import { EffectController, effectConsentKey, effectConsentTitle, effectConsentValues } from '../runtime/EffectController'
+import { InProcessHost, HostOperationFailure } from '../runtime/InProcessHost'
+import { ProgramRef, AcquireOptions, EffectRequest, ActorHandle, AppSubscriber, FrameEnvelope,
+  InputPayload, InputEvent, DrawRequest, TickEvent, SurfaceFrameEvent, AdmissionResult } from '../runtime/shared/Messages'
+import { HostEffectsBridge, HostEffectsBinding, EffectResultHost } from '../runtime/HostEffectsBridge'
+import { effectConsentTitle, effectConsentValues } from '../runtime/EffectController'
+
+function numberPayload(value: number): InputPayload {
+  return { kind: 'NUMBER', num: value, str: '', bool: false, phase: '', id: 0, x: 0, y: 0 }
+}
+
+function stringPayload(value: string): InputPayload {
+  return { kind: 'STRING', num: 0, str: value, bool: false, phase: '', id: 0, x: 0, y: 0 }
+}
+
+function booleanPayload(value: boolean): InputPayload {
+  return { kind: 'BOOLEAN', num: 0, str: '', bool: value, phase: '', id: 0, x: 0, y: 0 }
+}
+
+function pointerPayload(phase: string, id: number, x: number, y: number): InputPayload {
+  return { kind: 'POINTER', num: 0, str: '', bool: false, phase: phase, id: id, x: x, y: y }
+}
+
+function scenePayload(kind: string, body: string, other: string, x: number, y: number, z: number,
+    speed: number, bodies: string[], values: number[]): InputPayload {
+  return { kind: 'SCENE', num: 0, str: '', bool: false, phase: '', id: 0, x: 0, y: 0,
+    scene: { kind: kind, body: body, other: other, x: x, y: y, z: z, speed: speed,
+      bodies: bodies, values: values } }
+}
+
+class PreviewSubscriber implements AppSubscriber {
+  private viewFrame: (frame: FrameEnvelope) => void
+  private errorHandler: (kind: string, message: string, inputSeq?: number) => void
+  private stateSnapshot: (encoded: string) => void
+  private stateSaved: (projectId: string) => void
+  private effectRequest: (effect: EffectRequest) => void
+  private flushInput: (appId: string) => void | Promise<void>
+  private mailboxWritable: () => void
+
+  constructor(
+    viewFrame: (frame: FrameEnvelope) => void,
+    errorHandler: (kind: string, message: string, inputSeq?: number) => void,
+    stateSnapshot: (encoded: string) => void,
+    stateSaved: (projectId: string) => void,
+    effectRequest: (effect: EffectRequest) => void,
+    flushInput: (appId: string) => void | Promise<void>,
+    mailboxWritable: () => void
+  ) {
+    this.viewFrame = viewFrame
+    this.errorHandler = errorHandler
+    this.stateSnapshot = stateSnapshot
+    this.stateSaved = stateSaved
+    this.effectRequest = effectRequest
+    this.flushInput = flushInput
+    this.mailboxWritable = mailboxWritable
+  }
+
+  onViewFrame(frame: FrameEnvelope): void { this.viewFrame(frame) }
+  onError(kind: string, message: string, inputSeq?: number): void {
+    this.errorHandler(kind, message, inputSeq)
+  }
+  onStateSnapshot(encoded: string): void { this.stateSnapshot(encoded) }
+  onStateSaved(projectId: string): void { this.stateSaved(projectId) }
+  onEffectRequest(effect: EffectRequest): void { this.effectRequest(effect) }
+  flushPendingInputFor(appId: string): void | Promise<void> { return this.flushInput(appId) }
+  onMailboxWritable(): void { this.mailboxWritable() }
+}
+
+class PreviewEffectResultHost implements EffectResultHost {
+  private postResult: (
+    handle: ActorHandle,
+    effectId: number,
+    text: string
+  ) => AdmissionResult
+
+  constructor(
+    postResult: (
+      handle: ActorHandle,
+      effectId: number,
+      text: string
+    ) => AdmissionResult
+  ) {
+    this.postResult = postResult
+  }
+
+  postEffectResult(
+    handle: ActorHandle,
+    effectId: number,
+    text: string
+  ): AdmissionResult {
+    return this.postResult(handle, effectId, text)
+  }
+}
+
+interface PreviewGfx {
+  nodeId: number
+  ops: GfxOp[]
+}
+
+class PreviewPost {
+  kind: string
+  key: string = ''
+  segment: number = 0
+  order: number = 0
+  action: FieldAction | null = null
+  tick: TickEvent | null = null
+  surface: SurfaceFrameEvent | null = null
+  draws: DrawRequest[] = []
+  constructor(kind: string) { this.kind = kind }
+}
+
+class PreviewWaiter {
+  generation: number
+  resolve: () => void
+  reject: (error: Error) => void
+  constructor(generation: number, resolve: () => void, reject: (error: Error) => void) {
+    this.generation = generation; this.resolve = resolve; this.reject = reject
+  }
+}
 
 /**
  * The rotation of every spinning shape on screen.
@@ -96,8 +210,13 @@ class FieldInput {
 
 class FieldAction {
   traceKind: string = 'HANDLER'
+  inputSeq: number = -1
+  order: number = 0
+  posting: boolean = false
+  tickerId: string = ''
+  fieldNode: LiveNode | null = null
   action: string
-  payload: RuntimeValue
+  payload: InputPayload
   generation: number
   persist: boolean
   node: LiveNode | null
@@ -109,7 +228,7 @@ class FieldAction {
   dependencyCancellations: number[] = []
   surfaceInput: SurfaceInput | null = null
   surfaceId: number = -1
-  constructor(action: string, payload: RuntimeValue, generation: number,
+  constructor(action: string, payload: InputPayload, generation: number,
     persist: boolean = true, node: LiveNode | null = null) {
     this.action = action
     this.payload = payload
@@ -263,28 +382,46 @@ function tileRows(children: LiveNode[]): LiveNode[][] {
 }
 
 export class VeraPreviewController {
-  private capture: (() => boolean) | null = null
+  private capture: (() => Promise<string>) | null = null
 
-  attach(capture: () => boolean): void {
+  attach(capture: () => Promise<string>): void {
     this.capture = capture
   }
 
-  detach(capture: () => boolean): void {
+  detach(capture: () => Promise<string>): void {
     if (this.capture === capture) { this.capture = null }
   }
 
-  flushAndSnapshot(): boolean {
-    return this.capture === null || this.capture!()
+  flushAndSnapshot(): Promise<string> {
+    if (this.capture === null) { return Promise.reject(new Error('Preview is not attached')) }
+    return this.capture!()
   }
 }
 
 @Component
 export struct VeraPreview {
   controller: VeraPreviewController | null = null
-  private captureFields: () => boolean = (): boolean => {
-    if (!this.flushUserFields()) { return false }
-    this.notifyStateSnapshot()
-    return true
+  private captureFields: () => Promise<string> = (): Promise<string> => {
+    let generation = this.acquireGeneration
+    let loadGeneration = this.loadGeneration
+    let capture = this.operations.then(async (): Promise<string> => {
+      if (this.disposed || generation !== this.acquireGeneration || loadGeneration !== this.loadGeneration || this.previewOnly ||
+          this.activeOptions.mode === 'PREVIEW' || this.handle === null) {
+        throw new Error('Preview is not active')
+      }
+      let handle = this.handle!
+      await this.flushPendingInputFor(this.frameAppId)
+      if (this.handle !== handle || generation !== this.acquireGeneration || loadGeneration !== this.loadGeneration || this.disposed) {
+        throw new Error('Preview was released')
+      }
+      let encoded = await this.runtime.requestSnapshot(handle)
+      if (this.handle !== handle || generation !== this.acquireGeneration || loadGeneration !== this.loadGeneration || this.disposed) {
+        throw new Error('Preview was released')
+      }
+      return encoded
+    })
+    this.operations = capture.then((): void => {}, (_error: Error): void => {})
+    return capture
   }
 
   /**
@@ -312,8 +449,8 @@ export struct VeraPreview {
   @StorageProp('veraForeground') appForeground: boolean = true
 
   onResume(): void {
-    if (this.disposed || this.previewOnly || this.actor === null) { return }
-    this.actor!.resume()
+    if (this.disposed || this.previewOnly) { return }
+    this.queuePost(new PreviewPost('REFRESH'))
   }
 
   /** Read-only snapshot for a hosting chat. It does not migrate state between programs. */
@@ -396,7 +533,37 @@ export struct VeraPreview {
    */
   private revision: number = 0
   @State error: string = ''
-  private actor: AppActor | null = null
+  private viewError: string = ''
+  private runtime: InProcessHost = InProcessHost.get()
+  private handle: ActorHandle | null = null
+  private subscriber: AppSubscriber | null = null
+  private operations: Promise<void> = Promise.resolve()
+  private acquireGeneration: number = 0
+  private loadGeneration: number = 0
+  private subscriberGeneration: number = 0
+  private draining: boolean = false
+  private mountRequested: boolean = false
+  private transitioning: boolean = false
+  private activeProgram: string = ''
+  private activeOptions: AcquireOptions = { mode: 'PREVIEW', persistKey: '', seedState: '' }
+  private frameAppId: string = ''
+  private frameVmGeneration: number = 0
+  private lastFrameSeq: number = 0
+  private lastAppliedSeq: number = 0
+  private observedErrors: Set<number> = new Set<number>()
+  private inFlight: FieldAction | null = null
+  private deferredFrames: FrameEnvelope[] = []
+  private postDrain: boolean = false
+  private postEdits: boolean = false
+  private postingEffect: boolean = false
+  private posts: PreviewPost[] = []
+  private postSegment: number = 0
+  private nextOrder: number = 0
+  private posting: boolean = false
+  private admissionBlocked: boolean = false
+  private waiters: PreviewWaiter[] = []
+  private flushFailure: Error | null = null
+  private effectsBinding: HostEffectsBinding | null = null
   private traceOwner: Object = new Object()
   /** The program's own scroll (not in a chat, where the chat scrolls) and where it sits, in vp, for revealIfAsked. */
   private rootScroller: Scroller = new Scroller()
@@ -433,7 +600,6 @@ export struct VeraPreview {
   private timers: Map<string, number> = new Map<string, number>()
   private timerConfigs: Map<string, TimerConfig> = new Map<string, TimerConfig>()
   private timerLastFire: Map<string, number> = new Map<string, number>()
-  private ticking: boolean = false
   private spin: SpinAngle = new SpinAngle()
   private theme: LiveTheme = new LiveTheme()
   /**
@@ -487,7 +653,7 @@ export struct VeraPreview {
    * nothing draws it.
    */
   @State pending: EffectRequest | null = null
-  private effectController: EffectController | null = null
+  private effectsBridge: HostEffectsBridge | null = null
   private spinTimer: number = -1
   private motionClock: MotionClock = new MotionClock()
   private motionTimer: number = -1
@@ -506,6 +672,13 @@ export struct VeraPreview {
    * surface frame loop, which runs while any world needs it. Frames and pose-writing ms since the last VERA-WORLD line.
    */
   private worlds: Map<LiveNode, WorldBox> = new Map<LiveNode, WorldBox>()
+  private scenes: Map<number, WorldSpec> = new Map<number, WorldSpec>()
+  private nodeIds: Map<LiveNode, number> = new Map<LiveNode, number>()
+  private pendingWorldStep: boolean = false
+  private hadWorlds: boolean = false
+  private worldProgram: string = ''
+  private pendingWorldProgram: string | null = null
+  private worldTransitionError: string = ''
   /** What the worlds told this frame and the node each came from, dispatched once the boxes have all stepped. */
   private worldEvents: SimEvent[] = []
   private worldEventNodes: LiveNode[] = []
@@ -528,7 +701,7 @@ export struct VeraPreview {
   // Repaints the surfaces while a moving part plays on one with no frame loop of its own (a picture that only answers a touch).
   private partsTimer: number = -1
   private lastFrameAt: number = 0
-  private framing: boolean = false
+  private surfaceLoopStartedAt: number | undefined = undefined
   /** Frames since the last VERA-SURFACE rate line, and the ms they spent in the program and painting, worst included. */
   private frameCount: number = 0
   private frameWork: number = 0
@@ -555,7 +728,32 @@ export struct VeraPreview {
     'table', 'tablerow', 'motion', 'layers', 'transform', 'surface', 'world']
 
   aboutToAppear(): void {
+    this.mountRequested = true
+    if (this.draining) {
+      this.operations.then((): void => {
+        if (this.mountRequested && this.disposed) { this.aboutToAppear() }
+      })
+      return
+    }
+    this.frameAppId = ''
+    this.frameVmGeneration = 0
+    this.lastFrameSeq = 0
+    this.lastAppliedSeq = 0
+    this.activeProgram = ''
+    this.admissionBlocked = false
+    this.flushFailure = null
     this.disposed = false
+    this.draining = false
+    this.liveRoot = null
+    this.hasRoot = false
+    this.hadWorlds = false
+    this.worldProgram = ''
+    this.pendingWorldProgram = null
+    this.worldTransitionError = ''
+    this.programId++
+    this.observedErrors.clear()
+    this.acquireGeneration++
+    this.subscriber = null
     this.pageHidden = this.destinationHidden
     let missing: string[] = []
     for (let kind of catalogKinds()) {
@@ -577,36 +775,246 @@ export struct VeraPreview {
     this.load()
   }
 
-  /** Start or stop the tickers the current frame asks for, and report the state a preview held back. */
   onPreviewOnlyChanged(): void {
-    if (this.disposed || this.actor === null) { return }
-    this.actor!.promote(this.actorOptions())
+    this.load()
   }
 
   private actorOptions(): AcquireOptions {
     return {
       mode: this.previewOnly ? 'PREVIEW' : this.persistKey.length > 0 ? 'LIVE_PERSISTENT' : 'LIVE_EPHEMERAL',
-      persistKey: this.persistKey,
-      seedState: this.seedState
+      persistKey: !this.previewOnly ? this.persistKey : '',
+      seedState: this.previewOnly ? '' : this.seedState
     }
   }
 
-  private createActor(): AppActor {
-    let callbacks: AppActorCallbacks = {
-      render: (paint: boolean, reveal: boolean): void => {
-        if (!reveal) { this.renderView(paint, reveal); return }
-        armReveal(reveal)
-        try { this.renderView(paint, reveal) } finally { armReveal(false) }
+  private activationCurrent(generation: number): boolean {
+    return generation === this.acquireGeneration && (!this.disposed || this.draining)
+  }
+
+  private createSubscriber(generation: number): AppSubscriber {
+    let subscriberGeneration = ++this.subscriberGeneration
+    let current = (): boolean =>
+      this.activationCurrent(generation) &&
+      subscriberGeneration === this.subscriberGeneration
+
+    return new PreviewSubscriber(
+      (frame: FrameEnvelope): void => {
+        if (current()) { this.acceptFrame(frame) }
       },
-      snapshot: (encoded: string): void => { this.onStateSnapshot(encoded) },
-      saved: (projectId: string): void => { scheduleCardRefresh(projectId) },
-      effects: (effects: HostEffect[]): void => { this.acceptEffects(effects) },
-      error: (kind: string, message: string): void => {
-        this.error = message
-        if (kind !== 'INIT') { this.stopAllTimers('TRAP') }
+
+      (kind: string, message: string, inputSeq?: number): void => {
+        if (!current()) { return }
+        if (inputSeq !== undefined) { this.observedErrors.add(inputSeq) }
+        let viewFailure = kind.toUpperCase() === 'VIEW'
+        this.worldTransitionError = ''
+        this.viewError = viewFailure ? message : ''
+        if (!this.disposed) {
+          this.error = message
+          if (kind.toUpperCase() !== 'INIT' && !viewFailure) { this.stopAllTimers('TRAP') }
+        }
+        if (!viewFailure) { this.flushFailure = new Error(message) }
+        this.completeInput()
+        this.syncEditGate()
+        this.scheduleFieldActions()
+      },
+
+      (encoded: string): void => {
+        if (current() && !this.disposed) { this.onStateSnapshot(encoded) }
+      },
+
+      (projectId: string): void => {
+        if (current()) { scheduleCardRefresh(projectId) }
+      },
+
+      (effect: EffectRequest): void => {
+        if (!current() || this.disposed || this.effectsBinding === null) { return }
+        this.effectsBinding!.onEffectRequest(effect)
+      },
+
+      (appId: string): void | Promise<void> => current()
+        ? this.flushPendingInputFor(appId)
+        : Promise.reject(new Error('Preview activation changed')),
+
+      (): void => {
+        if (!current()) { return }
+        this.admissionBlocked = false
+        this.resumeFieldActions()
+        this.resumePosts()
+        if (this.effectsBridge !== null) { this.effectsBridge!.onMailboxWritable() }
+        this.syncEditGate()
+      }
+    )
+  }
+
+  private async configure(generation: number, loadGeneration: number): Promise<void> {
+    if (!this.activationCurrent(generation) || this.disposed || loadGeneration !== this.loadGeneration) { return }
+    let program: ProgramRef = { vbc2: this.vbc2, stamp: this.stamp() }
+    let options = this.actorOptions()
+    if (this.handle !== null && this.activeProgram === program.vbc2 &&
+        this.activeOptions.mode === options.mode && this.activeOptions.persistKey === options.persistKey) {
+      this.flushFailure = null
+      this.admissionBlocked = false
+      this.transitioning = false
+      let binding = this.bridge().beginBinding(program.stamp)
+      this.effectsBinding = binding
+      binding.bind(this.handle!)
+      this.queuePost(new PreviewPost('VIEW'))
+      this.syncEditGate()
+      return
+    }
+    let originalHadWorlds = this.hadWorlds || this.worlds.size > 0
+    let originalWorldsRunnable = !this.worldErrorBlocks()
+    let original = this.handle
+    let originalProgram = this.activeProgram
+    let originalOptions = this.activeOptions
+    let originalAppId = this.frameAppId
+    let originalGeneration = this.frameVmGeneration
+    let originalFrameSeq = this.lastFrameSeq
+    let originalAppliedSeq = this.lastAppliedSeq
+    let originalReleased = false
+    let originalInvalid = false
+    this.transitioning = true
+    this.stopAllTimers('REPLACE')
+    this.posts = []
+    this.admissionBlocked = false
+    this.flushFailure = null
+    this.lastAppliedSeq = 0
+    this.lastFrameSeq = 0
+    this.observedErrors.clear()
+    this.activeProgram = program.vbc2
+    this.activeOptions = options
+    this.pendingWorldProgram = this.worldProgram !== program.vbc2 ? program.vbc2 : null
+    this.worldTransitionError = ''
+    this.error = ''
+    this.viewError = ''
+    let binding = this.bridge().beginBinding(program.stamp)
+    this.effectsBinding = binding
+    this.syncEditGate()
+    try {
+      let next: ActorHandle
+      if (original === null) {
+        if (this.subscriber === null) { this.subscriber = this.createSubscriber(generation) }
+        next = await this.runtime.acquire(options.mode === 'LIVE_PERSISTENT' ? options.persistKey : '',
+          program, options, this.subscriber!)
+      } else {
+        try {
+          try {
+            next = await this.changeRuntime(original, program, options, originalProgram, originalOptions)
+          } catch (e) {
+            if ((e as HostOperationFailure).code !== 'INVALID_HANDLE') { throw e as Error }
+            originalInvalid = true
+            if (this.handle === null || this.handle === original) { throw e as Error }
+            original = this.handle!
+            originalInvalid = false
+            try {
+              next = await this.changeRuntime(original, program, options, originalProgram, originalOptions)
+            } catch (retryError) {
+              originalInvalid = (retryError as HostOperationFailure).code === 'INVALID_HANDLE'
+              throw retryError as Error
+            }
+          }
+        } catch (e) {
+          if ((e as HostOperationFailure).code === 'APP_ID_CONFLICT') {
+            originalReleased = true
+            this.handle = null
+            try {
+              await this.runtime.release(original, {
+                saveState: originalOptions.mode !== 'PREVIEW' && (originalHadWorlds || this.liveSurfaces.length > 0)
+              })
+            } catch (releaseError) {
+              console.error('VERA-RENDER conflict release failed: ' + (releaseError as Error).message)
+            }
+            if (!this.activationCurrent(generation) || this.disposed) { throw new Error('Preview was released') }
+            this.subscriber = this.createSubscriber(generation)
+            this.frameAppId = ''
+            this.frameVmGeneration = 0
+            this.lastFrameSeq = 0
+            this.lastAppliedSeq = 0
+            this.observedErrors.clear()
+            next = await this.runtime.acquire(options.mode === 'LIVE_PERSISTENT' ? options.persistKey : '',
+              program, options, this.subscriber!)
+          } else { throw e as Error }
+        }
+      }
+      if (!this.activationCurrent(generation) || this.disposed) {
+        binding.failBinding()
+        if (generation === this.acquireGeneration) { this.handle = null }
+        try {
+          await this.runtime.release(next, {
+            saveState: generation === this.acquireGeneration &&
+              (this.hadWorlds || this.worlds.size > 0 || this.liveSurfaces.length > 0) && options.mode !== 'PREVIEW'
+          })
+        } catch (e) {
+          console.error('VERA-RENDER late release failed: ' + (e as Error).message)
+        }
+        return
+      }
+      if (this.pendingWorldProgram !== null) { this.commitWorldProgram(this.pendingWorldProgram!) }
+      this.handle = next
+      binding.bind(next)
+    } catch (e) {
+      binding.failBinding()
+      if (this.activationCurrent(generation)) {
+        this.handle = originalReleased || originalInvalid ? null : original
+        this.activeProgram = originalProgram
+        this.activeOptions = originalOptions
+        this.pendingWorldProgram = null
+        this.hadWorlds = originalHadWorlds
+        this.frameAppId = originalReleased || originalInvalid ? '' : originalAppId
+        this.frameVmGeneration = originalReleased || originalInvalid ? 0 : originalGeneration
+        this.lastFrameSeq = originalReleased || originalInvalid ? 0 : originalFrameSeq
+        this.lastAppliedSeq = originalReleased || originalInvalid ? 0 : originalAppliedSeq
+        if (originalInvalid) {
+          this.subscriber = null
+          this.subscriberGeneration++
+          this.observedErrors.clear()
+        }
+        if (original !== null && !originalInvalid && (!originalReleased || !this.disposed)) {
+          let restoredBinding = this.bridge().beginBinding(veraStateStamp(originalProgram))
+          this.effectsBinding = restoredBinding
+          try {
+            if (originalReleased) {
+              this.subscriber = this.createSubscriber(generation)
+              let restored = await this.runtime.acquire(originalAppId,
+                { vbc2: originalProgram, stamp: veraStateStamp(originalProgram) }, originalOptions, this.subscriber!)
+              if (!this.activationCurrent(generation) || this.disposed) {
+                restoredBinding.failBinding()
+                await this.runtime.release(restored, { saveState: false })
+              } else { this.handle = restored; restoredBinding.bind(restored) }
+            } else { restoredBinding.bind(original) }
+          } catch (restoreError) {
+            restoredBinding.failBinding()
+            this.handle = null
+            console.error('VERA-RENDER conflict recovery failed: ' + (restoreError as Error).message)
+          }
+        }
+        this.flushFailure = e as Error
+        this.syncEditGate()
+        if (this.handle !== null) {
+          this.flushFailure = null
+          if (!this.disposed) { this.queuePost(new PreviewPost('VIEW')) }
+        }
+        if (!this.disposed) {
+          this.error = (e as Error).message
+          this.worldTransitionError = this.handle !== null && originalWorldsRunnable ? this.error : ''
+        }
+      }
+    } finally {
+      if (generation === this.acquireGeneration && loadGeneration === this.loadGeneration) {
+        this.transitioning = false
+        this.syncEditGate()
+        this.resumeFieldActions()
+        this.resumePosts()
       }
     }
-    return new AppActor(callbacks, this.traceOwner)
+  }
+
+  private changeRuntime(handle: ActorHandle, program: ProgramRef, options: AcquireOptions,
+      previousProgram: string, previousOptions: AcquireOptions): Promise<ActorHandle> {
+    if (previousProgram !== program.vbc2 || (options.mode === 'PREVIEW' && previousOptions.mode !== 'PREVIEW')) {
+      return this.runtime.replaceProgram(handle, program, options)
+    }
+    return this.runtime.promote(handle, options.mode, options.persistKey)
   }
 
   /**
@@ -626,7 +1034,7 @@ export struct VeraPreview {
         this.dark = result.matches
         // The palette is chosen in reconcileTheme, off the frame, so the way to
         // repaint is to ask for a frame.
-        this.renderView()
+        this.queuePost(new PreviewPost('VIEW'))
       })
       this.darkListener = listener
     } catch (e) {
@@ -639,32 +1047,34 @@ export struct VeraPreview {
   private invalidateEffects(): void {
     this.cancelFields()
     this.effectGeneration += 1
-    if (this.effectController !== null) { this.effectController!.invalidate() }
-    this.pending = null
-    if (this.actor !== null) { this.actor!.clearEffects() }
+    this.inFlight = null
+    this.deferredFrames = []
+    this.postDrain = false
+    this.postEdits = false
+    if (this.effectsBridge !== null) { this.effectsBridge!.invalidate() }
+    this.effectsBinding = null
+    if (!this.disposed) { this.pending = null }
+    this.syncEditGate()
   }
 
   private load(): void {
+    if (this.disposed || this.draining) { return }
+    let generation = this.acquireGeneration
+    let loadGeneration = ++this.loadGeneration
+    this.transitioning = true
+    this.flushFailure = new Error('Preview activation changed')
+    this.posts = []
     this.invalidateEffects()
-    // A preview follows a screen being made: each program it is handed is the same screen a little further on, so its tree
-    // is reconciled into the one already drawn. Replacing it rebuilt the whole screen for every piece of the plan, and
-    // the screen flickered while it grew.
-    let keep = this.previewOnly && this.liveRoot !== null && this.vbc2.length > 0
-    this.stopAllTimers()
-    if (!keep) {
-      this.liveGeneration++
-      this.liveRoot = null
-      this.hasRoot = false
-      this.programId += 1
-    }
-    this.error = ''
-    let program: ProgramRef = { vbc2: this.vbc2, stamp: this.stamp() }
-    if (this.actor === null) {
-      this.actor = this.createActor()
-      this.actor!.initialize(program, this.actorOptions())
-    } else {
-      this.actor!.replaceProgram(program, this.actorOptions())
-    }
+    this.stopAllTimers('REPLACE')
+    this.syncEditGate()
+    this.operations = this.operations.then(() => this.configure(generation, loadGeneration)).catch((error: Error): void => {
+      if (this.activationCurrent(generation) && loadGeneration === this.loadGeneration && !this.disposed) {
+        this.transitioning = false
+        this.flushFailure = error
+        this.error = error.message
+        this.syncEditGate()
+      }
+    })
   }
 
   /**
@@ -860,7 +1270,7 @@ export struct VeraPreview {
   /** The system back gesture, relayed by the hosting page via backPressSignal. */
   onBackPressSignal(): void {
     if (this.backHandlerAction.length > 0) {
-      this.handleAction(this.backHandlerAction, 0)
+      this.dispatchFieldAction(this.backHandlerAction, numberPayload(0), true, null, 'BACK')
     }
   }
 
@@ -903,8 +1313,8 @@ export struct VeraPreview {
       // re-enter the VM with a half-applied state.
       // In the background the tick is skipped, not stopped: the time it last fired is kept, so the first tick after
       // resume carries the whole gap, and the app does not write state while a card may be changing it.
-      if (this.ticking || this.appForeground === false) {
-        if (!this.ticking) { StageTrace.emit(this.traceOwner, 'TICK_SKIPPED', { tickerId: id, reason: 'BACKGROUND' }) }
+      if (this.disposed || this.transitioning || this.appForeground === false) {
+        if (this.appForeground === false) { StageTrace.emit(this.traceOwner, 'TICK_SKIPPED', { tickerId: id, reason: 'BACKGROUND' }) }
         return
       }
       let current = this.timerConfigs.get(id)
@@ -926,18 +1336,18 @@ export struct VeraPreview {
       let now = Date.now()
       let elapsed = last !== undefined ? now - (last as number) : safe
       this.timerLastFire.set(id, now)
-      this.ticking = true
-      try {
-        let payload = new VeraNumberValue(Math.round(elapsed))
-        StageTrace.emit(this.traceOwner, 'TICK_DELIVERED', { tickerId: id, action: current.action,
-          class: current.interval >= SLOW_TICK_MS ? 'slow' : 'fast' })
-        if (current.interval >= SLOW_TICK_MS) {
-          this.dispatchFieldAction(current.action, payload, true, null, 'TICK')
-        } else {
-          this.dispatch(current.action, payload, true, 'TICK')
-        }
-      } finally {
-        this.ticking = false
+      StageTrace.emit(this.traceOwner, 'TICK_DELIVERED', { tickerId: id, action: current.action,
+        class: current.interval >= SLOW_TICK_MS ? 'slow' : 'fast' })
+      if (current.interval >= SLOW_TICK_MS) {
+        let next = this.captureFieldAction(current.action, numberPayload(Math.round(elapsed)))
+        next.traceKind = 'TICK'
+        next.tickerId = id
+        this.enqueueFieldAction(next)
+      } else {
+        let post = new PreviewPost('TICK')
+        post.key = id
+        post.tick = { tickerId: id, action: current.action, elapsed: Math.round(elapsed) }
+        this.queuePost(post)
       }
     }, safe)
     this.timers.set(id, handle)
@@ -963,16 +1373,126 @@ export struct VeraPreview {
     this.poseAnims.clear()
   }
 
+  private detachDrainTree(): void {
+    if (this.liveRoot === null) { return }
+    let root = cloneLiveTree(this.liveRoot!)
+    let copies: Map<LiveNode, LiveNode> = new Map<LiveNode, LiveNode>()
+    let originals: LiveNode[] = [this.liveRoot!]
+    let detached: LiveNode[] = [root]
+    while (originals.length > 0) {
+      let node = originals.pop()!
+      let copy = detached.pop()!
+      copies.set(node, copy)
+      copy.fieldGeneration = node.fieldGeneration
+      copy.fieldCancellation = node.fieldCancellation
+      copy.liveGeneration = node.liveGeneration
+      copy.fieldValue = node.fieldValue
+      copy.typed = node.typed
+      copy.touched = node.touched
+      copy.layoutWidth = node.layoutWidth
+      copy.layoutHeight = node.layoutHeight
+      for (let i = 0; i < node.children.length; i++) {
+        originals.push(node.children[i])
+        detached.push(copy.children[i])
+      }
+    }
+    let edits: Map<LiveNode, FieldEdit> = new Map<LiveNode, FieldEdit>()
+    this.fieldEdits.forEach((edit: FieldEdit, node: LiveNode): void => {
+      let copy = copies.get(node)
+      if (copy !== undefined) { edits.set(copy, edit) }
+      else if (edit.timer >= 0) { clearTimeout(edit.timer) }
+    })
+    this.fieldEdits = edits
+    let actions = this.fieldActions.slice()
+    if (this.inFlight !== null) { actions.push(this.inFlight!) }
+    for (let post of this.posts) { if (post.action !== null) { actions.push(post.action!) } }
+    for (let action of actions) {
+      if (action.node !== null) { action.node = copies.get(action.node!) || action.node }
+      if (action.fieldNode !== null) { action.fieldNode = copies.get(action.fieldNode!) || null }
+      action.dependencies = action.dependencies.map((node: LiveNode): LiveNode => copies.get(node) || node)
+    }
+    let surfaces: Map<LiveNode, SurfaceBox> = new Map<LiveNode, SurfaceBox>()
+    this.surfaces.forEach((box: SurfaceBox, node: LiveNode): void => {
+      let copy = copies.get(node)
+      if (copy !== undefined) { surfaces.set(copy, box) }
+    })
+    this.surfaces = surfaces
+    let inputs: Map<LiveNode, Map<number, SurfaceInput>> = new Map<LiveNode, Map<number, SurfaceInput>>()
+    this.surfaceInputs.forEach((contacts: Map<number, SurfaceInput>, node: LiveNode): void => {
+      let copy = copies.get(node)
+      if (copy !== undefined) { inputs.set(copy, contacts) }
+    })
+    this.surfaceInputs = inputs
+    this.liveSurfaces = this.liveSurfaces.map((node: LiveNode): LiveNode => copies.get(node) || node)
+    this.fieldInputs.clear()
+    this.fieldMenus.clear()
+    this.liveRoot = root
+    this.liveGeneration++
+    this.markLiveNodeGeneration(root)
+  }
+
   aboutToDisappear(): void {
-    this.flushFields()
+    this.mountRequested = false
+    if (this.disposed) { return }
     if (this.controller !== null) { this.controller!.detach(this.captureFields) }
-    // Without this the tickers -- and the VM they drive -- outlive the screen.
+    let generation = this.acquireGeneration
+    let saveState = (this.hadWorlds || this.worlds.size > 0 || this.liveSurfaces.length > 0) &&
+      this.activeOptions.mode !== 'PREVIEW'
+    this.draining = true
     this.disposed = true
-    this.invalidateEffects()
+    this.fieldActions = []
+    this.posts = []
+    this.surfaceInputs.clear()
     this.stopAllTimers('DISAPPEAR')
     this.retireWorlds()
-    if ((this.liveSurfaces.length > 0 || (this.actor !== null && this.actor!.worldDirty())) && !this.previewOnly) { this.persistState() }
-    if (this.actor !== null) { this.actor!.dispose(); this.actor = null }
+    for (let node of Array.from(this.fieldEdits.keys())) {
+      let edit = this.fieldEdits.get(node)!
+      let input = this.fieldInputs.get(node)
+      if (edit.composing) {
+        if (input !== undefined) {
+          try { edit.value = input.controller.getText() } catch (_) {}
+        }
+        edit.composing = false
+      }
+      if (edit.timer >= 0) { clearTimeout(edit.timer); edit.timer = -1 }
+      edit.commitRequested = true
+    }
+    this.detachDrainTree()
+    this.resumeFieldActions()
+    this.syncEditGate()
+    this.operations = this.operations.then(async (): Promise<void> => {
+      try {
+        this.transitioning = false
+        if (this.activationCurrent(generation) && this.handle !== null && this.activeOptions.mode !== 'PREVIEW') {
+          await this.flushPendingInputFor(this.frameAppId)
+        }
+      } catch (e) {
+        console.error('VERA-RENDER final input flush failed: ' + (e as Error).message)
+      } finally {
+        if (generation === this.acquireGeneration) {
+          this.invalidateEffects()
+          let handle = this.handle
+          this.handle = null
+          try {
+            if (handle !== null) { await this.runtime.release(handle, { saveState: saveState }) }
+          } catch (e) {
+            console.error('VERA-RENDER release failed: ' + (e as Error).message)
+          } finally {
+            this.draining = false
+            this.subscriber = null
+            this.subscriberGeneration++
+            this.surfaces.clear()
+            this.liveSurfaces = []
+            this.textTimers.clear()
+            this.posts = []
+            this.liveRoot = null
+            this.observedErrors.clear()
+            this.numberDraft.clear()
+            this.syncEditGate()
+          }
+        }
+      }
+    })
     // The same applies to the dark-mode listener: it holds this component, and
     // its callback re-enters the VM.
     if (this.darkListener !== null) {
@@ -989,6 +1509,27 @@ export struct VeraPreview {
   private retireWorlds(): void {
     for (let box of this.worlds.values()) { box.retire() }
     this.worlds.clear()
+    this.scenes.clear()
+    this.nodeIds.clear()
+    this.pendingWorldStep = false
+    this.worldEvents = []
+    this.worldEventNodes = []
+    this.fullOpenedFor = -1
+    if (!this.disposed) { this.setFullWorld(null) }
+    else { this.fullWorld = null }
+  }
+
+  private commitWorldProgram(program: string): void {
+    if (this.worldProgram !== program) {
+      this.retireWorlds()
+      this.hadWorlds = false
+      this.worldProgram = program
+    }
+    this.pendingWorldProgram = null
+  }
+
+  private worldErrorBlocks(): boolean {
+    return this.error.length > 0 && this.error !== this.viewError && this.error !== this.worldTransitionError
   }
 
   /** The bytecode itself is the stamp: a refined program gets a different one. */
@@ -996,44 +1537,108 @@ export struct VeraPreview {
     return veraStateStamp(this.vbc2)
   }
 
-  private notifyStateSnapshot(): void {
-    if (this.actor !== null) { this.actor!.notifyStateSnapshot() }
+  private drainFrames(): void {
+    let frames = this.deferredFrames
+    this.deferredFrames = []
+    for (let frame of frames) { this.acceptFrame(frame) }
   }
 
-  private persistState(): void {
-    if (this.actor !== null) { this.actor!.persistState() }
+  private acceptFrame(frame: FrameEnvelope): void {
+    if (this.inFlight !== null && this.inFlight!.posting) {
+      this.deferredFrames.push(frame)
+      return
+    }
+    if (frame.vmGeneration < this.frameVmGeneration ||
+        (frame.vmGeneration === this.frameVmGeneration && frame.appId === this.frameAppId &&
+          frame.frameSeq <= this.lastFrameSeq)) { return }
+    if (this.pendingWorldProgram !== null && frame.view !== null &&
+        (frame.appId !== this.frameAppId || frame.vmGeneration !== this.frameVmGeneration)) {
+      this.commitWorldProgram(this.pendingWorldProgram!)
+    }
+    this.frameAppId = frame.appId
+    this.frameVmGeneration = frame.vmGeneration
+    this.lastFrameSeq = frame.frameSeq
+    this.lastAppliedSeq = Math.max(this.lastAppliedSeq, frame.appliedSeq)
+    if (frame.scenes !== undefined) {
+      this.scenes.clear()
+      if (frame.scenes.length > 0) { this.hadWorlds = true }
+      for (let scene of frame.scenes) { this.scenes.set(scene.nodeId, scene.spec) }
+    }
+    let started = Date.now()
+    if (frame.view !== null) {
+      if (this.viewError.length > 0 && this.error === this.viewError) { this.error = '' }
+      this.viewError = ''
+      armReveal(frame.reveal && !this.disposed)
+      try { this.renderView(frame.view as VeraUiNode, frame.gfx.length === 0, frame.reveal) }
+      finally { armReveal(false) }
+    }
+    if (!this.disposed) {
+      for (let value of frame.gfx) {
+        let gfx = value as PreviewGfx
+        let node = this.liveSurfaces[gfx.nodeId]
+        if (node !== undefined) { this.paintSurfaceFrame(node, gfx.ops) }
+      }
+      this.frameSplit[0] += frame.timing[0] || 0
+      this.frameSplit[1] += frame.timing[1] || 0
+      this.frameSplit[3] += frame.timing[2] || 0
+      if (frame.gfx.length > 0) {
+        this.countFrame(Date.now(), Date.now() - started + (frame.timing[0] || 0) +
+          (frame.timing[1] || 0) + (frame.timing[2] || 0))
+      }
+    }
+    this.completeInput()
+    this.syncEditGate()
+    this.scheduleFieldActions()
   }
 
-  private renderView(paint: boolean = true, reveal: boolean = false): void {
-    if (this.actor === null || !this.actor!.ready()) { return }
+  private renderView(root: VeraUiNode, paint: boolean = true, reveal: boolean = false): void {
     this.renderingDepth++
     let rendered = false
     try {
-      let root = this.actor!.view()
       // Not for the refreshes a running surface makes ten times a second: they would bury every other line.
       if (paint) {
         console.info('VERA-VIEW rev=' + (this.revision + 1).toString() +
           ' root=' + (root !== null ? root!.kind : 'null') +
           ' children=' + (root !== null ? root!.children.length.toString() : '0'))
       }
-      this.reconcileTheme(root)
+      if (!this.disposed) { this.reconcileTheme(root) }
       // Invalidate all prior membership stamps before mutating the live tree.
       // If reconciliation fails partway through, stale node references fail closed.
       this.liveGeneration++
+      let applied = this.inFlight
+      let fieldApplied = applied !== null && applied.fieldNode !== null &&
+        (applied.posting || (applied.inputSeq >= 0 && this.lastAppliedSeq >= applied.inputSeq))
       if (root === null) {
         this.liveRoot = null
-        this.hasRoot = false
+        if (!this.disposed) { this.hasRoot = false }
       } else if (this.liveRoot === null) {
         this.liveRoot = toLive(root!)
-        this.hasRoot = true
+        if (!this.disposed) { this.hasRoot = true }
       } else {
-        reconcile(this.liveRoot!, root!)
+        reconcile(this.liveRoot!, root!, (node: LiveNode, next: VeraUiNode): string | undefined => {
+          let edit = this.fieldEdits.get(node)
+          let acknowledged = fieldApplied && applied !== null && applied.fieldNode === node && next.value === applied.payload.str
+          if (edit !== undefined && node.fieldGeneration === edit.generation && node.action === edit.action &&
+              (next.value === edit.base || acknowledged)) { return node.fieldValue }
+          return acknowledged ? next.value : undefined
+        })
       }
       if (this.liveRoot !== null) {
         this.markLiveNodeGeneration(this.liveRoot!)
         markIconRoom(this.liveRoot!)
       }
+      if (applied !== null && applied.fieldNode !== null) {
+        let node = applied.fieldNode!
+        let edit = this.fieldEdits.get(node)
+        if (edit !== undefined && node.action === edit.action && node.fieldGeneration === edit.generation &&
+            node.value === applied.payload.str &&
+            (applied.posting || (applied.inputSeq >= 0 && this.lastAppliedSeq >= applied.inputSeq))) {
+          edit.base = node.value
+          edit.generation = node.fieldGeneration
+        }
+      }
       this.reconcileFields()
+      if (this.disposed) { rendered = true; return }
       this.revision += 1
       this.reconcileTimers(this.previewOnly ? null : root)
       this.reconcileSpin(root)
@@ -1044,7 +1649,8 @@ export struct VeraPreview {
       rendered = true
     } catch (e) {
       StageTrace.emit(this.traceOwner, 'ERROR', { kind: 'VIEW' })
-      this.error = 'View error: ' + (e as Error).message
+      this.flushFailure = e as Error
+      if (!this.disposed) { this.error = 'View error: ' + (e as Error).message }
     } finally {
       this.renderingDepth--
     }
@@ -1074,8 +1680,10 @@ export struct VeraPreview {
     this.liveSurfaces = found
     let animated = false
     for (let node of found) { if (node.action.length > 0) { animated = true } }
-    if (this.worldsNeedFrames()) { animated = true }
-    if (animated && !this.previewOnly && !this.pageHidden && this.error.length === 0) { this.startSurfaceLoop() } else { this.stopSurfaceLoop() }
+    if (this.pendingWorldStep || this.worldsNeedFrames()) { animated = true }
+    if (animated && !this.previewOnly && !this.pageHidden &&
+        (this.error.length === 0 || this.error === this.viewError ||
+          (this.worlds.size > 0 && this.error === this.worldTransitionError))) { this.startSurfaceLoop() } else { this.stopSurfaceLoop() }
     if (paint) { this.paintSurfaces() }
   }
 
@@ -1085,35 +1693,58 @@ export struct VeraPreview {
    * node left the tree is retired, and its scene destroyed once its Component3D has gone. A build that traps, or returns
    * a world that breaks the contract (two bodies with one id, too many bodies), stops the program as a draw error does.
    */
+  private ensureNodeIds(): void {
+    this.nodeIds.clear()
+    if (this.liveRoot === null) { return }
+    let nodes: LiveNode[] = [this.liveRoot!]
+    let nextId = 1
+    while (nodes.length > 0) {
+      let node = nodes.pop()!
+      this.nodeIds.set(node, nextId++)
+      for (let index = node.children.length - 1; index >= 0; index--) { nodes.push(node.children[index]) }
+    }
+  }
+
   private reconcileWorlds(): void {
+    this.ensureNodeIds()
     let found: LiveNode[] = []
     if (this.liveRoot !== null) { this.collectKind(this.liveRoot!, 'world', found) }
+    let wanted: Set<number> = new Set<number>()
+    for (let node of found) { wanted.add(this.nodeIds.get(node)!) }
+    for (let nodeId of Array.from(this.scenes.keys())) {
+      if (!wanted.has(nodeId)) { this.scenes.delete(nodeId) }
+    }
     for (let node of Array.from(this.worlds.keys())) {
       if (found.indexOf(node) < 0) {
         (this.worlds.get(node) as WorldBox).retire()
         this.worlds.delete(node)
       }
     }
-    if (this.fullWorld !== null && found.indexOf(this.fullWorld!) < 0) { this.setFullWorld(null) }
+    if (this.fullWorld !== null && (found.indexOf(this.fullWorld!) < 0 ||
+        !this.scenes.has(this.nodeIds.get(this.fullWorld!)!))) { this.setFullWorld(null) }
     if (this.fullOpenedFor !== this.programId && !this.embedded && !this.previewOnly) {
-      let full = found.find((node: LiveNode): boolean => node.style === 'full')
+      let full = found.find((node: LiveNode): boolean => node.style === 'full' && this.scenes.has(this.nodeIds.get(node)!))
       if (full !== undefined) {
         this.fullOpenedFor = this.programId
         this.setFullWorld(full)
       }
     }
-    if (found.length === 0 || this.actor === null || !this.actor!.ready() || this.disposed) { return }
+    if (found.length === 0 || this.disposed) { return }
     let theme = this.t()
     for (let node of found) {
+      let spec = this.scenes.get(this.nodeIds.get(node)!)
       let box = this.worlds.get(node)
+      if (spec === undefined) {
+        if (box !== undefined) { box.retire(); this.worlds.delete(node) }
+        continue
+      }
       if (box === undefined) {
         let context = this.getUIContext().getHostContext()
         box = new WorldBox(context !== undefined ? context.filesDir : '')
         this.worlds.set(node, box)
       }
-      if (node.label.length === 0 || this.error.length > 0) { continue }
+      if (node.label.length === 0 || this.worldErrorBlocks()) { continue }
       try {
-        let spec = this.actor!.buildScene(node.label)
         let dark = isDarkRgba(worldBackgroundRgba(spec, theme))
         if (node === this.fullWorld && dark !== this.fullWorldDark) { this.fullWorldDark = dark }
         let key = JSON.stringify(spec)
@@ -1142,7 +1773,20 @@ export struct VeraPreview {
    * the next physics step of each. Every two seconds
    * a VERA-WORLD line: frames, bodies, loose bodies awake, the ms spent writing poses and stepping the physics.
    */
+  private finishWorldStep(): void {
+    if (!this.pendingWorldStep || this.disposed || this.transitioning || this.flushFailure !== null ||
+        this.fieldActions.length > 0 || this.inFlight !== null || this.fieldEdits.size > 0 ||
+        this.posts.length > 0 || this.posting || this.postDrain || this.postingEffect || this.admissionBlocked ||
+        this.resumingFieldActions || this.renderingDepth > 0) { return }
+    this.pendingWorldStep = false
+    for (let box of Array.from(this.worlds.values())) { box.advance() }
+  }
+
   private tickWorlds(now: number, elapsed: number): void {
+    if (this.pendingWorldStep) {
+      this.finishWorldStep()
+      return
+    }
     if (this.worlds.size === 0) { return }
     let bodies = 0
     let awake = 0
@@ -1167,8 +1811,9 @@ export struct VeraPreview {
     }
     // Told between the end of each world's last step and the start of its next, so a handler that changes a world has
     // it applied with no step running: the UI thread does not wait on the step thread for it.
+    this.pendingWorldStep = true
     this.dispatchWorldEvents()
-    for (let box of Array.from(this.worlds.values())) { box.advance() }
+    this.finishWorldStep()
     if (this.worldReportAt === 0) { this.worldReportAt = now }
     this.worldFrames += 1
     if (now - this.worldReportAt < 2000) { return }
@@ -1209,7 +1854,8 @@ export struct VeraPreview {
     for (let i = 0; i < events.length; i++) {
       let node = nodes[i]
       let e = events[i]
-      if (this.disposed || this.previewOnly || this.error.length > 0 || this.liveRoot === null) {
+      if (this.disposed || this.previewOnly ||
+          this.worldErrorBlocks() || this.liveRoot === null) {
         for (let k = i; k < events.length; k++) {
           if (events[k].kind !== 'hit') {
             console.info('VERA-WORLD event dropped kind=' + events[k].kind + ' reason=' + (this.error.length > 0 ? 'program-error' : 'program-stopped'))
@@ -1224,7 +1870,7 @@ export struct VeraPreview {
       console.info('VERA-WORLD event ' + e.kind + ' body=' + e.body + ' other=' + e.other + ' speed=' + e.speed.toFixed(2) +
         ' values=' + e.values.join(',') + (e.kind === 'settled' ? ' kick=' + e.kick.toString() : ''))
       // A knock (hit, struck) is frequent and changes little: it is saved with the next settle, tap or save, not on its own.
-      this.dispatchFieldAction(node.action, sceneEventValue(e.kind, e.body, e.other, e.x, e.y, e.z, e.speed, e.bodies, e.values,
+      this.dispatchFieldAction(node.action, scenePayload(e.kind, e.body, e.other, e.x, e.y, e.z, e.speed, e.bodies, e.values,
         [e.dx, e.dy, e.dz]), e.kind !== 'hit' && e.kind !== 'struck', node)
     }
   }
@@ -1293,7 +1939,7 @@ export struct VeraPreview {
     // The frame loop paints every surface each frame: the parts' own repaint would paint them a second time.
     this.stopPartsTimer()
     this.lastFrameAt = 0
-    if (this.actor !== null) { this.actor!.beginSurfaceLoop(Date.now()) }
+    this.surfaceLoopStartedAt = Date.now()
     console.info('VERA-SURFACE loop start')
     this.frameReportAt = 0
     this.frameCount = 0
@@ -1329,10 +1975,11 @@ export struct VeraPreview {
       this.surfaceSync = null
     }
     if (this.surfaceTimer >= 0) { clearInterval(this.surfaceTimer); this.surfaceTimer = -1 }
+    this.surfaceLoopStartedAt = undefined
   }
 
   private surfaceFrame(): void {
-    if (this.disposed || this.pageHidden || this.framing || this.actor === null || !this.actor!.ready()) {
+    if (this.disposed || this.transitioning || this.pageHidden || this.handle === null) {
       if (!this.disposed && this.pageHidden) { StageTrace.emit(this.traceOwner, 'SURFACE_SKIPPED', { reason: 'PAGE_HIDDEN' }) }
       return
     }
@@ -1346,51 +1993,20 @@ export struct VeraPreview {
     let now = Date.now()
     let elapsed = this.lastFrameAt > 0 ? Math.min(SURFACE_MAX_ELAPSED_MS, Math.max(0, now - this.lastFrameAt)) : 16
     this.lastFrameAt = now
-    // Only worlds move: they need no VM, no painting and no view refresh, just their orbits written.
-    if (!this.liveSurfaces.some((node: LiveNode): boolean => node.action.length > 0)) {
-      this.tickWorlds(now, elapsed)
-      // Nothing moves any more (the dice lie still, nothing orbits): the next state change starts the loop again.
-      let stopping = !this.disposed && !this.worldsNeedFrames()
-      // Knocks the program counted are saved every few seconds, and when the world comes to rest.
-      if (!this.disposed && this.actor !== null) { this.actor!.worldSave(now, this.fieldEdits.size > 0, stopping) }
-      if (stopping) { this.stopSurfaceLoop() }
-      return
-    }
-    this.framing = true
-    let tracing = StageTrace.enabled()
+    this.tickWorlds(now, elapsed)
     let actions: string[] = []
-    let draws: string[] | null = tracing ? [] : null
-    try {
-      // Frames run at display cadence and intentionally use the last committed VM state: flushing debounced text here
-      // would turn every frame into a field commit. The periodic save below waits until no text draft is pending.
-      // A frame handler is a handler, as a ticker's is: it may ask the phone for something when its time comes (a
-      // vibration on each breath, a sound when the ball lands). Drawing may not.
-      for (let node of this.liveSurfaces) {
-        if (node.action.length > 0) { actions.push(node.action) }
-      }
-      this.actor!.frameHandlers(actions, elapsed)
-      this.frameSplit[0] += Date.now() - now
-      this.paintSurfaces(draws)
-      this.tickWorlds(now, elapsed)
-      if (this.actor!.viewDue(now)) {
-        let viewAt = Date.now()
-        this.renderView(false)
-        this.frameSplit[3] += Date.now() - viewAt
-      }
-      this.countFrame(now, Date.now() - now)
-      // Surface frames are high-frequency and intentionally do not flush debounced text edits. Defer the periodic
-      // snapshot/save while a draft is pending; the field commit will persist the resulting state after it is delivered.
-      let save = this.actor!.surfaceSave(now, this.fieldEdits.size > 0)
-      if (tracing) { StageTrace.emit(this.traceOwner, 'SURFACE_FRAME', { actions: actions, draws: draws!, save: save }) }
-    } catch (e) {
-      StageTrace.emit(this.traceOwner, 'ERROR', { kind: 'FRAME' })
-      this.actor!.clearEffects()
-      console.error('VERA-SURFACE frame TRAP err=' + (e as Error).message)
-      this.error = 'Frame error: ' + (e as Error).message
-      this.stopAllTimers('TRAP')
-    } finally {
-      this.framing = false
+    for (let node of this.liveSurfaces) {
+      if (node.action.length > 0) { actions.push(node.action) }
     }
+    let worldOnly = actions.length === 0
+    let stopping = worldOnly && !this.pendingWorldStep && !this.worldsNeedFrames()
+    let post = new PreviewPost('SURFACE_FRAME')
+    post.key = worldOnly ? 'world' : 'surface'
+    post.surface = { elapsed: elapsed, actions: actions, draws: worldOnly ? [] : this.surfaceDraws(),
+      loopStartedAt: this.surfaceLoopStartedAt, worldOnly: worldOnly, worldStopping: stopping }
+    this.surfaceLoopStartedAt = undefined
+    this.queuePost(post)
+    if (stopping) { this.stopSurfaceLoop() }
   }
 
   /**
@@ -1415,23 +2031,38 @@ export struct VeraPreview {
     this.frameWorst = 0
   }
 
-  private paintSurfaces(draws: string[] | null = null): void {
-    for (let node of this.liveSurfaces) { this.paintSurface(node, draws) }
+  private surfaceDraws(only: LiveNode | null = null): DrawRequest[] {
+    let draws: DrawRequest[] = []
+    for (let i = 0; i < this.liveSurfaces.length; i++) {
+      let node = this.liveSurfaces[i]
+      let box = this.surfaces.get(node)
+      if ((only === null || node === only) && box !== undefined && box.ready && box.visible &&
+          box.width > 0 && box.height > 0 && node.label.length > 0) {
+        draws.push({ nodeId: i, entry: node.label })
+      }
+    }
+    return draws
   }
 
-  /** Ask the program what this surface shows now and paint it; nothing until its canvas is ready and has a size. */
-  private paintSurface(node: LiveNode, draws: string[] | null = null): void {
+  private paintSurfaces(): void {
+    let post = new PreviewPost('DRAW')
+    post.draws = this.surfaceDraws()
+    if (post.draws.length > 0) { this.queuePost(post) }
+  }
+
+  private paintSurface(node: LiveNode): void {
+    let post = new PreviewPost('DRAW')
+    post.draws = this.surfaceDraws(node)
+    if (post.draws.length > 0) { this.queuePost(post) }
+  }
+
+  private paintSurfaceFrame(node: LiveNode, ops: GfxOp[]): void {
     let box = this.surfaces.get(node)
     if (box === undefined || !box.ready || !box.visible || box.width <= 0 || box.height <= 0) { return }
-    if (this.actor === null || !this.actor!.ready() || node.label.length === 0) { return }
     try {
-      let drawAt = Date.now()
-      if (draws !== null) { draws!.push(node.label) }
-      let ops = this.actor!.draw(node.label)
       let paintAt = Date.now()
       paintGfx(box.ctx, ops, this.t(), box.width, box.height, node.minimum, node.maximum, this.getUIContext().vp2px(1), node.style === 'clear',
         false, this.partPoses(box, ops, paintAt), paintAt)
-      this.frameSplit[1] += paintAt - drawAt
       this.frameSplit[2] += Date.now() - paintAt
       StageTrace.emit(this.traceOwner, 'DRAW', { nodeId: this.liveSurfaces.indexOf(node), result: 'OK' })
     } catch (e) {
@@ -1592,7 +2223,7 @@ export struct VeraPreview {
       }
       let fit = gfxFit(currentBox.width, currentBox.height, node.minimum, node.maximum)
       let at = gfxToSurface(fit, touch.x, touch.y)
-      let value = pointerValue(phase, touch.id, at[0], at[1])
+      let value = pointerPayload(phase, touch.id, at[0], at[1])
       if (phase === 'up' || phase === 'cancel') {
         input.ended = true
         let next = this.captureFieldAction(input.action, value, true, node)
@@ -1600,9 +2231,12 @@ export struct VeraPreview {
         next.surfaceId = touch.id
         this.enqueueFieldAction(next)
       } else if (phase === 'move') {
-        this.surfaceMove(input.action, value)
+        this.surfaceMove(input.action, value, node, input)
       } else {
-        this.dispatch(input.action, value)
+        let next = this.captureFieldAction(input.action, value, true, node)
+        next.surfaceInput = input
+        next.surfaceId = touch.id
+        this.enqueueFieldAction(next)
       }
     }
     if (inputs.size === 0 && this.surfaceInputs.get(node) === inputs) { this.surfaceInputs.delete(node) }
@@ -1698,7 +2332,7 @@ export struct VeraPreview {
    * when the player has them (action, then fire): the host's, drawn the same in every program. The stick is its own touch target, so a thumb on it steers
    * while another finger turns the camera; the knob follows the thumb, and lifting lets go.
    */
-  @Builder
+  @LocalBuilder
   worldStick(node: LiveNode) {
     Column() {
       Row() {
@@ -1789,7 +2423,8 @@ export struct VeraPreview {
     }
     let reach = (STICK_SIZE - STICK_KNOB) / 2
     box.setStick((touch.x - STICK_SIZE / 2) / reach, (touch.y - STICK_SIZE / 2) / reach)
-    if (event.type === TouchType.Down && !this.previewOnly && !this.pageHidden && this.error.length === 0) {
+    if (event.type === TouchType.Down && !this.previewOnly && !this.pageHidden &&
+        (this.error.length === 0 || this.error === this.worldTransitionError)) {
       this.startSurfaceLoop()
     }
   }
@@ -1807,12 +2442,12 @@ export struct VeraPreview {
     let p = at !== null ? at : player.position
     console.info('VERA-WORLD event action body=' + player.id + ' button=' + label)
     box.noteInput('action')
-    this.dispatchFieldAction(node.action, sceneEventValue('action', player.id, label, p[0], p[1], p[2], 0, [], [],
+    this.dispatchFieldAction(node.action, scenePayload('action', player.id, label, p[0], p[1], p[2], 0, [], [],
       box.playerFacing()), true, node)
   }
 
   /** The corner button of a world: full screen, or back to the normal screen from it. */
-  @Builder
+  @LocalBuilder
   worldFullButton(node: LiveNode) {
     Row() {
       Button({ type: ButtonType.Circle }) {
@@ -1908,7 +2543,7 @@ export struct VeraPreview {
     let action = node.action
     if (gesture.kind === 'swipe') {
       console.info('VERA-WORLD event swipe body=' + gesture.body + ' speed=' + gesture.speed.toFixed(2))
-      this.dispatchFieldAction(action, sceneEventValue('swipe', gesture.body, '', gesture.x, 0, gesture.z, gesture.speed, [], []),
+      this.dispatchFieldAction(action, scenePayload('swipe', gesture.body, '', gesture.x, 0, gesture.z, gesture.speed, [], []),
         true, node)
       return
     }
@@ -1926,29 +2561,22 @@ export struct VeraPreview {
       console.info('VERA-WORLD event tap body=' + pick.body + (pick.part.length > 0 ? ' part=' + pick.part : ''))
       // A group's tap tells the part in other; dx, dy, dz are the ray through the finger.
       tapped.noteInput('tap')
-      this.dispatchFieldAction(action, sceneEventValue('tap', pick.body, pick.part, pick.x, pick.y, pick.z, 0, [], [],
+      this.dispatchFieldAction(action, scenePayload('tap', pick.body, pick.part, pick.x, pick.y, pick.z, 0, [], [],
         [pick.dx, pick.dy, pick.dz]), true, node)
     }).catch((e: Error) => {
       console.warn('VERA-WORLD pick failed: ' + e.message)
     })
   }
 
-  private surfaceMove(action: string, value: RuntimeValue): void {
-    if (this.actor === null || !this.actor!.ready()) { return }
-    try {
-      this.actor!.move(action, value)
-      // The frame loop paints and refreshes the tree itself; without one, this move is the frame.
-      if (this.surfaceSync === null && this.surfaceTimer < 0) {
-        this.paintSurfaces()
-        if (this.actor!.viewDue(Date.now())) { this.renderView(false) }
-      }
-    } catch (e) {
-      StageTrace.emit(this.traceOwner, 'ERROR', { kind: 'MOVE' })
-      this.actor!.clearEffects()
-      console.error('VERA-SURFACE ' + action + ' TRAP err=' + (e as Error).message)
-      this.error = 'Action error: ' + (e as Error).message
-      this.stopAllTimers('TRAP')
-    }
+  private surfaceMove(action: string, value: InputPayload, node: LiveNode, input: SurfaceInput): void {
+    let next = this.captureFieldAction(action, value, false, node)
+    next.traceKind = 'SURFACE_MOVE'
+    next.surfaceInput = input
+    next.surfaceId = value.id
+    let post = new PreviewPost('MOVE')
+    post.key = action + ':' + value.id.toString()
+    post.action = next
+    this.queuePost(post)
   }
 
   /**
@@ -1987,7 +2615,7 @@ export struct VeraPreview {
   }
 
   private handleAction(action: string, value: number, node: LiveNode | null = null): void {
-    this.dispatchFieldAction(action, new VeraNumberValue(value), true, node)
+    this.dispatchFieldAction(action, numberPayload(value), true, node)
   }
 
   /**
@@ -1998,11 +2626,11 @@ export struct VeraPreview {
    * edits before they dispatch.
    */
   private handleStringAction(action: string, value: string): void {
-    this.dispatch(action, new VeraStringValue(value), true, 'FIELD')
+    this.dispatch(action, stringPayload(value), true, 'FIELD')
   }
 
   private handleBoolAction(action: string, value: boolean, node: LiveNode | null = null): void {
-    this.dispatchFieldAction(action, new VeraBooleanValue(value), true, node)
+    this.dispatchFieldAction(action, booleanPayload(value), true, node)
   }
 
   private fieldActionState(node: LiveNode): string {
@@ -2018,7 +2646,7 @@ export struct VeraPreview {
   /** A world's event (a settle, a hit, a tap) that fieldActionCurrent refused never reaches its handler: say why. */
   private logWorldDrop(next: FieldAction): void {
     if (next.nodeKind !== 'world') { return }
-    console.info('VERA-WORLD event dropped kind=' + this.worldEventKind(next.payload) + ' reason=' + this.fieldActionStaleReason(next))
+    console.info('VERA-WORLD event dropped kind=' + (next.payload.scene?.kind || '?') + ' reason=' + this.fieldActionStaleReason(next))
   }
 
   /** Why fieldActionCurrent refuses an action, for the log: the first guard it fails. */
@@ -2040,17 +2668,8 @@ export struct VeraPreview {
     return 'none'
   }
 
-  /** The kind of a scene.Event payload ('?' for any other value), for a log line. */
-  private worldEventKind(payload: RuntimeValue): string {
-    if (payload instanceof VeraObjectValue) {
-      let kind = (payload as VeraObjectValue).fields.get('kind')
-      if (kind instanceof VeraStringValue) { return (kind as VeraStringValue).value }
-    }
-    return '?'
-  }
-
   private fieldActionCurrent(next: FieldAction): boolean {
-    if (next.generation !== this.effectGeneration || this.disposed || this.previewOnly) {
+    if (next.generation !== this.effectGeneration || this.transitioning || this.disposed || this.previewOnly) {
       StageTrace.emit(this.traceOwner, 'FIELD_ACTION_DROP', { action: next.action, reason: 'effectGeneration' })
       return false
     }
@@ -2069,7 +2688,7 @@ export struct VeraPreview {
       let current = this.liveRoot !== null && this.isLiveNode(node) && node.kind === 'surface' &&
         node.value === next.action && node.fieldGeneration === input.nodeGeneration &&
         input.generation === this.effectGeneration && inputs !== undefined &&
-        inputs.get(next.surfaceId) === input && input.ended &&
+        inputs.get(next.surfaceId) === input &&
         box !== undefined && box.width > 0 && box.height > 0
       if (!current) { StageTrace.emit(this.traceOwner, 'FIELD_ACTION_DROP', { action: next.action, reason: 'nodeState' }) }
       return current
@@ -2082,7 +2701,8 @@ export struct VeraPreview {
   }
 
   private releaseSurfaceAction(next: FieldAction): void {
-    if (next.surfaceInput === null || next.node === null) { return }
+    if (next.surfaceInput === null || next.node === null ||
+        (next.payload.phase !== 'up' && next.payload.phase !== 'cancel')) { return }
     let inputs = this.surfaceInputs.get(next.node!)
     if (inputs === undefined || inputs.get(next.surfaceId) !== next.surfaceInput) { return }
     inputs.delete(next.surfaceId)
@@ -2090,16 +2710,19 @@ export struct VeraPreview {
   }
 
   private scheduleFieldActions(): void {
-    if (!this.fieldActionsNeedResume || this.renderingDepth > 0 || this.fieldActions.length === 0) { return }
-    this.fieldActionsNeedResume = false
+    if (this.renderingDepth > 0 || this.fieldActionsNeedResume) { return }
+    this.fieldActionsNeedResume = true
     let generation = this.effectGeneration
     Promise.resolve().then(() => {
-      if (generation !== this.effectGeneration || this.disposed || this.previewOnly || this.error.length > 0) { return }
+      this.fieldActionsNeedResume = false
+      if (generation !== this.effectGeneration || (this.disposed && !this.draining)) { return }
       this.resumeFieldActions()
+      this.resumePosts()
+      if (this.effectsBridge !== null) { this.effectsBridge!.onMailboxWritable() }
     })
   }
 
-  private captureFieldAction(action: string, payload: RuntimeValue,
+  private captureFieldAction(action: string, payload: InputPayload,
     persist: boolean = true, node: LiveNode | null = null): FieldAction {
     let next = new FieldAction(action, payload, this.effectGeneration, persist, node)
     if (node !== null) {
@@ -2119,7 +2742,7 @@ export struct VeraPreview {
     return next
   }
 
-  private dispatchFieldAction(action: string, payload: RuntimeValue,
+  private dispatchFieldAction(action: string, payload: InputPayload,
     persist: boolean = true, node: LiveNode | null = null, traceKind: string = 'HANDLER'): void {
     if (this.disposed || this.previewOnly) { return }
     let next = this.captureFieldAction(action, payload, persist, node)
@@ -2129,54 +2752,266 @@ export struct VeraPreview {
 
   private enqueueFieldAction(next: FieldAction): void {
     if (!this.fieldActionCurrent(next)) {
-      if (next.nodeKind === 'world') { this.logWorldDrop(next) }
+      this.logWorldDrop(next)
       this.releaseSurfaceAction(next)
       return
     }
+    next.order = ++this.nextOrder
+    this.postSegment++
     let node = next.node
     let action = next.action
     let last = this.fieldActions.length > 0
       ? this.fieldActions[this.fieldActions.length - 1] : undefined
     if (node !== null && node!.kind === 'slider' && last !== undefined && last.node === node &&
         last.action === action && last.generation === next.generation &&
-        last.nodeGeneration === next.nodeGeneration && last.nodeState === next.nodeState && !last.persist) {
+        last.nodeGeneration === next.nodeGeneration && last.nodeState === next.nodeState && !last.persist &&
+        (this.posts.length === 0 || this.posts[this.posts.length - 1].order < last.order)) {
       StageTrace.emit(this.traceOwner, 'FIELD_ACTION_DROP', { action: last.action, reason: 'nodeState' })
       this.fieldActions[this.fieldActions.length - 1] = next
     } else {
       this.fieldActions.push(next)
     }
     StageTrace.emit(this.traceOwner, 'FIELD_ACTION_ENQUEUE', { action: next.action })
+    this.syncEditGate()
     this.resumeFieldActions()
   }
 
   private resumeFieldActions(): void {
-    if (this.renderingDepth > 0) {
-      this.fieldActionsNeedResume = true
-      return
-    }
-    if (this.resumingFieldActions) { return }
+    if (this.renderingDepth > 0 || this.resumingFieldActions || this.transitioning || this.handle === null ||
+        this.inFlight !== null || this.postingEffect || this.posting || this.postDrain || this.admissionBlocked) { return }
     this.resumingFieldActions = true
     try {
-      while (this.fieldActions.length > 0) {
-        let generation = this.effectGeneration
-        this.flushFields()
-        if (generation !== this.effectGeneration) { return }
-        for (let edit of Array.from(this.fieldEdits.values())) {
-          if (edit.composing) { return }
+      while (this.inFlight === null && !this.admissionBlocked && !this.transitioning && (!this.disposed || this.draining)) {
+        for (let node of Array.from(this.fieldEdits.keys())) {
+          let edit = this.fieldEdits.get(node)
+          if (edit !== undefined && edit.commitRequested) { this.commitField(node, edit.generation) }
+          if (this.inFlight !== null || this.admissionBlocked || this.transitioning) { break }
         }
-        if (this.fieldActions.length === 0) { return }
-        let next = this.fieldActions.shift() as FieldAction
-        let current = this.fieldActionCurrent(next)
-        this.releaseSurfaceAction(next)
-        if (!current) {
-          if (next.nodeKind === 'world') { this.logWorldDrop(next) }
+        if (this.inFlight !== null || this.admissionBlocked || this.transitioning) { break }
+        let next = this.fieldActions[0]
+        if (this.posts.length > 0 && (next === undefined || this.posts[0].order < next.order)) { break }
+        if (next === undefined) { break }
+        this.flushFields()
+        if (this.inFlight !== null || this.admissionBlocked || this.fieldEdits.size > 0) { break }
+        if (this.fieldActions[0] !== next) { continue }
+        if (!this.fieldActionCurrent(next)) {
+          this.fieldActions.shift()
+          this.logWorldDrop(next)
+          this.releaseSurfaceAction(next)
           continue
         }
+        this.fieldActions.shift()
         StageTrace.emit(this.traceOwner, 'FIELD_ACTION_APPLY', { action: next.action })
-        this.dispatch(next.action, next.payload, next.persist, next.nodeKind === 'world', next.traceKind)
+        let result = this.postAction(next)
+        if (result.status === 'BACKPRESSURE') {
+          if (!this.disposed && !this.transitioning && next.generation === this.effectGeneration) { this.fieldActions.unshift(next) }
+          if (this.inFlight === next) { this.inFlight = null }
+          break
+        }
       }
     } finally {
       this.resumingFieldActions = false
+      this.syncEditGate()
+      this.resumePosts()
+    }
+  }
+
+  private inputEvent(next: FieldAction): InputEvent {
+    let kind = next.traceKind
+    if (next.payload.kind === 'POINTER') { kind = 'SURFACE_' + next.payload.phase.toUpperCase() }
+    if (next.payload.kind === 'SCENE') { kind = 'SCENE' }
+    return { appId: this.frameAppId, vmGeneration: this.frameVmGeneration, kind: kind,
+      action: next.action, payload: next.payload, persist: next.persist, skipIfSame: next.nodeKind === 'world',
+      draws: kind === 'SURFACE_MOVE' && this.surfaceSync === null && this.surfaceTimer < 0 ? this.surfaceDraws() : [] }
+  }
+
+  private postAction(next: FieldAction): AdmissionResult {
+    if (this.handle === null) { return { status: 'REJECTED', reason: 'INVALID_HANDLE' } }
+    next.posting = true
+    this.inFlight = next
+    this.syncEditGate()
+    let result: AdmissionResult
+    try {
+      result = next.traceKind === 'TICK'
+        ? this.runtime.postTick(this.handle!, { tickerId: next.tickerId, action: next.action, elapsed: next.payload.num }, true)
+        : this.runtime.postInput(this.handle!, this.inputEvent(next))
+    } catch (e) {
+      result = { status: 'REJECTED', reason: (e as Error).message }
+    }
+    next.posting = false
+    if (result.status === 'ACCEPTED' && result.inputSeq !== undefined) {
+      next.inputSeq = result.inputSeq
+      this.drainFrames()
+      if (next.nodeKind === 'world') { this.completeWorldInput(next) }
+      else { this.completeInput() }
+    } else if (result.status === 'BACKPRESSURE') {
+      this.admissionBlocked = true
+    } else {
+      if (this.inFlight === next) { this.inFlight = null }
+      this.flushFailure = new Error(result.status === 'REJECTED' ? result.reason : 'Missing input sequence')
+      this.releaseSurfaceAction(next)
+    }
+    if (result.status !== 'ACCEPTED') { this.drainFrames() }
+    this.syncEditGate()
+    return result
+  }
+
+  private completeWorldInput(next: FieldAction): void {
+    let handle = this.handle!
+    let generation = this.effectGeneration
+    let barrier: Promise<string>
+    try { barrier = this.runtime.requestSnapshot(handle) }
+    catch (e) { barrier = Promise.reject(e as Error) }
+    barrier.then((): void => {
+      if (generation !== this.effectGeneration || this.handle !== handle || this.inFlight !== next) { return }
+      this.inFlight = null
+      this.observedErrors.delete(next.inputSeq)
+      this.releaseSurfaceAction(next)
+      this.syncEditGate()
+      this.scheduleFieldActions()
+    }, (error: Error): void => {
+      if (generation !== this.effectGeneration || this.handle !== handle || this.inFlight !== next) { return }
+      this.inFlight = null
+      this.flushFailure = error
+      this.syncEditGate()
+      this.scheduleFieldActions()
+    })
+  }
+
+  private completeInput(): void {
+    let next = this.inFlight
+    if (next === null || next.nodeKind === 'world' || next.posting || next.inputSeq < 0 ||
+        (this.lastAppliedSeq < next.inputSeq && !this.observedErrors.has(next.inputSeq))) { return }
+    this.observedErrors.delete(next.inputSeq)
+    this.inFlight = null
+    this.releaseSurfaceAction(next)
+    this.syncEditGate()
+    this.scheduleFieldActions()
+  }
+
+  private syncEditGate(): void {
+    let pending = this.fieldEdits.size > 0 || this.fieldActions.length > 0 || this.inFlight !== null ||
+      this.postingEffect || this.postEdits || this.posts.some((post: PreviewPost): boolean => post.kind === 'MOVE')
+    if (this.handle !== null) { this.runtime.notifyEdits(this.handle!, pending) }
+    if (this.flushFailure === null && (pending || this.posts.length > 0 || this.posting || this.postDrain || this.transitioning)) { return }
+    let waiters = this.waiters
+    this.waiters = []
+    for (let waiter of waiters) {
+      if (waiter.generation !== this.acquireGeneration) { waiter.reject(new Error('Preview activation changed')) }
+      else if (this.flushFailure !== null) { waiter.reject(this.flushFailure!) }
+      else { waiter.resolve() }
+    }
+  }
+
+  private flushPendingInputFor(appId: string): Promise<void> {
+    if (appId !== this.frameAppId || this.handle === null || (!this.draining && this.disposed)) {
+      return Promise.reject(new Error('Preview is not active'))
+    }
+    if (this.flushFailure !== null) { return Promise.reject(this.flushFailure!) }
+    let promise = new Promise<void>((resolve, reject) => {
+      this.waiters.push(new PreviewWaiter(this.acquireGeneration, resolve, reject))
+    })
+    for (let edit of this.fieldEdits.values()) { edit.commitRequested = true }
+    this.flushFields()
+    this.resumeFieldActions()
+    this.resumePosts()
+    this.syncEditGate()
+    return promise
+  }
+
+  private queuePost(post: PreviewPost): void {
+    if (this.disposed || (this.transitioning && post.kind !== 'VIEW' && post.kind !== 'DRAW') ||
+        (this.previewOnly && post.kind !== 'VIEW' && post.kind !== 'DRAW')) { return }
+    post.order = ++this.nextOrder
+    let stopping = post.surface !== null && post.surface!.worldStopping === true
+    if (stopping) { this.postSegment++ }
+    post.segment = this.postSegment
+    if (stopping) { this.postSegment++ }
+    let last = this.posts[this.posts.length - 1]
+    if (last !== undefined && last.segment === post.segment && last.kind === post.kind && last.key === post.key) {
+      if (post.kind === 'TICK' && last.tick !== null && post.tick !== null) { post.tick!.elapsed += last.tick!.elapsed }
+      if (post.kind === 'SURFACE_FRAME' && last.surface !== null && post.surface !== null) {
+        post.surface!.elapsed = Math.min(SURFACE_MAX_ELAPSED_MS, post.surface!.elapsed + last.surface!.elapsed)
+        if (post.surface!.loopStartedAt === undefined) { post.surface!.loopStartedAt = last.surface!.loopStartedAt }
+      }
+      if (post.kind === 'DRAW') {
+        for (let draw of last.draws) {
+          if (!post.draws.some((next: DrawRequest): boolean => next.nodeId === draw.nodeId)) { post.draws.push(draw) }
+        }
+      }
+      if (post.kind !== 'REFRESH') { post.order = last.order; this.posts.pop() }
+    }
+    this.posts.push(post)
+    this.syncEditGate()
+    this.resumePosts()
+  }
+
+  private resumePosts(): void {
+    if (this.disposed || this.posting || this.postDrain || this.resumingFieldActions || this.transitioning || this.handle === null ||
+        this.inFlight !== null || this.postingEffect || this.renderingDepth > 0 || this.admissionBlocked) { return }
+    this.posting = true
+    let progressed = false
+    try {
+      while (this.posts.length > 0 && this.inFlight === null && !this.admissionBlocked && !this.transitioning && !this.disposed) {
+        let post = this.posts[0]
+        if (this.fieldActions.length > 0 && this.fieldActions[0].order < post.order) { break }
+        if (post.kind === 'MOVE') {
+          if (progressed) { break }
+          this.flushFields()
+          if (this.inFlight !== null || this.fieldEdits.size > 0 || this.admissionBlocked || this.transitioning || this.disposed) { break }
+          if (this.posts[0] !== post) { continue }
+          if (post.action === null || !this.fieldActionCurrent(post.action!)) {
+            this.posts.shift()
+            progressed = true
+            continue
+          }
+        }
+        if (post.kind === 'MOVE') { this.postEdits = true; this.syncEditGate() }
+        let result: AdmissionResult
+        try {
+          if (post.kind === 'VIEW') { result = this.runtime.requestView(this.handle!) }
+          else if (post.kind === 'DRAW') { result = this.runtime.requestDraw(this.handle!, post.draws) }
+          else if (post.kind === 'TICK') { result = this.runtime.postTick(this.handle!, post.tick!, false) }
+          else if (post.kind === 'SURFACE_FRAME') { result = this.runtime.postSurfaceFrame(this.handle!, post.surface!) }
+          else if (post.kind === 'MOVE') { result = this.runtime.postInput(this.handle!, this.inputEvent(post.action!)) }
+          else { result = this.runtime.postRefresh(this.handle!, 'APP') }
+        } catch (e) {
+          result = { status: 'REJECTED', reason: (e as Error).message }
+        }
+        if (result.status === 'BACKPRESSURE') { this.admissionBlocked = true; break }
+        if (this.posts[0] === post) { this.posts.shift() }
+        progressed = true
+        if (result.status === 'REJECTED') { this.flushFailure = new Error(result.reason) }
+      }
+    } finally {
+      this.posting = false
+      if (progressed && this.handle !== null && this.activeOptions.mode !== 'PREVIEW') { this.postDrain = true }
+      this.syncEditGate()
+    }
+    if (progressed && this.handle !== null && this.activeOptions.mode !== 'PREVIEW') {
+      let handle = this.handle!
+      let generation = this.effectGeneration
+      this.postDrain = true
+      this.syncEditGate()
+      let barrier: Promise<string>
+      try { barrier = this.runtime.requestSnapshot(handle) }
+      catch (e) { barrier = Promise.reject(e as Error) }
+      barrier.then((): void => {
+        if (generation !== this.effectGeneration || this.handle !== handle) { return }
+        this.postDrain = false
+        this.postEdits = false
+        this.syncEditGate()
+        this.scheduleFieldActions()
+      }, (error: Error): void => {
+        if (generation !== this.effectGeneration || this.handle !== handle) { return }
+        this.postDrain = false
+        this.postEdits = false
+        this.flushFailure = error
+        this.syncEditGate()
+        this.scheduleFieldActions()
+      })
+    } else if (progressed && this.fieldActions.length > 0 && this.inFlight === null && !this.admissionBlocked) {
+      this.scheduleFieldActions()
     }
   }
 
@@ -2184,11 +3019,8 @@ export struct VeraPreview {
    * The single way a person's input reaches a program: the value is whatever
    * the component produces -- a number, a string or a boolean.
    */
-  private dispatch(action: string, payload: RuntimeValue, persist: boolean = true, skipIfSame: boolean = false, kind: string = 'HANDLER'): void {
-    if (this.disposed) { return }
-    if (!skipIfSame) { console.info('VERA-CLICK action=' + action + ' rev=' + this.revision.toString()) }
-    if (this.actor === null || !this.actor!.ready() || this.previewOnly) { return }
-    this.actor!.dispatch(action, payload, persist, kind, skipIfSame)
+  private dispatch(action: string, payload: InputPayload, persist: boolean = true, kind: string = 'HANDLER'): void {
+    this.dispatchFieldAction(action, payload, persist, null, kind)
   }
 
   /**
@@ -2198,42 +3030,63 @@ export struct VeraPreview {
    * A late answer to a screen that has gone is dropped rather than pushed into
    * a VM that is no longer running.
    */
-  private effectsController(): EffectController {
-    if (this.effectController === null) {
-      this.effectController = new EffectController({
+  private bridge(): HostEffectsBridge {
+    if (this.effectsBridge === null) {
+    let host: EffectResultHost = new PreviewEffectResultHost(
+      (handle: ActorHandle, effectId: number, text: string): AdmissionResult => {
+        if (this.admissionBlocked || this.transitioning || this.posting || this.postDrain || this.inFlight !== null ||
+            this.fieldActions.length > 0 || this.fieldEdits.size > 0 || this.posts.length > 0) {
+          return { status: 'BACKPRESSURE' }
+        }
+        let next = this.captureFieldAction('', stringPayload(text))
+        next.traceKind = 'EFFECT_RESULT'
+        next.posting = true
+        this.inFlight = next
+        this.postingEffect = true
+        this.syncEditGate()
+        try {
+          let admission = this.runtime.postEffectResult(handle, effectId, text)
+          next.posting = false
+          if (admission.status === 'ACCEPTED' && admission.inputSeq !== undefined) {
+            next.inputSeq = admission.inputSeq
+            this.drainFrames()
+            this.completeInput()
+          } else {
+            this.inFlight = null
+            if (admission.status === 'BACKPRESSURE') { this.admissionBlocked = true }
+            else { this.flushFailure = new Error(admission.status === 'REJECTED' ? admission.reason : 'Missing input sequence') }
+          }
+          return admission
+        } catch (e) {
+          if (this.inFlight === next) { this.inFlight = null }
+          throw e as Error
+        } finally {
+          next.posting = false
+          this.postingEffect = false
+          this.drainFrames()
+          this.syncEditGate()
+          this.scheduleFieldActions()
+        }
+      })
+      this.effectsBridge = new HostEffectsBridge(host, {
         askBeforeCalls: ASK_BEFORE_CALLS,
-        stamp: (): string => this.stamp(),
-        isCurrent: (): boolean => !this.disposed,
-        generation: (): number => this.effectGeneration,
         traceOwner: this.traceOwner,
-        traceRequests: true,
-        onFailure: (_effect: EffectRequest | null, error: Error): void => {
-          console.error('VERA-EFFECT callback failed: ' + error.message)
+        onPending: (effect: EffectRequest | null): void => { if (!this.disposed) { this.pending = effect } },
+        flushPendingInputFor: (appId: string): Promise<void> => this.flushPendingInputFor(appId),
+        captureValidity: (effect: EffectRequest): (() => boolean) => {
+          let next = this.captureFieldAction(effect.resultHandler, stringPayload(''))
+          return (): boolean => !this.disposed && this.fieldActionCurrent(next)
         },
-        onPending: (effect: EffectRequest | null): void => { this.pending = effect },
-        complete: (effect: EffectRequest, text: string): void => {
-          if (this.disposed || effect.vmGeneration !== this.effectGeneration) { return }
-          this.dispatchFieldAction(effect.resultHandler, new VeraStringValue(text), true, null, 'EFFECT_RESULT')
+        readyToPost: (_effect: EffectRequest): boolean => !this.disposed && !this.transitioning &&
+          !this.admissionBlocked && !this.posting && !this.postDrain && !this.postingEffect && this.inFlight === null && this.fieldEdits.size === 0 && this.fieldActions.length === 0 && this.posts.length === 0,
+        onFailure: (_effect: EffectRequest | null, error: Error): void => {
+          this.flushFailure = error
+          console.error('VERA-EFFECT callback failed: ' + error.message)
+          this.syncEditGate()
         }
       })
     }
-    return this.effectController!
-  }
-
-  private localEffectRequest(effect: HostEffect): EffectRequest {
-    let params: string[] = []
-    effect.values.forEach((value: string, key: string): void => { params.push(key, value) })
-    return { appId: '', vmGeneration: this.effectGeneration, effectId: effect.id, kind: effect.kind,
-      rawTarget: effect.rawTarget, params: params, resultHandler: effect.resultHandler, mode: effect.rawMode }
-  }
-
-  private acceptEffects(effects: HostEffect[]): void {
-    if (this.disposed || effects.length === 0) { return }
-    this.effectsController().accept(effects.map((effect: HostEffect): EffectRequest => this.localEffectRequest(effect)))
-  }
-
-  private consentKey(effect: EffectRequest): string {
-    return effectConsentKey(effect)
+    return this.effectsBridge!
   }
 
   private consentTitle(effect: EffectRequest): string {
@@ -2249,18 +3102,13 @@ export struct VeraPreview {
   }
 
   private allowPending(): void {
-    if (this.disposed || this.effectController === null) { return }
-    this.effectController!.allowPending()
+    if (this.disposed || this.effectsBridge === null) { return }
+    this.effectsBridge!.allowPending()
   }
 
   private refusePending(): void {
-    if (this.disposed || this.effectController === null) { return }
-    this.effectController!.refusePending()
-  }
-
-  private runEffect(effect: HostEffect): void {
-    if (this.disposed) { return }
-    this.effectsController().accept([this.localEffectRequest(effect)])
+    if (this.disposed || this.effectsBridge === null) { return }
+    this.effectsBridge!.refusePending()
   }
 
   build() {
@@ -2675,7 +3523,7 @@ export struct VeraPreview {
   }
 
   private fieldCurrent(node: LiveNode, generation: number): boolean {
-    return !this.disposed && !this.previewOnly && node.kind === 'field' && node.enabled &&
+    return (!this.disposed || this.draining) && !this.previewOnly && node.kind === 'field' && node.enabled &&
       node.fieldGeneration === generation && this.liveRoot !== null && this.isLiveNode(node)
   }
 
@@ -2726,10 +3574,10 @@ export struct VeraPreview {
         }
         return keep
       })
-      this.fieldActionsNeedResume = this.fieldActions.length > 0
     }
     this.fieldEdits.delete(node)
-    if (node.kind === 'field') { this.refreshFieldIssue(node) }
+    this.syncEditGate()
+    if (!this.disposed && node.kind === 'field') { this.refreshFieldIssue(node) }
   }
 
   private cancelFields(): void {
@@ -2777,8 +3625,8 @@ export struct VeraPreview {
         this.cancelField(node)
       }
     }
-    if (this.liveRoot !== null) { this.refreshFieldIssues(this.liveRoot!) }
-    this.scheduleFieldActions()
+    if (!this.disposed && this.liveRoot !== null) { this.refreshFieldIssues(this.liveRoot!) }
+    this.syncEditGate()
   }
 
   private changeField(node: LiveNode, generation: number, value: string, composing: boolean): void {
@@ -2794,6 +3642,7 @@ export struct VeraPreview {
     this.recordFieldInput(node, value)
     this.refreshFieldIssue(node)
     edit.sequence++
+    this.syncEditGate()
     let sequence = edit.sequence
     if (composing) { return }
     if (edit.commitRequested) {
@@ -2815,18 +3664,32 @@ export struct VeraPreview {
 
   private commitField(node: LiveNode, generation: number): void {
     let edit = this.fieldEdits.get(node)
-    if (edit === undefined || edit.composing) { return }
-    if (edit.generation !== generation) { return }
+    if (edit === undefined || edit.composing || edit.generation !== generation) { return }
+    edit.commitRequested = true
+    if (this.inFlight !== null || this.postingEffect || this.postDrain || this.admissionBlocked || this.transitioning || this.handle === null) {
+      this.syncEditGate()
+      return
+    }
     if (!this.fieldCurrent(node, generation) || node.value !== edit.base) {
       this.cancelField(node)
       return
     }
-    this.cancelField(node)
-    node.fieldValue = edit.value
-    if (edit.value !== node.value && edit.action.length > 0) {
-      this.handleStringAction(edit.action, edit.value)
+    if (edit.value === node.value || edit.action.length === 0) { this.cancelField(node); return }
+    let next = this.captureFieldAction(edit.action, stringPayload(edit.value))
+    next.traceKind = 'FIELD'
+    next.fieldNode = node
+    if (edit.timer >= 0) { clearTimeout(edit.timer); edit.timer = -1 }
+    this.inFlight = next
+    this.fieldEdits.delete(node)
+    this.syncEditGate()
+    let result = this.postAction(next)
+    if (result.status === 'BACKPRESSURE') {
+      if (next.generation === this.effectGeneration && !this.transitioning && !this.fieldEdits.has(node)) {
+        this.fieldEdits.set(node, edit)
+      }
+      if (this.inFlight === next) { this.inFlight = null }
     }
-    if (this.fieldCurrent(node, generation)) { node.fieldValue = node.value }
+    this.syncEditGate()
   }
 
   private flushFields(): void {
@@ -3270,7 +4133,7 @@ export struct VeraPreview {
   private openFieldMenu(node: LiveNode): void {
     let actions: FieldAction[] = []
     for (let i = 0; i < node.options.length; i++) {
-      actions.push(this.captureFieldAction(node.action, new VeraNumberValue(i), true, node))
+      actions.push(this.captureFieldAction(node.action, numberPayload(i), true, node))
     }
     this.fieldMenus.set(node, actions)
   }
@@ -4177,14 +5040,14 @@ export struct VeraPreview {
             if (node.action.length === 0) { return }
             // The phone's own picker, so the value is always a real time and
             // the program never has to validate one.
-            let next = this.captureFieldAction(node.action, new VeraNumberValue(0), true, node)
+            let next = this.captureFieldAction(node.action, numberPayload(0), true, node)
             this.getUIContext().showTimePickerDialog({
               selected: this.minutesToDate(node.numberValue),
               useMilitaryTime: true,
               onAccept: (result: TimePickerResult) => {
                 let h = result.hour !== undefined ? result.hour as number : 0
                 let m = result.minute !== undefined ? result.minute as number : 0
-                next.payload = new VeraNumberValue(h * 60 + m)
+                next.payload = numberPayload(h * 60 + m)
                 this.enqueueFieldAction(next)
               }
             })
@@ -4208,11 +5071,11 @@ export struct VeraPreview {
           .onClick(() => {
             if (node.action.length === 0) { return }
             // The phone's own calendar, as TimeField uses its clock dialog.
-            let next = this.captureFieldAction(node.action, new VeraNumberValue(0), true, node)
+            let next = this.captureFieldAction(node.action, numberPayload(0), true, node)
             this.getUIContext().showDatePickerDialog({
               selected: this.dayToDate(node.numberValue),
               onDateAccept: (value: Date) => {
-                next.payload = new VeraNumberValue(this.dateToDay(value))
+                next.payload = numberPayload(this.dateToDay(value))
                 this.enqueueFieldAction(next)
               }
             })
@@ -4717,7 +5580,7 @@ export struct VeraPreview {
             // slider that only answers on release reads as broken. Only the end
             // of the drag is written to disk, so a drag is one save, not fifty.
             if (node.action.length === 0) { return }
-            this.dispatchFieldAction(node.action, new VeraNumberValue(Math.round(v)),
+            this.dispatchFieldAction(node.action, numberPayload(Math.round(v)),
               mode === SliderChangeMode.End, node)
           })
       }

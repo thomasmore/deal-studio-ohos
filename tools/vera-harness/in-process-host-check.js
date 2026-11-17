@@ -188,6 +188,47 @@ function view(state: AppState): ui.View {
 }
 `
 }
+function worldFixture({ build = 'build', refresh = '' } = {}) {
+  return fixture({ refresh }).replace('return ui.Text("body", "n=" + ui.numberToString(state.n));', `
+    return ui.AppTheme("clean", "", [ui.Text("body", "world"),
+      ui.Column("default", [ui.World("default", 0, "${build}", "worldEvent")]),
+      ui.World("default", 0, "buildOther", "worldEvent")]);`) + `
+function build(state: AppState): scene.Thing[] {
+  if (state.n > 20) { ${trap} }
+  return [scene.floor("ink"), scene.box("body", state.n, 2, 3, 1, 2, 3, "accent")];
+}
+function buildOther(state: AppState): scene.Thing[] {
+  return [scene.sphere("other", state.n + 100, 2, 3, 1, "ink")];
+}
+function buildTrap(state: AppState): scene.Thing[] {
+  ${trap}
+  return [];
+}
+function buildInvalid(state: AppState): scene.Thing[] {
+  return [scene.floor("ink"), scene.floor("accent")];
+}
+function worldEvent(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "hit" && e.body === "body" && e.other === "other" && e.bodies[0] === "body") {
+    state.n = state.n + e.speed;
+    state.calls = state.calls + 1;
+    state.marks.push(e.x);
+    state.marks.push(e.y);
+    state.marks.push(e.z);
+    state.marks.push(e.values[0]);
+  }
+  return state;
+}
+function worldNoop(state: AppState, e: scene.Event): AppState {
+  ${effect('worldNoop')}
+  return state;
+}
+function worldFail(state: AppState, e: scene.Event): AppState {
+  ${effect('worldFail')}
+  ${trap}
+  return state;
+}
+`
+}
 function compile(source) {
   try {
     const { vbc2 } = compileVeraSource(source)
@@ -199,6 +240,10 @@ function compile(source) {
 }
 const programs = {
   basic: compile(fixture()),
+  world: compile(worldFixture()),
+  worldRefreshed: compile(worldFixture({ refresh: 'state.n = state.n + 1;' })),
+  worldTrap: compile(worldFixture({ build: 'buildTrap' })),
+  worldInvalid: compile(worldFixture({ build: 'buildInvalid' })),
   newer: compile(fixture({ initial: 5, extraFields: 'added: number;', extraInit: ', added: 42' })),
   refreshed: compile(fixture({ refresh: `state.n = state.n + 10; state.refreshes = state.refreshes + 1; ${effect('refresh')}` })),
   initTrap: compile(fixture({ init: 'let empty: number[] = []; let n: number = empty[2];' })),
@@ -361,6 +406,24 @@ const post = (h, handle, action = 'add', value = 0, extra = {}) => h.postInput(h
 const tick = (tickerId, elapsed, action = 'add') => ({ tickerId, action, elapsed })
 const draw = (nodeId = 1, entry = 'draw') => ({ nodeId, entry })
 const surface = (elapsed = 16, actions = ['frameA'], draws = [draw()]) => ({ elapsed, actions, draws })
+const markedSurface = (loopStartedAt, ...args) => ({ ...surface(...args), loopStartedAt })
+const sceneEvent = (extra = {}) => ({ kind: 'hit', body: 'body', other: 'other',
+  x: 1, y: 2, z: 3, speed: 4, bodies: ['body'], values: [6], ...extra })
+const sceneInput = (handle, scene = sceneEvent(), extra = {}) => input(handle, 'worldEvent', 0, {
+  kind: 'SCENE', payload: payload('SCENE', 0, { scene }), skipIfSame: true, ...extra
+})
+const worldFrame = (extra = {}) => ({ elapsed: 0, actions: [], draws: [], worldOnly: true, ...extra })
+function assertScenes(frame, n) {
+  assert.notEqual(frame.view, null)
+  const nodes = []
+  const visit = node => { nodes.push(node); node.children.forEach(visit) }
+  visit(frame.view)
+  assert.deepEqual(nodes.map(node => node.id), nodes.map((_, index) => index + 1))
+  assert.deepEqual(frame.scenes.map(scene => scene.nodeId), nodes.filter(node => node.kind === 'world').map(node => node.id))
+  assert.deepEqual(frame.scenes.map(scene => scene.nodeId), [4, 5])
+  assert.deepEqual(frame.scenes.map(scene => scene.spec.bodies[0].position[0]), [n, n + 100])
+  assert(frame.scenes.every(scene => Object.getPrototypeOf(scene.spec) === Object.prototype))
+}
 const accepted = result => { assert.equal(result.status, 'ACCEPTED'); return result.inputSeq }
 const coalesced = result => assert.equal(result.status, 'COALESCED')
 const rejected = result => assert.equal(result.status, 'REJECTED')
@@ -423,7 +486,8 @@ test('preview ignores nonempty persistence key and seed, rejects every live prod
   assert.equal(ioCount(), 0)
   assert.equal(p.snapshots.length + p.effects.length + p.saved.length, 0)
   for (const result of [post(h, a), h.postTick(a, tick('t', 3), false), h.postTick(a, tick('t', 3), true),
-    h.postSurfaceFrame(a, surface()), h.postRefresh(a, 'APP'), h.requestDraw(a, [draw()]), h.postEffectResult(a, 1, 'ok')]) rejected(result)
+    h.postSurfaceFrame(a, surface()), h.postRefresh(a, 'APP'), h.postEffectResult(a, 1, 'ok')]) rejected(result)
+  accepted(h.requestDraw(a, [draw()]))
   await rejects(h.requestSnapshot(a), 'INVALID_HANDLE')
   accepted(h.requestView(a))
   await finish(h.release(a, { saveState: true }))
@@ -960,7 +1024,7 @@ test('event type is part of coalescing key and requestView itself coalesces', as
     accepted(h.requestDraw(a, []))
   })
   assert.deepEqual((await snapshot(h, a)).marks, [2, 3, 4, 5])
-  assert.equal(p.frames.length, 7)
+  assert.equal(p.frames.length, 6)
 })
 
 for (const boundary of ['input', 'slow-tick', 'resume', 'snapshot']) {
@@ -1200,6 +1264,187 @@ test('notifyEdits is synchronous aggregate gate read at surface execution, not a
   assert.equal(count('save'), 1)
   assert.equal(p.snapshots.length, 1)
   assert.deepEqual(sequence().slice(-3), ['save', 'saved', 'snapshot'])
+})
+
+for (const phase of ['start', 'restart']) {
+  test('marked surface ' + phase + ' saves at 5000ms, not 4999ms', async () => {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+    if (phase === 'restart') {
+      accepted(h.postSurfaceFrame(a, markedSurface(now, 1)))
+      advance(5000)
+      accepted(h.postSurfaceFrame(a, surface(1)))
+      assert.equal(count('save'), 1)
+      advance(6000)
+    }
+    p.reset()
+    accepted(h.postSurfaceFrame(a, markedSurface(now, 2)))
+    assert.equal(count('save') + p.snapshots.length, 0)
+    advance(4999)
+    accepted(h.postSurfaceFrame(a, surface(3)))
+    assert.equal(count('save') + p.snapshots.length, 0)
+    advance(1)
+    accepted(h.postSurfaceFrame(a, surface(4)))
+    assert.equal(count('save'), 1)
+    assert.equal(p.saved.length, 1)
+    assert.equal(p.snapshots.length, 1)
+    assert.deepEqual(stateOf(p.snapshots[0]).marks.slice(-3), [2, 3, 4])
+  })
+}
+
+for (const delay of [2300, 7000]) {
+  test('first surface frame delayed ' + delay + 'ms uses captured loop start', async () => {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+    const started = now
+    advance(delay)
+    p.reset()
+    accepted(h.postSurfaceFrame(a, markedSurface(started, 2)))
+    if (delay < 5000) {
+      assert.equal(count('save') + p.snapshots.length, 0)
+      advance(4999 - delay)
+      accepted(h.postSurfaceFrame(a, surface(3)))
+      assert.equal(count('save') + p.snapshots.length, 0)
+      advance(1)
+      accepted(h.postSurfaceFrame(a, surface(4)))
+    }
+    assert.equal(count('save'), 1)
+    assert.equal(p.snapshots.length, 1)
+    assert.equal(stateOf(p.snapshots[0]).calls, delay < 5000 ? 3 : 1)
+  })
+}
+
+test('queued surface frame copies loop start before producer mutates its DTO', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+  const started = now
+  p.reset()
+  queued(h, a, p, () => {
+    const frame = markedSurface(started, 2)
+    accepted(h.postSurfaceFrame(a, frame))
+    frame.loopStartedAt = started + 2300
+    now += 2300
+  })
+  flush()
+  assert.equal(count('save') + p.snapshots.length, 0)
+  advance(2699)
+  accepted(h.postSurfaceFrame(a, surface(3)))
+  assert.equal(count('save') + p.snapshots.length, 0)
+  advance(1)
+  accepted(h.postSurfaceFrame(a, surface(4)))
+  assert.equal(count('save'), 1)
+  assert.deepEqual(stateOf(p.snapshots[0]).marks, [2, 3, 4])
+})
+
+for (const scenario of [
+  { name: 'preserves prior marker when incoming is unmarked', first: -3000, incoming: undefined, expected: -3000 },
+  { name: 'takes incoming marker when prior is unmarked', first: undefined, incoming: -3000, expected: -3000 },
+  { name: 'takes newer incoming timestamp', first: -3000, incoming: -1000, expected: -1000 },
+  { name: 'takes last incoming marker even with older timestamp', first: -1000, incoming: -3000, expected: -3000 }
+]) {
+  test('surface coalescing ' + scenario.name, async () => {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+    const started = now + scenario.expected
+    const frame = (offset, elapsed) => offset === undefined ? surface(elapsed) : markedSurface(now + offset, elapsed)
+    p.reset()
+    queued(h, a, p, () => {
+      accepted(h.postSurfaceFrame(a, frame(scenario.first, 2)))
+      coalesced(h.postSurfaceFrame(a, frame(scenario.incoming, 3)))
+      coalesced(h.postSurfaceFrame(a, surface(4)))
+    })
+    assert.equal(count('save') + p.snapshots.length, 0)
+    assert.deepEqual((await snapshot(h, a)).marks, [9])
+    advance(started + 4999 - now)
+    accepted(h.postSurfaceFrame(a, surface(1)))
+    assert.equal(count('save') + p.snapshots.length, 0)
+    advance(1)
+    accepted(h.postSurfaceFrame(a, surface(1)))
+    assert.equal(count('save'), 1)
+    assert.deepEqual(stateOf(p.snapshots[0]).marks, [9, 1, 1])
+  })
+}
+
+test('backpressured surface marker leaves old deadline intact and retry keeps captured start', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+  accepted(h.postSurfaceFrame(a, markedSurface(now - 4000, 1)))
+  const started = now, retry = markedSurface(started, 2)
+  p.reset()
+  queued(h, a, p, () => {
+    for (let i = 0; i < 240; i++) accepted(post(h, a, 'add', 0))
+    pressure(h.postSurfaceFrame(a, retry))
+  })
+  flush()
+  assert(p.writable > 0)
+  assert.equal(count('save'), 0)
+  advance(1000)
+  accepted(h.postSurfaceFrame(a, surface(3)))
+  assert.equal(count('save'), 1)
+  advance(1500)
+  p.reset()
+  accepted(h.postSurfaceFrame(a, retry))
+  assert.equal(count('save') + p.snapshots.length, 0)
+  advance(started + 4999 - now)
+  accepted(h.postSurfaceFrame(a, surface(4)))
+  assert.equal(count('save') + p.snapshots.length, 0)
+  advance(1)
+  accepted(h.postSurfaceFrame(a, surface(5)))
+  assert.equal(count('save'), 1)
+  assert.deepEqual(stateOf(p.snapshots[0]).marks.slice(-4), [3, 2, 4, 5])
+})
+
+for (const barrierType of ['ordered', 'snapshot']) {
+  test('unmarked surface after ' + barrierType + ' barrier does not reset marked loop deadline', async () => {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+    const started = now
+    let barrier
+    p.reset()
+    queued(h, a, p, () => {
+      accepted(h.postSurfaceFrame(a, markedSurface(started, 2)))
+      if (barrierType === 'ordered') accepted(post(h, a, 'add', 7))
+      else barrier = watch(h.requestSnapshot(a))
+      accepted(h.postSurfaceFrame(a, surface(3)))
+      p.frameHook = () => {
+        p.frameHook = null
+        now += 2000
+      }
+    })
+    flush()
+    if (barrier) assert.deepEqual(stateOf(await finish(barrier)).marks, [2])
+    assert.deepEqual((await snapshot(h, a)).marks, barrierType === 'ordered' ? [2, 7, 3] : [2, 3])
+    assert.equal(count('save'), 0)
+    p.reset()
+    advance(started + 4999 - now)
+    accepted(h.postSurfaceFrame(a, surface(4)))
+    assert.equal(count('save') + p.snapshots.length, 0)
+    advance(1)
+    accepted(h.postSurfaceFrame(a, surface(5)))
+    assert.equal(count('save'), 1)
+    assert.equal(p.snapshots.length, 1)
+  })
+}
+
+test('replacement discards queued old surface marker and rejects stale deadline resets', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+  accepted(h.postSurfaceFrame(a, markedSurface(now, 1)))
+  advance(1000)
+  let replacement
+  queued(h, a, p, () => {
+    replacement = watch(h.replaceProgram(a, programs.newer, persistent()))
+    accepted(h.postSurfaceFrame(a, markedSurface(now, 99)))
+  })
+  const b = await finish(replacement)
+  p.reset()
+  rejected(h.postSurfaceFrame(a, markedSurface(now, 99)))
+  accepted(h.postSurfaceFrame(b, surface(2)))
+  assert.equal(count('save'), 1)
+  assert.deepEqual(stateOf(p.snapshots[0]).marks, [2])
+  accepted(h.postSurfaceFrame(b, markedSurface(now, 3)))
+  p.reset()
+  advance(4999)
+  rejected(h.postSurfaceFrame(a, markedSurface(now, 99)))
+  accepted(h.postSurfaceFrame(b, surface(4)))
+  assert.equal(count('save') + p.snapshots.length, 0)
+  advance(1)
+  accepted(h.postSurfaceFrame(b, surface(5)))
+  assert.equal(count('save'), 1)
+  assert.deepEqual(stateOf(p.snapshots[0]).marks, [2, 3, 4, 5])
 })
 
 test('surface save only snapshots on successful durable save and retries failure without 5-second delay', async () => {
@@ -1790,6 +2035,335 @@ test('requestDraw backpressure leaves overlapping queued nodes unchanged and adm
   assert.deepEqual(latest(p).gfx.map(item => [item.nodeId, item.ops[0].x]), [[1, 1240], [2, 240]])
   assert.equal(p.errors.length, 0)
   await finish(h.release(a))
+})
+
+test('every world view carries detached preorder scenes through acquire, promotion, replacement and resume', async () => {
+  const h = host(), p = probe()
+  let a = await acquire(h, p, programs.worldRefreshed, options('PREVIEW'))
+  assertScenes(latest(p), 1)
+  assert.equal(p.snapshots.length, 0)
+  a = await finish(h.promote(a, 'LIVE_PERSISTENT', 'world/version'))
+  assertScenes(latest(p), 1)
+  external(programs.worldRefreshed, encoded(7), 'world/version')
+  p.reset()
+  accepted(h.postRefresh(a, 'APP'))
+  assert.equal(p.frames.length, 2)
+  assertScenes(p.frames[0], 7)
+  assertScenes(p.frames[1], 8)
+  a = await finish(h.replaceProgram(a, programs.world, persistent('world/version', encoded(8))))
+  assertScenes(latest(p), 8)
+  const previous = latest(p)
+  const immutable = JSON.stringify(previous)
+  accepted(post(h, a, 'add', 1))
+  assertScenes(latest(p), 9)
+  assert.equal(JSON.stringify(previous), immutable)
+  previous.scenes[0].spec.bodies[0].position[0] = 999
+  previous.scenes[1].spec.bodies.length = 0
+  accepted(h.requestView(a))
+  assertScenes(latest(p), 9)
+  await finish(h.release(a))
+  p.reset()
+  a = await acquire(h, p, programs.world, persistent('world/version'), 'world/version')
+  assertScenes(latest(p), 9)
+  advance(101)
+  accepted(h.postSurfaceFrame(a, surface(0, [], [draw()])))
+  assertScenes(latest(p), 9)
+  accepted(h.requestDraw(a, [draw()]))
+  assert.equal(latest(p).view, null)
+  assert.equal(latest(p).scenes, undefined)
+  assert.equal(p.errors.length, 0)
+})
+
+test('initial live refresh and committed replacement attach scenes before refresh persistence', async () => {
+  const h = host(), p = probe()
+  const a = await acquire(h, p, programs.worldRefreshed, persistent())
+  assert.equal(p.frames.length, 2)
+  assertScenes(p.frames[0], 1)
+  assertScenes(p.frames[1], 2)
+  p.reset()
+  const b = await finish(h.replaceProgram(a, programs.worldRefreshed, persistent('fresh/version')))
+  assert.equal(p.frames.length, 2)
+  assertScenes(p.frames[0], 1)
+  assertScenes(p.frames[1], 2)
+  const firstSave = records.findIndex(record => record.type === 'save-attempt')
+  assert(records.filter((record, index) => record.type === 'frame' && index < firstSave).length === 2)
+  assert.equal((await snapshot(h, b)).n, 2)
+})
+
+test('SCENE admissions detach all fields and arrays and remain ordered barriers', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.world)
+  let seq
+  queued(h, a, p, () => {
+    accepted(h.postTick(a, tick('same', 1), false))
+    const event = sceneInput(a)
+    seq = accepted(h.postInput(a, event))
+    event.payload.scene.kind = 'changed'
+    event.payload.scene.body = 'changed'
+    event.payload.scene.other = 'changed'
+    event.payload.scene.x = 100
+    event.payload.scene.y = 100
+    event.payload.scene.z = 100
+    event.payload.scene.speed = 100
+    event.payload.scene.bodies[0] = 'changed'
+    event.payload.scene.values[0] = 100
+    event.payload.scene = sceneEvent({ speed: 100 })
+    event.skipIfSame = false
+    accepted(h.postTick(a, tick('same', 2), false))
+  })
+  const state = await snapshot(h, a)
+  assert.equal(state.n, 8)
+  assert.deepEqual(state.marks, [1, 1, 2, 3, 6, 2])
+  assert.equal(state.calls, 3)
+  assert(p.frames.some(frame => frame.appliedSeq === seq && frame.scenes[0].spec.bodies[0].position[0] === 6))
+  assertScenes(latest(p), 8)
+  assert.equal(p.errors.length, 0)
+})
+
+test('malformed SCENE fields are rejected without queueing or executing', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.world)
+  p.reset()
+  for (const field of ['kind', 'body', 'other']) {
+    for (const value of [undefined, null, 1, {}, []]) {
+      rejected(h.postInput(a, sceneInput(a, sceneEvent({ [field]: value }))))
+    }
+  }
+  for (const field of ['x', 'y', 'z', 'speed']) {
+    for (const value of [undefined, null, '1', NaN, Infinity, -Infinity]) {
+      rejected(h.postInput(a, sceneInput(a, sceneEvent({ [field]: value }))))
+    }
+  }
+  for (const value of [undefined, null, 'body', {}, [1], [undefined], Array(1)]) {
+    rejected(h.postInput(a, sceneInput(a, sceneEvent({ bodies: value }))))
+  }
+  for (const value of [undefined, null, 1, {}, ['1'], [NaN], [Infinity], Array(1)]) {
+    rejected(h.postInput(a, sceneInput(a, sceneEvent({ values: value }))))
+  }
+  for (const value of [null, 1, {}, []]) rejected(h.postInput(a, sceneInput(a, value)))
+  rejected(h.postInput(a, input(a, 'worldEvent', 0, { kind: 'SCENE' })))
+  rejected(h.postInput(a, sceneInput(a, sceneEvent(), { skipIfSame: 'true' })))
+  assert.equal(p.frames.length, 0)
+  assert.equal(p.snapshots.length, 0)
+  assert.equal(p.errors.length, 0)
+  assert.equal((await snapshot(h, a)).n, 1)
+})
+
+test('skipIfSame suppresses scene redraw and snapshot but preserves effects and default dispatch', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.world)
+  p.reset()
+  accepted(h.postInput(a, sceneInput(a, sceneEvent(), { action: 'worldNoop' })))
+  assert.equal(p.frames.length, 0)
+  assert.equal(p.snapshots.length, 0)
+  assert.equal(p.effects.length, 1)
+  accepted(h.postInput(a, sceneInput(a, sceneEvent(), { action: 'worldNoop', skipIfSame: false })))
+  assert.equal(p.frames.length, 1)
+  assert.equal(p.snapshots.length, 1)
+  assert.equal(p.effects.length, 2)
+  accepted(post(h, a, 'add', 0, { skipIfSame: true }))
+  assert.equal(p.frames.length, 2)
+  assert.equal((await snapshot(h, a)).calls, 1)
+})
+
+for (const program of ['worldTrap', 'worldInvalid']) {
+  test(program + ' rejects initial and replacement frames without publishing partial scenes', async () => {
+    const h = host(), p = probe()
+    await rejects(h.acquire('', programs[program], options(), p.subscriber), 'ACTOR_NOT_READY')
+    assert.equal(p.frames.length, 0)
+    assert.equal(p.errors.length, 1)
+    assert.equal(p.errors[0].kind, 'world')
+    const a = await acquire(h, p, programs.world)
+    const previous = latest(p), immutable = JSON.stringify(previous)
+    p.reset()
+    await rejects(h.replaceProgram(a, programs[program], options()), 'ACTOR_NOT_READY')
+    assert.equal(p.frames.length, 0)
+    assert.equal(JSON.stringify(previous), immutable)
+    accepted(post(h, a, 'add', 1))
+    assertScenes(latest(p), 2)
+    assert.equal((await snapshot(h, a)).n, 2)
+  })
+}
+
+test('replacement saves dirty persistent world state before publishing the committed candidate', async () => {
+  const h = host(), p = probe()
+  external(programs.world, encoded())
+  const a = await acquire(h, p, programs.world, persistent())
+  accepted(h.postInput(a, sceneInput(a)))
+  accepted(h.postInput(a, sceneInput(a)))
+  assert.equal((await snapshot(h, a)).n, 9)
+  assert.equal(unpack(JSON.parse(disk.get(stateFile())).value).n, 1)
+  p.reset()
+  const saved = p.subscriber.onStateSaved
+  let savedObservation
+  p.subscriber.onStateSaved = projectId => {
+    saved(projectId)
+    savedObservation = { appId: latest(p).appId, generation: latest(p).vmGeneration, status: post(h, a).status }
+  }
+  const b = await finish(h.replaceProgram(a, programs.newer, persistent('candidate/v')))
+  assert.deepEqual(savedObservation, { appId: 'candidate/v', generation: a.vmGeneration + 1, status: 'REJECTED' })
+  assert.deepEqual(sequence(), ['save', 'snapshot', 'frame', 'saved'])
+  assert.deepEqual(p.saved, ['project'])
+  assert.equal(count('save-attempt'), 1)
+  const durable = JSON.parse(disk.get(stateFile()))
+  assert.equal(durable.stamp, programs.world.stamp)
+  assert.equal(unpack(durable.value).n, 9)
+  assert.equal(disk.has(stateFile('candidate/v')), false)
+  assert.equal((await snapshot(h, b)).n, 5)
+  p.subscriber.onStateSaved = saved
+  await finish(h.release(b))
+  const c = await acquire(h, p, programs.world, persistent())
+  assertScenes(latest(p), 9)
+  assert.equal((await snapshot(h, c)).n, 9)
+})
+
+for (const candidate of ['initTrap', 'initialViewTrap', 'worldTrap', 'worldInvalid']) {
+  test(candidate + ' replacement does not save dirty old world state before candidate validation', async () => {
+    const h = host(), p = probe()
+    external(programs.world, encoded())
+    const a = await acquire(h, p, programs.world, persistent())
+    accepted(h.postInput(a, sceneInput(a)))
+    const frameSeq = latest(p).frameSeq
+    const durable = disk.get(stateFile())
+    p.reset()
+    await rejects(h.replaceProgram(a, programs[candidate], persistent('candidate/v')), 'ACTOR_NOT_READY')
+    assert.equal(count('save-attempt'), 0)
+    assert.equal(p.frames.length + p.snapshots.length + p.saved.length + p.effects.length + p.errors.length, 0)
+    assert.equal(disk.get(stateFile()), durable)
+    assert.equal(disk.has(stateFile('candidate/v')), false)
+    assert.equal((await snapshot(h, a)).n, 5)
+    accepted(h.requestView(a))
+    assert.equal(latest(p).vmGeneration, a.vmGeneration)
+    assert.equal(latest(p).frameSeq, frameSeq + 1)
+    assertScenes(latest(p), 5)
+    accepted(h.postSurfaceFrame(a, worldFrame({ worldStopping: true })))
+    assert.equal(count('save'), 1)
+    assert.equal(unpack(JSON.parse(disk.get(stateFile())).value).n, 5)
+    assert.deepEqual(p.saved, ['project'])
+  })
+}
+
+test('replacement save failure rolls back the candidate and preserves the old world handle and dirty state', async () => {
+  const h = host(), p = probe()
+  external(programs.world, encoded())
+  const a = await acquire(h, p, programs.world, persistent())
+  accepted(h.postInput(a, sceneInput(a)))
+  const frameSeq = latest(p).frameSeq
+  const durable = disk.get(stateFile())
+  p.reset()
+  failure = 'rename'
+  await rejects(h.replaceProgram(a, programs.newer, persistent('candidate/v')), 'ACTOR_NOT_READY')
+  assert.equal(count('save-attempt'), 1)
+  assert.equal(count('save'), 0)
+  assert.equal(p.frames.length + p.snapshots.length + p.saved.length + p.effects.length + p.errors.length, 0)
+  assert.equal(disk.get(stateFile()), durable)
+  assert.equal(disk.has(stateFile('candidate/v')), false)
+  assert.equal((await snapshot(h, a)).n, 5)
+  accepted(h.requestView(a))
+  assert.equal(latest(p).vmGeneration, a.vmGeneration)
+  assert.equal(latest(p).frameSeq, frameSeq + 1)
+  assertScenes(latest(p), 5)
+  failure = ''
+  p.reset()
+  const b = await finish(h.replaceProgram(a, programs.newer, persistent('candidate/v')))
+  assert.equal(count('save-attempt'), 1)
+  assert.equal(count('save'), 1)
+  const savedState = JSON.parse(disk.get(stateFile()))
+  assert.equal(savedState.stamp, programs.world.stamp)
+  assert.equal(unpack(savedState.value).n, 5)
+  assert.deepEqual(p.saved, ['project'])
+  assert.equal((await snapshot(h, b)).n, 5)
+  assert.equal(latest(p).vmGeneration, a.vmGeneration + 1)
+  assert.equal(disk.has(stateFile('candidate/v')), false)
+  rejected(post(h, a))
+})
+
+test('world build and SCENE handler errors drain animation work once and allow explicit recovery', async () => {
+  for (const kind of ['world', 'scene']) {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.world)
+    p.reset()
+    let seq
+    queued(h, a, p, () => {
+      seq = kind === 'world' ? accepted(post(h, a, 'change', 30)) :
+        accepted(h.postInput(a, sceneInput(a, sceneEvent(), { action: 'worldFail' })))
+      accepted(h.postTick(a, tick('fast', 100), false))
+      accepted(h.postSurfaceFrame(a, surface(100)))
+      accepted(post(h, a, 'add', kind === 'world' ? -30 : 1))
+    })
+    assert.equal(p.errors.length, 1)
+    assert.equal(p.errors[0].kind, kind)
+    assert.equal(p.errors[0].inputSeq, seq)
+    assert.equal(p.effects.length, 0)
+    assertScenes(latest(p), kind === 'world' ? 1 : 2)
+    assert.equal((await snapshot(h, a)).calls, kind === 'world' ? 2 : 1)
+  }
+})
+
+test('world-only saves apply loop start first, defer edits and never execute surface work or snapshot', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.world, persistent())
+  accepted(h.postInput(a, sceneInput(a)))
+  p.reset()
+  accepted(h.postSurfaceFrame(a, worldFrame({ loopStartedAt: now, actions: ['fail'], draws: [draw(1, 'drawTrap')] })))
+  assert.equal(ioCount(), 0)
+  advance(4999)
+  accepted(h.postSurfaceFrame(a, worldFrame()))
+  assert.equal(ioCount(), 0)
+  advance(1)
+  h.notifyEdits(a, true)
+  accepted(h.postSurfaceFrame(a, worldFrame()))
+  assert.equal(ioCount(), 0)
+  h.notifyEdits(a, false)
+  accepted(h.postSurfaceFrame(a, worldFrame()))
+  assert.equal(count('save'), 1)
+  assert.equal(p.saved.length, 1)
+  assert.equal(p.frames.length, 0)
+  assert.equal(p.snapshots.length, 0)
+  assert.equal(p.errors.length, 0)
+  accepted(h.postSurfaceFrame(a, worldFrame({ worldStopping: true })))
+  assert.equal(count('save'), 1)
+  assert.equal((await snapshot(h, a)).n, 5)
+})
+
+test('world save requests are barriers and stopping saves precede later inputs and final release', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.world, persistent())
+  let closing
+  p.reset()
+  queued(h, a, p, () => {
+    accepted(h.postSurfaceFrame(a, worldFrame({ loopStartedAt: now })))
+    accepted(h.postInput(a, sceneInput(a)))
+    accepted(h.postSurfaceFrame(a, worldFrame({ worldStopping: true })))
+    accepted(h.postInput(a, sceneInput(a)))
+    accepted(h.postSurfaceFrame(a, worldFrame()))
+    closing = watch(h.release(a, { saveState: true }))
+  })
+  await finish(closing)
+  assert.deepEqual(records.filter(record => record.type === 'save').map(record => unpack(record.payload.value).n), [5, 9])
+  assert.equal(p.snapshots.length, 2)
+  assert.equal(p.errors.length, 0)
+})
+
+test('world-only save turns separate adjacent coalescing surface and tick segments', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p)
+  queued(h, a, p, () => {
+    accepted(h.postSurfaceFrame(a, surface(1)))
+    accepted(h.postTick(a, tick('same', 2), false))
+    accepted(h.postSurfaceFrame(a, worldFrame()))
+    accepted(h.postSurfaceFrame(a, surface(3)))
+    accepted(h.postTick(a, tick('same', 4), false))
+  })
+  assert.deepEqual((await snapshot(h, a)).marks, [1, 2, 3, 4])
+  assert.equal(p.errors.length, 0)
+})
+
+test('world saves keep dirty state on failure and stopping retries without snapshot', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.world, persistent())
+  accepted(h.postInput(a, sceneInput(a)))
+  p.reset()
+  failure = 'rename'
+  accepted(h.postSurfaceFrame(a, worldFrame({ worldStopping: true })))
+  assert.equal(count('save'), 0)
+  failure = ''
+  accepted(h.postSurfaceFrame(a, worldFrame({ worldStopping: true })))
+  assert.equal(count('save'), 1)
+  assert.equal(p.frames.length, 0)
+  assert.equal(p.snapshots.length, 0)
 })
 
 const originals = {

@@ -5,7 +5,8 @@ const { loadVera, loadSource, sourceRoot } = require('./source-loader')
 const { compileVeraSource } = loadVera('VeraCompiler')
 const { WidgetSession } = loadVera('VeraLiveWidget')
 const { veraStateStamp } = loadVera('VeraStateStamp')
-const source = fs.readFileSync(path.join(__dirname, 'examples/widget-counter.vera'), 'utf8')
+const readText = (p, enc) => fs[`readFileSync`](p, enc || 'utf8').replace(/\r\n/g, '\n')
+const source = readText(path.join(__dirname, 'examples/widget-counter.vera'), 'utf8')
 const code = compileVeraSource(source).vbc2
 const session = new WidgetSession(code, 'v1', '')
 const frame = s => s.frame('p1', 'Widget counter', '🔢')
@@ -68,8 +69,8 @@ assert.throws(()=>list.tap(listAfter,listBefore.token,'remove',33),/changed/)
 assert.throws(()=>list.tap(listAfter,listAfter.token,'remove',22),/not available/)
 list.tap(listAfter,listAfter.token,'remove',33)
 assert.deepEqual(frame(list).nodes[0].children.map(row=>row.children[1].value),[11])
-const card = fs.readFileSync(path.join(__dirname, '../../entry/src/main/ets/widget/pages/LiveCard.ets'), 'utf8')
-const view = fs.readFileSync(path.join(__dirname, '../../entry/src/main/ets/widget/CardView.ets'), 'utf8')
+const card = readText(path.join(__dirname, '../../entry/src/main/ets/widget/pages/LiveCard.ets'), 'utf8')
+const view = readText(path.join(__dirname, '../../entry/src/main/ets/widget/CardView.ets'), 'utf8')
 assert.match(card, /handler: action/, 'the card posts the handler a button or shape reports')
 assert.match(card, /handler: handler, x: x, y: y/, 'and the point a picture reports')
 assert.match(card, /frameKey: this.token \+ this.seq/, 'the nodes are made again for every frame: the token and seq are in their key')
@@ -145,7 +146,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 }
 // A tappable shape: a drum on the card. Its path is carried to the card, a tap on it runs the handler, a plain one is refused.
 {
-  const drumSource = fs.readFileSync(path.join(__dirname, 'examples/widget-drum.vera'), 'utf8')
+  const drumSource = readText(path.join(__dirname, 'examples/widget-drum.vera'), 'utf8')
   const drum = new WidgetSession(compileVeraSource(drumSource).vbc2, 'drum', '')
   const f = frame(drum)
   const shape = f.nodes[0].children[0]
@@ -166,7 +167,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 // A Motion on the card: a drum that jumps when it is hit. The frame carries the preset and the trigger, the trigger moves with
 // the count, a style a card cannot play, a second Motion and a Motion that is not a number are refused.
 {
-  const motionSource = fs.readFileSync(path.join(__dirname, 'examples/widget-drum-motion.vera'), 'utf8')
+  const motionSource = readText(path.join(__dirname, 'examples/widget-drum-motion.vera'), 'utf8')
   const drum = new WidgetSession(compileVeraSource(motionSource).vbc2, 'drum-motion', '')
   const f = frame(drum)
   const motion = f.nodes[0].children[0]
@@ -238,7 +239,7 @@ assert.match(view, /node.key \+ this.frameKey/)
     assert.equal(probe.playing(node), false, 'completion settles both inputs')
     assert.deepEqual(pose(probe, node), stages[stages.length - 1].slice(1, 7))
   }
-  const motionSource = fs.readFileSync(path.join(__dirname, 'examples/widget-drum-motion.vera'), 'utf8').replace('"pop"', '"bounce"')
+  const motionSource = readText(path.join(__dirname, 'examples/widget-drum-motion.vera'), 'utf8').replace('"pop"', '"bounce"')
   for (const delta of [-1, 0, 1]) {
     const drum = new WidgetSession(compileVeraSource(motionSource.replace('state.hits + value', 'state.hits + (' + delta + ')')).vbc2, 'motion-' + delta, '')
     const probe = new MotionProbe()
@@ -287,7 +288,7 @@ assert.match(view, /node.key \+ this.frameKey/)
       finish(probe, node)
     }
   }
-  const layers = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')).vbc2, 'motion-layers', '')
+  const layers = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')).vbc2, 'motion-layers', '')
   const scene = frame(layers).nodes[0].children[0]
   const probe = new MotionProbe()
   probe.frameKey = 'layers:0'
@@ -326,7 +327,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 // calling the pointer handler with the finger down and up at that point. No frame loop, one picture, a few dozen shapes.
 {
   const { encodeGfxOps, decodeGfxOps, decodeGfx } = loadVera('VeraGfx')
-  const pandaSource = fs.readFileSync(path.join(__dirname, 'examples/widget-panda.vera'), 'utf8')
+  const pandaSource = readText(path.join(__dirname, 'examples/widget-panda.vera'), 'utf8')
   const panda = new WidgetSession(compileVeraSource(pandaSource).vbc2, 'panda', '')
   const f = frame(panda)
   const motion = f.nodes[0].children[0]
@@ -389,7 +390,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 }
 // Two pictures side by side, each under its own Motion (examples/widget-two-pictures.vera): each touch is counted for its own Motion's slot.
 {
-  const two = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-two-pictures.vera'), 'utf8')).vbc2, 'two-pictures', '')
+  const two = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-two-pictures.vera'), 'utf8')).vbc2, 'two-pictures', '')
   const f = frame(two)
   const [left, right] = f.nodes[0].children[0].children
   assert.deepEqual([left.slot, right.slot], [0, 1])
@@ -401,7 +402,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 }
 // The theme's roles reach the card (CardStyle): sizes, weights, families, tones, panels, alignment, and only what differs from the default is in the frame.
 {
-  const styled = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-styles.vera'), 'utf8')).vbc2, 'styles', '')
+  const styled = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-styles.vera'), 'utf8')).vbc2, 'styles', '')
   const f = frame(styled)
   const [eyebrow, title, panel, row] = f.nodes[0].children
   assert.equal(eyebrow.size, 10); assert.equal(eyebrow.spacing, 2); assert(eyebrow.weight >= 500, 'an eyebrow is not light')
@@ -416,7 +417,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 // Icons, badges, progress, stats and a sparkline on the card (examples/widget-water.vera, widget-metrics.vera).
 {
   const { decodeGfxOps } = loadVera('VeraGfx')
-  const water = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-water.vera'), 'utf8')).vbc2, 'water', '')
+  const water = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-water.vera'), 'utf8')).vbc2, 'water', '')
   const f = frame(water)
   const ring = f.nodes[0].children[0]
   assert.equal(ring.kind, 'ring'); assert.equal(ring.val, 3); assert.equal(ring.max, 8); assert.equal(ring.sub, '38%'); assert.equal(ring.text, 'Water')
@@ -427,7 +428,7 @@ assert.match(view, /node.key \+ this.frameKey/)
   water.tap(f, f.token, 'add', 1)
   assert.equal(frame(water).nodes[0].children[0].val, 4, 'an icon button runs its handler')
   assert.throws(() => water.tap(frame(water), frame(water).token, 'add', 5), /not available/)
-  const metrics = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-metrics.vera'), 'utf8')).vbc2, 'metrics', '')
+  const metrics = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-metrics.vera'), 'utf8')).vbc2, 'metrics', '')
   const m = frame(metrics)
   const kinds = []; const walk = n => { kinds.push(n.kind); n.children.forEach(walk) }; m.nodes.forEach(walk)
   assert.deepEqual(kinds.slice(0, 4), ['column', 'row', 'badge', 'icon'])
@@ -437,12 +438,12 @@ assert.match(view, /node.key \+ this.frameKey/)
   assert(shapes.some(o => o.kind === 'polyline') && shapes.some(o => o.kind === 'circle'), 'a line and its last point')
   assert.equal(chart[0].pointer, '', 'a sparkline is not tappable'); assert.equal(chart[0].pic, 0)
   assert(JSON.stringify(m).length < 4200, 'the metrics widget stays small: ' + JSON.stringify(m).length)
-  const unknownIcon = fs.readFileSync(path.join(__dirname, 'examples/widget-metrics.vera'), 'utf8').replace('"star"', '"nonesuch"')
+  const unknownIcon = readText(path.join(__dirname, 'examples/widget-metrics.vera'), 'utf8').replace('"star"', '"nonesuch"')
   assert.throws(() => frame(new WidgetSession(compileVeraSource(unknownIcon).vbc2, 'bad-icon', '')), /unknown icon/)
 }
 // A timer that runs by itself (ui.Timer): the frame carries the moment and the direction, the platform's TextTimer does the ticking.
 {
-  const timerSource = fs.readFileSync(path.join(__dirname, 'examples/widget-timer.vera'), 'utf8')
+  const timerSource = readText(path.join(__dirname, 'examples/widget-timer.vera'), 'utf8')
   const timer = new WidgetSession(compileVeraSource(timerSource).vbc2, 'timer', '')
   const f = frame(timer)
   const [up, down] = f.nodes[0].children
@@ -460,14 +461,14 @@ assert.match(view, /node.key \+ this.frameKey/)
   const { cardSize } = loadVera('VeraLiveWidget')
   assert.deepEqual([2, 3, 4].map(d => cardSize(d).label), ['2x2', '2x4', '4x4'])
   assert.deepEqual([2, 3, 4].map(d => cardSize(d).maxButtons), [2, 4, 6]); assert.deepEqual([cardSize(7).dimension, cardSize(0).label], [2, '2x2'], 'an unknown size is 2x2')
-  const sized = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-sizes.vera'), 'utf8')).vbc2, 'sizes', '')
+  const sized = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-sizes.vera'), 'utf8')).vbc2, 'sizes', '')
   assert.equal(sized.takesSize(), true)
   const counts = [2, 3, 4].map(d => { const f = sized.frame('p', 'A', '', d); assert.equal(f.dimension, d); let n = 0; const walk = x => { n++; x.children.forEach(walk) }; f.nodes.forEach(walk); return n })
   assert(counts[0] < counts[1] && counts[1] < counts[2], 'a bigger card, more on it: ' + counts)
-  assert.equal(new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-counter.vera'), 'utf8')).vbc2, 'one', '').takesSize(), false)
+  assert.equal(new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-counter.vera'), 'utf8')).vbc2, 'one', '').takesSize(), false)
   // The 41st node is refused on a 2x2 card and taken on a 4x4 one.
   const tens = n => Array.from({length: n}, (_, i) => 'ui.Text("body", "t' + i + '")').join(', ')
-  const manyAt = (d) => { const src = fs.readFileSync(path.join(__dirname, 'examples/widget-sizes.vera'), 'utf8').replace('rows.push(ui.Text("title", "Plan"));', 'rows.push(ui.Column("default", [' + tens(5) + ']));'.repeat(1) + '\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));'); return new WidgetSession(compileVeraSource(src).vbc2, 'many', '').frame('p', 'A', '', d) }
+  const manyAt = (d) => { const src = readText(path.join(__dirname, 'examples/widget-sizes.vera'), 'utf8').replace('rows.push(ui.Text("title", "Plan"));', 'rows.push(ui.Column("default", [' + tens(5) + ']));'.repeat(1) + '\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));\n  rows.push(ui.Column("default", [' + tens(5) + ']));'); return new WidgetSession(compileVeraSource(src).vbc2, 'many', '').frame('p', 'A', '', d) }
   assert.throws(() => manyAt(2), /widget exceeds 40 nodes/)
   assert.equal(manyAt(4).live, true)
 }
@@ -475,7 +476,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 {
   const { compactFrame, normalizeNodes } = loadVera('VeraLiveWidget')
   for (const name of ['widget-metrics', 'widget-styles', 'widget-panda', 'widget-water', 'widget-two-pictures']) {
-    const f = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/' + name + '.vera'), 'utf8')).vbc2, name, '').frame('p', 'A', '')
+    const f = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/' + name + '.vera'), 'utf8')).vbc2, name, '').frame('p', 'A', '')
     const compact = JSON.parse(JSON.stringify(compactFrame(f)))
     assert.deepEqual(JSON.parse(JSON.stringify(normalizeNodes(compact.nodes))), JSON.parse(JSON.stringify(f.nodes)), name + ': what the card restores is what was sent')
     assert(JSON.stringify(compact).length < JSON.stringify(f).length * 0.7, name + ' is smaller compact: ' + JSON.stringify(compact).length + ' of ' + JSON.stringify(f).length)
@@ -484,7 +485,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 }
 // Switches: a toggle and a checkbox are taps that say on or off; a stale token or an unknown handler is refused.
 {
-  const sw = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-switch.vera'), 'utf8')).vbc2, 'sw', '')
+  const sw = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-switch.vera'), 'utf8')).vbc2, 'sw', '')
   const f0 = sw.frame('p', 'A', ''); const col = f0.nodes[0].children
   assert.deepEqual(col.slice(1).map(n => [n.kind, n.val, n.action]), [['toggle', 0, 'setFocus'], ['checkbox', 0, 'setDone']])
   assert(col[2].commands.length > 0, 'a checkbox carries its check mark')
@@ -495,7 +496,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 }
 // Layers: parts one over another, each its own Motion and picture, all at one size.
 {
-  const lay = new WidgetSession(compileVeraSource(fs.readFileSync(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')).vbc2, 'lay', '')
+  const lay = new WidgetSession(compileVeraSource(readText(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')).vbc2, 'lay', '')
   const f = lay.frame('p', 'A', ''); const box = f.nodes[0].children[0]
   assert.equal(box.kind, 'layers'); assert.deepEqual(box.children.map(c => [c.kind, c.style, c.slot]), [['motion', 'recoil', 0], ['motion', 'swing', 1]])
   const [a, b] = box.children.map(c => c.children[0]); assert.equal(a.size, b.size, 'the layers of a picture are drawn at one size')
@@ -505,13 +506,13 @@ assert.match(view, /node.key \+ this.frameKey/)
   assert.deepEqual(box.links, [0, 1], 'the scene carries its Motions: a touch no part takes lands on it')
   assert.deepEqual(lay.tap(f, f.token, '#touch', 0), [], 'a touch on a Motion with no handler runs nothing')
   // One Motion over a still picture: a touch on the still part plays it too.
-  const one = fs.readFileSync(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')
+  const one = readText(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8')
     .replace('ui.Motion("recoil", 0, [ui.Surface("default", 100, 100, "drum", "", "hitDrum")])', 'ui.Surface("default", 100, 100, "drum", "", "hitDrum")')
   const fo = new WidgetSession(compileVeraSource(one).vbc2, 'one', '').frame('p', 'A', ''); const scene = fo.nodes[0].children[0]
   assert.equal(scene.children[0].kind, 'surface'); assert.deepEqual(scene.children[0].links, [0], 'a still layer plays the one Motion of its scene')
   assert.deepEqual(scene.links, [0])
   assert.throws(() => lay.tap(f, 'stale', '#touch', 0), /Widget changed/)
-  const nested = fs.readFileSync(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8').replace('ui.Layers("default", 100, 100, [', 'ui.Layers("default", 100, 100, [ui.Layers("default", 100, 100, []),')
+  const nested = readText(path.join(__dirname, 'examples/widget-layers.vera'), 'utf8').replace('ui.Layers("default", 100, 100, [', 'ui.Layers("default", 100, 100, [ui.Layers("default", 100, 100, []),')
   assert.throws(() => compileVeraSource(nested), /Layers/, 'a Layers inside a Layers is refused')
 }
 // ui.Timer is set on TextTimer the one way, in the app and on the card (CardModel.timerFace): TextTimer reads `count` only when it
@@ -528,7 +529,7 @@ assert.match(view, /node.key \+ this.frameKey/)
   assert.equal(M.timerFace(now + 3 * 1440 * minute, true, now).count, M.TEXT_TIMER_MAX_MS, 'a longer countdown starts from the longest TextTimer takes')
   assert.equal(M.timerFace(now - 5, true, now).count, 1, 'a countdown that is over is at zero: 1 ms, as TextTimer takes 0 for its default minute')
   assert.equal(M.timerFace(now, true, now).count, 1)
-  const renderer = fs.readFileSync(path.join(sourceRoot, 'components/VeraPreview.ets'), 'utf8')
+  const renderer = readText(path.join(sourceRoot, 'components/VeraPreview.ets'), 'utf8')
   for (const [name, text] of [['card', view], ['app', renderer]]) {
     assert.doesNotMatch(text, /3000000|3600000/, 'the ' + name + ' has no hour threshold of its own')
     assert.match(text, /startTime: this\.\w+\(node\)\.startTime/, 'the ' + name + ' sets where a timer counting up starts')
@@ -569,7 +570,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 {
   const { splitCover, coverScrim, compactFrame } = loadVera('../widget/CardModel')
   const { decodeGfxOps } = loadVera('GfxPaint')
-  const rich = fs.readFileSync(path.join(__dirname, 'examples/widget-rich.vera'), 'utf8')
+  const rich = readText(path.join(__dirname, 'examples/widget-rich.vera'), 'utf8')
   const widgetPicture = 'ui.Surface("default", 100, 100, "scene", "", "onTouch"),\n      ui.Text'
   const coverSource = rich.replace(widgetPicture, 'ui.Surface("cover", 100, 100, "scene", "", "onTouch"),\n      ui.Text')
   assert.notEqual(coverSource, rich)
@@ -618,7 +619,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 {
   const { splitCover } = loadVera('../widget/CardModel')
   const { decodeGfxOps } = loadVera('GfxPaint')
-  const pendulum = fs.readFileSync(path.join(__dirname, 'examples/widget-pendulum.vera'), 'utf8')
+  const pendulum = readText(path.join(__dirname, 'examples/widget-pendulum.vera'), 'utf8')
   const session = new WidgetSession(compileVeraSource(pendulum).vbc2, 'pendulum', '')
   const f = session.frame('p1', 'Pendulum', '🕰')
   const scene = f.nodes[0].children[0]
@@ -669,7 +670,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 // A tap finishes what it started: the card has no frames, so after a tap the app's frame handlers run until the state comes to rest -- a wheel
 // stops on its prize and Spin comes back on, even when each tick asks for a vibration. A state that does not come to rest in 20 s stays as the tap left it.
 {
-  const wheel = fs.readFileSync(path.join(__dirname, 'examples/widget-wheel.vera'), 'utf8')
+  const wheel = readText(path.join(__dirname, 'examples/widget-wheel.vera'), 'utf8')
   const spinOf = src => {
     const s = new WidgetSession(compileVeraSource(src).vbc2, 'wheel', '')
     const f = s.frame('p1', 'Wheel', '🎡')
@@ -735,7 +736,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 {
   const { splitCover, compactFrame } = loadVera('../widget/CardModel')
   const { decodeGfxOps } = loadVera('GfxPaint')
-  const sky = fs.readFileSync(path.join(__dirname, 'examples/widget-sky.vera'), 'utf8')
+  const sky = readText(path.join(__dirname, 'examples/widget-sky.vera'), 'utf8')
   const f = new WidgetSession(compileVeraSource(sky).vbc2, 'sky', '').frame('p1', 'Sky', '🌌')
   assert(JSON.stringify(compactFrame(f)).length <= 8000, 'two drifts fit the frame budget')
   const split = splitCover(f.nodes)
@@ -780,7 +781,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 // The app's tickers run too: a tap that starts a countdown (a ui.Ticker) whose end launches the rocket (frames) is finished on the card --
 // the rocket of a generated app stood on its pad because only frames ran.
 {
-  const rocket = fs.readFileSync(path.join(__dirname, 'examples/widget-countdown-rocket.vera'), 'utf8')
+  const rocket = readText(path.join(__dirname, 'examples/widget-countdown-rocket.vera'), 'utf8')
   const s = new WidgetSession(compileVeraSource(rocket).vbc2, 'rocket', '')
   const f = s.frame('p1', 'Rocket', '🚀')
   s.tapSurface(f, f.token, 'onPad', 50, 50)
@@ -792,7 +793,7 @@ assert.match(view, /node.key \+ this.frameKey/)
 {
   const { compactFrame } = loadVera('../widget/CardModel')
   const { decodeGfxOps } = loadVera('GfxPaint')
-  const bubbles = fs.readFileSync(path.join(__dirname, 'examples/widget-bubbles.vera'), 'utf8')
+  const bubbles = readText(path.join(__dirname, 'examples/widget-bubbles.vera'), 'utf8')
   const s = new WidgetSession(compileVeraSource(bubbles).vbc2, 'bubbles', '')
   const f = s.frame('p1', 'Bubbles', '🫧')
   const size = JSON.stringify(compactFrame(f)).length
