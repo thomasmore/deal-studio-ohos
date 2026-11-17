@@ -1,7 +1,8 @@
 // The pre-serve plays and the phone's frame budget (vera/VeraWorldPlay.ets, vera/VeraBudget.ets, vera/VeraSurfacePlay.ets):
 // the three example worlds play and keep within budget; broken worlds are refused with the code the repair needs (two
 // bodies with one id, too many bodies, a camera looking away, bodies inside one another or under the floor or off the
-// table, orbits that pass through each other or their centre, a still world, thrown bodies never thrown or never settled, dice faces not read, a build too slow); the surface
+// table, orbits that pass through each other or their centre, a still world, thrown bodies never thrown or never settled, dice faces not read, a build too slow,
+// a shot made inside its shooter, a body made from one that is not there, targets struck and never read); the surface
 // examples keep within the frame budget, and a game doing 107 000 steps a frame -- the generated maze that ran at 23
 // frames a second -- is refused.
 'use strict'
@@ -12,7 +13,7 @@ const {loadVera} = require('./source-loader')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playWorld, WorldPlayReport, CODE_NOT_SEEN, CODE_OVERLAP, CODE_OUT_OF_WORLD, CODE_STILL, CODE_NO_SETTLE,
   CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL, CODE_STUCK, CODE_WALKS_THROUGH, CODE_ZONE_UNREACHABLE,
-  CODE_NO_TRAVEL} = loadVera('VeraWorldPlay')
+  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING} = loadVera('VeraWorldPlay')
 const B = loadVera('VeraBudget')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
@@ -242,6 +243,43 @@ function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.Wo
   refusedT(alone('things.push(scene.camera(0, 3, 0.5, 0, 0.3, 0, false));'), 'steered', CODE_NOT_SEEN, /walks out of view within two seconds/,
     'a fixed camera that loses the player')
   assert.equal(playT(alone(''), 'steered'), '', 'with no camera the player is followed')
+}
+
+// ---- shooting and breaking: the player's second button fires shots along the way it faces, a tap aims one from a
+// fixed launcher, targets struck hard are split, a blast is a throw that settles; what breaks it is refused
+{
+  const shoot = example('world-shoot')
+  const smash = example('world-break')
+  const report = new WorldPlayReport()
+  for (const travel of ['none', 'steered']) {
+    assert.equal(playWorld(compileVeraSource(shoot), true, report, travel), '', 'world-shoot plays for travel ' + travel)
+  }
+  assert.equal(report.playerPresses, 6, 'Jump and Fire are each pressed three times')
+  assert.ok(report.struckEvents > 0 && report.struckRead > 0, 'shots strike the crates and the handler reads it: ' +
+    report.struckEvents + ' struck, ' + report.struckRead + ' changed the state')
+  budgets.push('world-shoot: ' + report.struckEvents + ' struck (' + report.struckRead + ' read), ' + report.slowestMs.toFixed(2) + ' ms')
+  const breakReport = new WorldPlayReport()
+  assert.equal(playWorld(compileVeraSource(smash), true, breakReport), '', 'world-break plays')
+  assert.ok(breakReport.struckEvents > 0 && breakReport.struckRead > 0, 'tapped shots strike the tower: ' + breakReport.struckEvents)
+  assert.ok(breakReport.kicks > 0 && breakReport.settledAfterKick > 0, 'the blast is a throw, and settled follows it')
+  assert.ok(breakReport.slowestMs < B.WORLD_BUILD_BUDGET_MS, 'world-break within budget')
+  budgets.push('world-break: ' + breakReport.struckEvents + ' struck (' + breakReport.struckRead + ' read), ' +
+    breakReport.slowestMs.toFixed(2) + ' ms (' + breakReport.slowestSteps + ' steps)')
+  // A shot made inside the one who shoots it.
+  refused(swap(shoot, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0.1, 0, 0,'),
+    CODE_OVERLAP, /shot "r0-ball0" starts inside "r0-me", the body it comes from: .*further ahead along \+x than half that body's length along x plus half its own size \(x of at least 0\.41/,
+    'a shot inside the player')
+  // A shot from a body that is not there (the id without its round).
+  refused(swap(shoot, 'scene.shoot(ball, 14, false), r + "me", 0)', 'scene.shoot(ball, 14, false), "me", 0)'), CODE_FROM_MISSING,
+    /"r0-ball0" is made with scene.from\("me"\) and there is no body "me"/, 'a shot from nowhere')
+  // Targets struck and never read.
+  refused(swap(smash, 'if (e.kind === "struck" && e.speed > 4) {', 'if (e.kind === "struck" && e.speed > 400) {'), CODE_STRUCK_UNREAD,
+    /scene.target bodies were struck \d+ time\(s\) and onWorld left the state as it was/, 'struck never read')
+  // A shot is not held to where loose bodies start (P0004): one fired from past the floor's edge still plays.
+  assert.equal(play(swap(swap(smash, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0, 0.5, 120,'),
+    'things.push(scene.from(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ), "launcher", 0));',
+    'things.push(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ));')), '',
+    'a shot made beyond the floor plays')
 }
 
 console.log('world-play-check ok\n  ' + budgets.join('\n  '))

@@ -1,0 +1,109 @@
+// Shooting and breaking, steered: a fixture for the play checks (world-play-check.js), not what the guide shows.
+//
+// The person steers the one in the middle with the stick (scene.player), Jump throws it up through its kick trigger
+// and Fire, the second button, adds 1 to state.shots. build makes only the last few shots, each a new id from that
+// count, from the one who shoots (scene.from) and along the way it faces (scene.shoot flies along its own +x). The
+// crates are scene.target: a "struck" harder than a strength keeps the crate's id in state.broken, and from then on
+// build returns scene.split of it instead of it. The program never keeps a position: the host moves everything.
+
+@jsonable
+class AppState {
+  jumps: number;
+  shots: number;
+  round: number;
+  broken: string[];
+  score: number;
+}
+
+function init(): AppState {
+  return {jumps: 0, shots: 0, round: 0, broken: [], score: 0};
+}
+
+function isBroken(state: AppState, id: string): boolean {
+  for (let b: string of state.broken) {
+    if (b === id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function build(state: AppState): scene.Thing[] {
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let things: scene.Thing[] = [];
+  things.push(scene.sky("#9fd0f0", 0));
+  things.push(scene.floor("#6aa84f"));
+  // The one the person steers, on the ground, facing +x.
+  let me: scene.Thing = scene.kick(scene.box(r + "me", -2, 0.3, 0, 0.5, 0.6, 0.4, "accent"), state.jumps, 0, 4, 0, 0);
+  things.push(scene.player(me, 3, "Jump", "Fire"));
+  // A row of crates ahead, across the way it starts facing.
+  let k: number = 0;
+  while (k < 7) {
+    let id: string = r + "crate" + ui.numberToString(k);
+    let crate: scene.Thing = scene.loose(scene.box(id, 5, 0.3, -3 + k, 0.6, 0.6, 0.6, "#b7793e"), 1);
+    if (isBroken(state, id)) {
+      for (let piece: scene.Thing of scene.split(crate, 4, 1)) {
+        things.push(piece);
+      }
+    } else {
+      things.push(scene.target(crate));
+    }
+    k = k + 1;
+  }
+  // Only the last few shots, each from the one who shoots, half a metre ahead of its centre.
+  let s: number = math.max(0, state.shots - 6);
+  while (s < state.shots) {
+    let ball: scene.Thing = scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0, 0.16, "warning");
+    things.push(scene.from(scene.shoot(ball, 14, false), r + "me", 0));
+    s = s + 1;
+  }
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "action" && e.other === "Fire") {
+    return {jumps: state.jumps, shots: state.shots + 1, round: state.round, broken: state.broken, score: state.score};
+  }
+  if (e.kind === "action") {
+    return {jumps: state.jumps + 1, shots: state.shots, round: state.round, broken: state.broken, score: state.score};
+  }
+  if (e.kind === "struck" && e.speed > 3) {
+    let broken: string[] = [];
+    for (let b: string of state.broken) {
+      broken.push(b);
+    }
+    let score: number = state.score;
+    let k: number = 0;
+    while (k < e.bodies.length()) {
+      let id: string = e.bodies[k];
+      if (e.values[k] > 3 && strings.contains(id, "crate") && !isBroken(state, id)) {
+        broken.push(id);
+        score = score + 1;
+      }
+      k = k + 1;
+    }
+    return {jumps: state.jumps, shots: state.shots, round: state.round, broken: broken, score: score};
+  }
+  return state;
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {jumps: 0, shots: 0, round: state.round + 1, broken: [], score: 0};
+}
+
+function view(state: AppState): ui.View {
+  let result: string = "Steer with the stick and fire at the crates";
+  if (state.score > 0) {
+    result = ui.numberToString(state.score) + " of 7 crates smashed";
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Crates", "", "Steer, jump and fire", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", result),
+      ui.ActionBar("spread", [
+        ui.Button("secondary", "Start again", "onReset", 0, true)
+      ])
+    ])
+  ]);
+}

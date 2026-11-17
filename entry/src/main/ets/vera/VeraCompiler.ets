@@ -1023,7 +1023,8 @@ class Parser {
       } else if (this.check('.')) {
         let start = expr.span
         this.advance()
-        let field = this.expect('name').text
+        // After a dot a word is a name even when it is a keyword elsewhere: std/scene has scene.from.
+        let field = this.check('from') ? this.advance().text : this.expect('name').text
         expr = new SelectExpression(this.span(start), expr, field)
       } else if (this.check('!')) {
         let start = expr.span
@@ -1450,7 +1451,8 @@ function buildStdSceneModule(): ModuleInterface {
       params.push(p.kind === 'thing' ? thingType : p.kind === 'thing[]' ? new VeraArrayType(thingType) : tableFieldType(p.kind))
       if (!p.optional) required = params.length
     }
-    fns.push(new ExternalFunction(f.name, params, thingType, false, required))
+    let result: VeraType = f.result === 'thing[]' ? new VeraArrayType(thingType) : thingType
+    fns.push(new ExternalFunction(f.name, params, result, false, required))
   }
   return new ModuleInterface('std/scene', fns, [new ExternalClass('Thing', thingType), new ExternalClass('Event', eventType)])
 }

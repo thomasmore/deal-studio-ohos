@@ -4,8 +4,9 @@
  * start inside one another or under the floor, whether the dice ever settle and the program reads what they show. So
  * this plays it the way a person tries it, on the host's physics (FakePhys and WorldSim, VeraPhysics.ets), the way the
  * phone runs it (VeraPreview's world branch): build on every change of state, the diff applied, ten seconds of frames, a
- * tap on bodies, a swipe of each loose one, a tap on empty space, each button pressed, and what the world tells (hits,
- * settling) handed to the event handler, at most four a frame.
+ * tap on bodies, a swipe of each loose one, a tap on empty space, each button pressed, the player's buttons pressed
+ * while it is steered, and what the world tells (hits, strikes, settling) handed to the event handler, at most four a
+ * frame. Taps carry the camera's ray in dx, dy, dz and, on empty space, a point 40 m along it, as the phone's do.
  *
  * What it reports goes back to the model as a repair, in the smoke run's form ("line:col CODE message"), so only what is
  * wrong whatever the person does counts. Pure: no platform kit.
@@ -16,7 +17,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, ZoneSpec, ScenePlayer, decodeScene, diffWorld, orbitPositions,
-  sceneEventValue, MotionCarry, SceneOrbit } from './VeraScene'
+  sceneEventValue, MotionCarry, SceneOrbit, SceneFrom } from './VeraScene'
 import { ZoneWatch } from './VeraLocomotion'
 import { FakePhys, WorldSim, SimEvent, specBounds, enterEvent } from './VeraPhysics'
 import { worldCamera, projectPoint, metresPerVp, floorDirection, CameraPose } from './VeraLook3D'
@@ -31,6 +32,11 @@ const EVENTS_PER_FRAME: number = 4
 const TAPPED_BODIES: number = 24
 const SWIPED_BODIES: number = 12
 const PRESSED_BUTTONS: number = 6
+/** Each of the player's buttons (scene.player's action and fire) is pressed this many times, this many frames apart. */
+const PLAYER_PRESSES: number = 3
+const PLAYER_PRESS_GAP: number = 40
+/** A tap on empty space is told this far along the ray (VeraLook3D's pick). */
+const TAP_REACH: number = 40
 
 /** The repair codes of a world's play (P0001, too slow, is VeraBudget's). */
 export const CODE_NOT_SEEN: string = 'P0002'
@@ -46,6 +52,10 @@ export const CODE_STUCK: string = 'P0011'
 export const CODE_WALKS_THROUGH: string = 'P0012'
 export const CODE_ZONE_UNREACHABLE: string = 'P0013'
 export const CODE_NO_TRAVEL: string = 'P0014'
+/** scene.target bodies were struck, and the handler never changed the state for any "struck". */
+export const CODE_STRUCK_UNREAD: string = 'P0015'
+/** A body made with scene.from names a parent that is nowhere in the world when it is made. */
+export const CODE_FROM_MISSING: string = 'P0016'
 /** The stick is held this many frames ahead, then this many to the right, from STICK_FROM; the player must go this share of its speed's reach. */
 const STICK_FROM: number = 30
 const STICK_AHEAD: number = 120
@@ -147,6 +157,10 @@ export class WorldPlayReport {
   /** How far the player went under the held stick (m), and the zone entries told. */
   playerMoved: number = 0
   enterEvents: number = 0
+  /** "struck" handed to the handler, and how many of them changed the state; presses of the player's buttons. */
+  struckEvents: number = 0
+  struckRead: number = 0
+  playerPresses: number = 0
 }
 
 /** A failure the play stops at: its diagnostic, already in the repair form. */
@@ -190,6 +204,11 @@ class WorldPlay {
   playerId: string = ''
   playerMoved: number = -1
   playerSpeed: number = 1
+  /** Whether a body has ever been a scene.target; "struck" delivered and those that changed the state; player presses. */
+  targets: boolean = false
+  struckEvents: number = 0
+  struckRead: number = 0
+  playerPresses: number = 0
 
   constructor(node: VeraUiNode, state: RuntimeValue, vm: VirtualMachine, host: UiHostEnvironment,
       module: BytecodeModule) {
@@ -261,17 +280,68 @@ class WorldPlay {
       if (b.isDie) { this.dice = true }
       // The player's kick is a jump, not a throw that settles.
       if (b.kick !== null && b.player === null) { this.thrower = true }
+      if (b.target) { this.targets = true }
     }
     let kicksBefore = this.sim.kickSerial
     this.sim.apply(diff, next)
     if (this.sim.kickSerial > kicksBefore) { this.kicks++ }
+    this.checkFrom(next, diff)
     this.spec = next
     return steps
   }
 
+  /**
+   * Bodies made from another (scene.from) and shots (scene.shoot), where the physics has just put them: their parent was
+   * there (P0016), and they do not start inside another body (P0003) -- their removed parent, the other pieces of it and
+   * other shots aside.
+   */
+  checkFrom(next: WorldSpec, diff: WorldDiff): void {
+    let at = this.line(this.build)
+    if (this.sim.fromMissing.length > 0) {
+      let id = this.sim.fromMissing[0]
+      let b = next.bodies.find((o: BodySpec): boolean => o.id === id)
+      let parent = b !== undefined && b.from !== null ? (b.from as SceneFrom).parent : ''
+      throw new PlayStop(at.toString() + ':1 ' + CODE_FROM_MISSING + ' The program plays, but "' + id + '" is made with ' +
+        'scene.from("' + parent + '") and there is no body "' + parent + '" in the world when it is made, so it starts at its ' +
+        'own x, y, z taken in the world. Name the id of a body that is there in the same build (what shoots it, or what ' +
+        'breaks into it, left out of that build), or leave scene.from out')
+    }
+    let made: BodySpec[] = diff.create.concat(diff.recreate).filter((b: BodySpec): boolean =>
+      b.motion === 'loose' && (b.from !== null || b.shot !== null))
+    if (made.length === 0) { return }
+    let others = next.bodies.filter((o: BodySpec): boolean => o.orbit === null && o.shot === null)
+    for (let b of made) {
+      let pose = this.sim.poseOf(b.id)
+      if (pose === null) { continue }
+      let parent = b.from !== null ? (b.from as SceneFrom).parent : ''
+      let box = boundsAt(b, pose)
+      for (let o of others) {
+        if (o.id === b.id) { continue }
+        // Pieces of one parent start packed together, as the parent was.
+        if (parent.length > 0 && o.from !== null && (o.from as SceneFrom).parent === parent) { continue }
+        let live = o.motion === 'loose' ? this.sim.poseOf(o.id) : null
+        let op = live !== null ? live : o.position
+        if (!overlapsPose(b, pose, box, o, op, live !== null ? boundsAt(o, live) : specBounds(o))) { continue }
+        let what = b.shot !== null ? 'shot "' + b.id + '"' : '"' + b.id + '" (made with scene.from)'
+        if (o.id === parent) {
+          let need = o.dims[0] / 2 + Math.max(b.dims[0], b.dims[1], b.dims[2]) / 2
+          throw new PlayStop(at.toString() + ':1 ' + CODE_OVERLAP + ' The program plays, but ' + what + ' starts inside "' +
+            o.id + '", the body it comes from: its x, y, z are taken about that body\'s centre, so put it further ahead along ' +
+            '+x than half that body\'s length along x plus half its own size (x of at least ' + (Math.ceil(need * 100) / 100).toString() +
+            ' here), or the physics throws the two apart')
+        }
+        throw new PlayStop(at.toString() + ':1 ' + CODE_OVERLAP + ' The program plays, but ' + what + ' starts inside "' +
+          o.id + '": make it where nothing else is -- a shot just ahead of what shoots it, clear of what stands by it -- or ' +
+          'the physics throws them apart')
+      }
+    }
+  }
+
   /** New loose bodies: not inside another body, not under the ground, not outside the world they are in. */
   checkCreated(next: WorldSpec, diff: WorldDiff): void {
-    let created: BodySpec[] = diff.create.concat(diff.recreate).filter((b: BodySpec): boolean => b.motion === 'loose')
+    // Shots and bodies made from another start where the physics puts them, which checkFrom looks at after the apply.
+    let created: BodySpec[] = diff.create.concat(diff.recreate).filter((b: BodySpec): boolean =>
+      b.motion === 'loose' && b.from === null && b.shot === null)
     if (created.length === 0) { return }
     let at = this.line(this.build)
     let grounded = next.floor !== null || next.table !== null
@@ -301,7 +371,7 @@ class WorldPlay {
       }
     }
     // Against every body there, new or not, that it could be inside: spheres by their distance, the rest by their boxes.
-    let others: BodySpec[] = next.bodies.filter((b: BodySpec): boolean => b.orbit === null)
+    let others: BodySpec[] = next.bodies.filter((b: BodySpec): boolean => b.orbit === null && b.from === null && b.shot === null)
     let createdIds = new Set<string>()
     for (let b of created) { createdIds.add(b.id) }
     for (let b of created) {
@@ -503,6 +573,10 @@ class WorldPlay {
         this.hitEvents++
         this.hitStepsMax = Math.max(this.hitStepsMax, steps)
       }
+      if (e.kind === 'struck') {
+        this.struckEvents++
+        if (fingerprint(this.state) !== before) { this.struckRead++ }
+      }
     }
   }
 
@@ -529,8 +603,14 @@ class WorldPlay {
         if (this.event.length === 0) { continue }
         if (input.body.length > 0 && !this.hasBody(input.body)) { continue }
         if (input.kind === 'tap') {
-          let p = input.body.length > 0 ? this.where(input.body) : [0, 0, 0]
-          this.handle(this.event, sceneEventValue('tap', input.body, '', p[0], p[1], p[2], 0, [], []),
+          // As VeraLook3D's pick tells it: the ray from the eye through the finger, and on empty space a point along it.
+          let pose = worldCamera(this.spec as WorldSpec, this.width / this.height)
+          let eye = pose.eye
+          let p = input.body.length > 0 ? this.where(input.body) : []
+          let dir = unit(p.length === 3 ? [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]] :
+            [pose.look[0] - eye[0], pose.look[1] - eye[1], pose.look[2] - eye[2]])
+          if (p.length !== 3) { p = [eye[0] + TAP_REACH * dir[0], eye[1] + TAP_REACH * dir[1], eye[2] + TAP_REACH * dir[2]] }
+          this.handle(this.event, sceneEventValue('tap', input.body, '', p[0], p[1], p[2], 0, [], [], dir),
             'in ' + this.event + ' (a tap on ' + (input.body.length > 0 ? 'body "' + input.body + '"' : 'empty space') +
             ' at frame ' + frame.toString() + ')')
         } else {
@@ -552,7 +632,7 @@ class WorldPlay {
 
   /**
    * The person's thumb on the stick, when the world has a player: held ahead (away from the eye) from STICK_FROM for
-   * STICK_AHEAD frames, then to the right, then let go; its action button pressed once on the way. How far the player
+   * STICK_AHEAD frames, then to the right, then let go; its buttons pressed on the way (PLAYER_PRESSES each). How far the player
    * went while held ahead is what P0011 reads.
    */
   steerAt(frame: number): void {
@@ -576,10 +656,25 @@ class WorldPlay {
       this.sim.setStick(d[0], d[2], 1)
     } else if (frame === STICK_FROM + STICK_AHEAD + STICK_RIGHT) {
       this.sim.setStick(0, 0, 0)
-    } else if (frame === STICK_FROM + STICK_AHEAD / 2 && (p.player as ScenePlayer).action.length > 0 && this.event.length > 0) {
-      let at = this.where(p.id)
-      this.handle(this.event, sceneEventValue('action', p.id, '', at[0], at[1], at[2], 0, [], []),
-        'in ' + this.event + ' (the player\'s button "' + (p.player as ScenePlayer).action + '" at frame ' + frame.toString() + ')')
+    }
+    // Each of its buttons pressed PLAYER_PRESSES times, PLAYER_PRESS_GAP frames apart, told as "action" with the button's
+    // label in other and the way the player faces in dx, dy, dz: the second button (fire) first, while the player walks
+    // on the ground, then the first (a jump, say), so a shot is not fired from the top of a jump.
+    if (this.event.length === 0) { return }
+    let sp = p.player as ScenePlayer
+    let labels = sp.fire.length > 0 ? [sp.fire, sp.action] : [sp.action]
+    for (let k = 0; k < labels.length; k++) {
+      if (labels[k].length === 0) { continue }
+      let since = frame - (STICK_FROM + STICK_AHEAD / 2) - k * PLAYER_PRESSES * PLAYER_PRESS_GAP
+      if (since < 0 || since % PLAYER_PRESS_GAP !== 0 || since / PLAYER_PRESS_GAP >= PLAYER_PRESSES) { continue }
+      let pose = this.sim.poseOf(p.id)
+      let at = pose !== null ? [pose[0], pose[1], pose[2]] : this.where(p.id)
+      let facing = pose !== null ? turnX([pose[3], pose[4], pose[5], pose[6]]) : [1, 0, 0]
+      this.playerPresses++
+      this.handle(this.event, sceneEventValue('action', p.id, labels[k], at[0], at[1], at[2], 0, [], [], facing),
+        'in ' + this.event + ' (the player\'s button "' + labels[k] + '" at frame ' + frame.toString() + ')')
+      // One press a frame: the handler may have made the player again, which the next frame finds.
+      return
     }
   }
 
@@ -749,6 +844,13 @@ class WorldPlay {
         this.event + ' left the state as it was: on e.kind === "settled", read the faces from e.values (in the order of ' +
         'e.bodies), keep the result in the state and show it'
     }
+    if (this.targets && this.struckEvents > 0 && this.struckRead === 0) {
+      return this.line(this.event).toString() + ':1 ' + CODE_STRUCK_UNREAD + ' The program plays, but its scene.target bodies ' +
+        'were struck ' + this.struckEvents.toString() + ' time(s) and ' + this.event + ' left the state as it was each time: ' +
+        'on e.kind === "struck" (e.body the one struck, e.speed how hard, e.bodies and e.values every one struck), change ' +
+        'the state -- a score, or the id kept when e.speed is over a strength so build returns scene.split of it from then ' +
+        'on -- or leave scene.target out'
+    }
     return worldBudgetProblem(this.slowest, this.line(this.event.length > 0 ? this.event : this.build))
   }
 }
@@ -800,12 +902,63 @@ export function playWorld(compiled: CompileResult, requireWorld: boolean = true,
     report.hitStepsMax = play.hitStepsMax
     report.playerMoved = play.playerMoved
     report.enterEvents = play.enterEvents
+    report.struckEvents = play.struckEvents
+    report.struckRead = play.struckRead
+    report.playerPresses = play.playerPresses
   }
   return verdict
 }
 
 function cameraText(c: CameraSpec): string {
   return [c.x, c.y, c.z].join(', ') + ' and looks at ' + [c.lookX, c.lookY, c.lookZ].join(', ')
+}
+
+/** The unit vector along v; [0, 0, -1] for none. */
+function unit(v: number[]): number[] {
+  let d = Math.hypot(v[0], v[1], v[2])
+  return d > 1e-9 ? [v[0] / d, v[1] / d, v[2] / d] : [0, 0, -1]
+}
+
+/** The rotation matrix (row major) of a unit quaternion. */
+function quatMatrix(q: number[]): number[] {
+  let x = q[0], y = q[1], z = q[2], w = q[3]
+  return [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+    2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+    2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]
+}
+
+/** Where a body turned by q faces: its +x. */
+function turnX(q: number[]): number[] {
+  let m = quatMatrix(q)
+  return unit([m[0], m[3], m[6]])
+}
+
+/** A body's bounds at pose [px, py, pz, qx, qy, qz, qw], turned as the pose turns it. */
+function boundsAt(b: BodySpec, pose: number[]): number[] {
+  let half = b.shape === 'sphere' ? [b.dims[0] / 2, b.dims[0] / 2, b.dims[0] / 2]
+    : b.shape === 'cylinder' ? [b.dims[0] / 2, b.dims[1] / 2, b.dims[0] / 2] : [b.dims[0] / 2, b.dims[1] / 2, b.dims[2] / 2]
+  let e = [half[0], half[1], half[2]]
+  if (b.shape !== 'sphere') {
+    let r = quatMatrix([pose[3], pose[4], pose[5], pose[6]])
+    for (let k = 0; k < 3; k++) {
+      e[k] = Math.abs(r[k * 3]) * half[0] + Math.abs(r[k * 3 + 1]) * half[1] + Math.abs(r[k * 3 + 2]) * half[2]
+    }
+  }
+  return [pose[0] - e[0], pose[1] - e[1], pose[2] - e[2], pose[0] + e[0], pose[1] + e[1], pose[2] + e[2]]
+}
+
+/** overlapsAt, for b where the physics has it (pose, bounds box) and o at op (bounds other). */
+function overlapsPose(b: BodySpec, pose: number[], box: number[], o: BodySpec, op: number[], other: number[]): boolean {
+  if (b.shape === 'sphere' && o.shape === 'sphere') {
+    let r = (b.dims[0] + o.dims[0]) / 2
+    return Math.hypot(pose[0] - op[0], pose[1] - op[1], pose[2] - op[2]) < r * 0.9
+  }
+  for (let k = 0; k < 3; k++) {
+    let depth = Math.min(box[k + 3], other[k + 3]) - Math.max(box[k], other[k])
+    let small = Math.min(box[k + 3] - box[k], other[k + 3] - other[k])
+    if (!(depth > Math.max(0.002, small * 0.1))) { return false }
+  }
+  return true
 }
 
 function overlaps(b: BodySpec, box: number[], o: BodySpec): boolean {

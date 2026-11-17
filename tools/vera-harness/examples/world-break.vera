@@ -1,0 +1,118 @@
+// Aiming by tapping, breaking and a blast, seen from where the person stands: a fixture for the play checks
+// (world-play-check.js), not what the guide shows.
+//
+// A tap anywhere but on the launcher adds 1 to state.shots and keeps the point tapped (e.x, e.y, e.z: on a body, or
+// along the ray on empty space). build makes only the last few shots, each a new id from that count, from the launcher
+// (scene.from) turned to the point tapped (scene.aim) and fired along it (scene.shoot). The blocks of the tower are
+// scene.target: a "struck" harder than a strength keeps the block's id in state.broken, and from then on build returns
+// scene.split of it instead of it; its pieces are never split again. Blast sets off scene.blast at the foot of the tower through its trigger.
+
+@jsonable
+class AppState {
+  shots: number;
+  aimX: number;
+  aimY: number;
+  aimZ: number;
+  blasts: number;
+  round: number;
+  broken: string[];
+}
+
+function init(): AppState {
+  return {shots: 0, aimX: 0, aimY: 0.5, aimZ: 0, blasts: 0, round: 0, broken: []};
+}
+
+function isBroken(state: AppState, id: string): boolean {
+  for (let b: string of state.broken) {
+    if (b === id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function build(state: AppState): scene.Thing[] {
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 2.4, 6.5, 0, 0.8, 0, false));
+  things.push(scene.floor("surface"));
+  // The launcher stands still in front of the tower.
+  things.push(scene.box("launcher", 0, 0.25, 4, 0.5, 0.5, 0.5, "ink"));
+  // A tower of blocks of side 0.5: three a level, each level 0.5 higher.
+  let level: number = 0;
+  while (level < 3) {
+    let k: number = 0;
+    while (k < 3) {
+      let id: string = r + "block" + ui.numberToString(level) + "-" + ui.numberToString(k);
+      let block: scene.Thing = scene.loose(scene.box(id, -0.5 + k * 0.5, 0.25 + level * 0.5, 0, 0.5, 0.5, 0.5, "#c0504d"), 1);
+      if (isBroken(state, id)) {
+        for (let piece: scene.Thing of scene.split(block, 4, 0.5)) {
+          things.push(piece);
+        }
+      } else {
+        things.push(scene.target(block));
+      }
+      k = k + 1;
+    }
+    level = level + 1;
+  }
+  // Only the last few shots: each from the launcher, 0.6 m towards the point tapped, flying at it.
+  let s: number = math.max(0, state.shots - 6);
+  while (s < state.shots) {
+    let ball: scene.Thing = scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0, 0.2, "warning");
+    things.push(scene.from(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ), "launcher", 0));
+    s = s + 1;
+  }
+  things.push(scene.blast(r + "blast", state.blasts, 0, 0.1, 0.6, 2.5, 6));
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "tap" && e.body !== "launcher") {
+    return {shots: state.shots + 1, aimX: e.x, aimY: e.y, aimZ: e.z, blasts: state.blasts, round: state.round, broken: state.broken};
+  }
+  if (e.kind === "struck" && e.speed > 4) {
+    let broken: string[] = [];
+    for (let b: string of state.broken) {
+      broken.push(b);
+    }
+    let k: number = 0;
+    while (k < e.bodies.length()) {
+      let id: string = e.bodies[k];
+      if (e.values[k] > 4 && strings.contains(id, "block") && !isBroken(state, id)) {
+        broken.push(id);
+      }
+      k = k + 1;
+    }
+    return {shots: state.shots, aimX: state.aimX, aimY: state.aimY, aimZ: state.aimZ, blasts: state.blasts, round: state.round,
+      broken: broken};
+  }
+  return state;
+}
+
+function onBlast(state: AppState, value: number): AppState {
+  return {shots: state.shots, aimX: state.aimX, aimY: state.aimY, aimZ: state.aimZ, blasts: state.blasts + 1, round: state.round,
+    broken: state.broken};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {shots: 0, aimX: 0, aimY: 0.5, aimZ: 0, blasts: 0, round: state.round + 1, broken: []};
+}
+
+function view(state: AppState): ui.View {
+  let result: string = "Tap the tower to fire at it";
+  if (state.broken.length() > 0) {
+    result = ui.numberToString(state.broken.length()) + " of 9 blocks smashed";
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Tower", "", "Tap to aim and fire", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", result),
+      ui.ActionBar("spread", [
+        ui.Button("primary", "Blast", "onBlast", 0, true),
+        ui.Button("secondary", "Start again", "onReset", 0, true)
+      ])
+    ])
+  ]);
+}

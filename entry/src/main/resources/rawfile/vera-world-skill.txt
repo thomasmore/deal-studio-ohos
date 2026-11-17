@@ -32,14 +32,19 @@ The shape of the program:
   the screen between the Header and them. "default" for a small world among other content.
   Every world has a corner button that opens it full screen and back, so the person can always choose.
 - onWorld(state: AppState, e: scene.Event): AppState hears the world: e.kind is "tap" (a finger on e.body, "" for empty
-  space), "swipe" (a flick of e.body; e.x, e.z its direction along the floor, e.speed how fast), "hit" (knocks, told at most
+  space; e.x, e.y, e.z is always a point -- where the finger met the body, or 40 m along the ray on empty space -- and
+  e.dx, e.dy, e.dz the direction of the ray from the eye through the finger), "swipe" (a flick of e.body; e.x, e.z its
+  direction along the floor, e.speed how fast), "hit" (knocks, told at most
   four times a second: e.bodies every body knocked since the last hit, e.values how hard each was knocked in m/s, e.body
   knocked into e.other the hardest of them at e.speed; count e.bodies.length() or keep the hardest, nothing more) or
   "settled" (every loose body at rest after a throw; e.bodies the ids, e.values the face each die shows, and for a body
   that is not a die 1 when it was knocked from where it was built -- moved or tipped over -- and 0 when it still
-  stands), "enter" (e.body came into the zone e.other) or "action" (the player's button was pressed). Nothing else is
-  told: not where a body is, not whether it left the table. Score from these (hits, faces,
-  blocks knocked over), and count a settled body once, from that event, not from hits. Return the state unchanged for
+  stands), "enter" (e.body came into the zone e.other), "action" (a button of the player's was pressed: e.other its
+  label, e.x, e.y, e.z where the player is and e.dx, e.dy, e.dz the way it faces) or "struck" (a scene.target, or a
+  shot, knocked hard: e.body the one struck, e.other what struck it, "" for the ground, e.speed how hard in m/s -- its
+  strength -- and e.bodies with e.values every one struck since the last struck and how hard). Nothing else is told: not
+  where a body is apart from these, not whether it left the table. Score from these (hits, faces, blocks knocked over,
+  strikes), and count a settled body once, from that event, not from hits. Return the state unchanged for
   the kinds it does not use: then nothing is built or drawn again.
 - A Button does the main thing too (the throw, putting things back), so the app works without knowing where to tap.
   A world with a player is played with the stick: its Buttons are extras (faster, start again).
@@ -116,7 +121,8 @@ What a world can do, combined as the request needs:
   goes on from where it is. scene.spin only turns a thing where it stands: never use it for a thing that moves about.
 - Steered by the person: scene.player(body, speed, action), one per world. The host draws the stick and the camera
   follows the player (leave scene.camera out); action names a button beside the stick, "" for none, heard as
-  e.kind === "action". A jump is the player's own kick, its trigger a count the action adds 1 to:
+  e.kind === "action"; scene.player(body, speed, action, fire) adds a second button, and e.other says which was
+  pressed. A jump is the player's own kick, its trigger a count the action adds 1 to:
   scene.player(scene.kick(body, state.jumps, 0, 4, 0, 0), speed, "Jump"). The player starts on the floor, clear of
   everything, and does not climb onto bodies: what is in its way is gone round or jumped. Use a floor, not a table
   (it can go 100 m each way), and the World's style "fill" or "full", so the stick has room.
@@ -124,6 +130,20 @@ What a world can do, combined as the request needs:
   came into which zone: a finish, a checkpoint, something to collect (keep the ids collected in the state and leave
   them out of build). Others that go the same way are bodies on paths through the same zones: the order of their
   "enter" events is who came first.
+- Shooting: a count of shots in the state, which the button or tap that fires adds 1 to. build makes only the last
+  few shots (a loop from the count less a few up to the count), each a new id from its number, so a shot once made
+  flies on by itself: scene.from(scene.shoot(body, speed, false), shooterId, 0) with the body's x just ahead of the
+  shooter's centre along +x (more than half the shooter's length plus half its own), so it leaves the way the shooter
+  faces; wrap it in scene.aim(..., x, y, z) to send it at a point instead, the last tap's e.x, e.y, e.z kept in the
+  state. arc true for a thing thrown or lobbed, false for one that flies straight. The host keeps at most 16 shots and
+  drops the oldest.
+- Breaking: what can break is a scene.target. On a "struck" above a strength (e.speed, or e.values for each of
+  e.bodies) the handler keeps the id in the state (a list of broken ids), and from then on build returns the pieces of
+  scene.split(thing, n, burst) in its place instead of it, so the pieces start where it was and fly apart. Pieces are
+  never split again and are not targets.
+- A blast: scene.blast(id, trigger, x, y, z, radius, strength) pushes every loose body near the point away each time
+  its trigger, a count in the state, changes; "settled" follows it as it follows a throw.
+- In words on the screen call shots and pieces what they are in this scene, never "shot", "piece" or "body".
 - One thing to look at: the body or bodies it is made of, standing still or turning with scene.spin, an orbiting camera,
   and Buttons for what the person may change in it. A thing asked for as moving, walking or going somewhere is not
   this: it walks by itself.

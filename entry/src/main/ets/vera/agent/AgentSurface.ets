@@ -36,7 +36,8 @@ const SURFACE_WORDS: RegExp = new RegExp('\\b(game|games|play|playable|arcade|sh
   'planet\\w*|galaxy|starfield|joystick|dodge|catch|falling|neon|spaceship|ship|missile\\w*|zombie\\w*|enemy|enemies|' +
   'level|levels|score|arena|battle|fight\\w*|racket|paddle|tetris|puzzle|screensaver|kaleidoscope|spirograph|pendulum|' +
   'gravity|swarm|boids|life|roulette|casino|wheel|spin\\w*|dice|die|coin|lottery|slots?|plinko|marbles?|pendulum|' +
-  'signature|sign|3d|cubes?|solar|stack\\w*|domino\\w*|knock\\w*|toppl\\w*|tumbl\\w*)\\b', 'i')
+  'signature|sign|3d|cubes?|solar|stack\\w*|domino\\w*|knock\\w*|toppl\\w*|tumbl\\w*|break|breaks|breaking|breakable|smash\\w*|shatter\\w*|' +
+  'destroy\\w*|cannon\\w*|explod\\w*)\\b', 'i')
 
 /**
  * The same, for requests written in Chinese, which people type although the Generate screen asks for English: the
@@ -101,8 +102,11 @@ export const SURFACE_CLASSIFY_PROMPT: string = [
   'rather than left out), a real body in its real colours and surface as you know them --',
   'the design\'s own colours are for made-up worlds and the screen round them; what moves by itself (orbits, spins), and what',
   'travels by itself and how (along a route round the scene, or roaming an area; legs, arms or a tail that swing as it',
-  'goes); what the person steers, if anything (with the stick the host draws over the world, and at most one button beside',
-  'it, named, such as a jump), the camera then following it; places on the ground to reach, pass or collect (circles the',
+  'goes); what the person steers, if anything (with the stick the host draws over the world, and up to two buttons beside',
+  'it, named, such as a jump and a fire), the camera then following it; what it or anything else shoots, if anything (fired',
+  'by the second button beside the stick along the way the steered one faces, or by a tap that aims at the point tapped),',
+  'and at what speed; what breaks into pieces when struck hard enough, and what a blast pushes away;',
+  'places on the ground to reach, pass or collect (circles the',
   'world tells the program a body came into); what a tap, a swipe and each button do (throw, shoot, add one,',
   'build again; with an orbiting camera a drag on empty space turns the view and a pinch zooms, both by the host); what',
   'is behind the world (the app\'s background, or a sky of a colour with or without stars) and which orbit paths are',

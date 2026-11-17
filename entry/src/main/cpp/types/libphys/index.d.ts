@@ -1,6 +1,9 @@
 // Rigid-body physics (Jolt) for the 3D world. Units: metres, seconds, kilograms; y is up;
 // quaternions are ordered x, y, z, w. A body kind is 0 static, 1 dynamic, 2 kinematic, 3 a character: dynamic, kept
-// upright and turning only about y, without friction or bounce, moved by physDrive.
+// upright and turning only about y, without friction or bounce, moved by physDrive; 4 a projectile: dynamic, cast along
+// its motion (continuous collision, so it does not pass through a thin wall), without gravity until it first touches
+// something, then with it; 5 a projectile with an arc: the same, with gravity from the start. Projectiles start watched
+// (physWatch), are not counted by physAwakeDynamic, and are stopped, not sent home, by the world bound.
 // Bodies are named by a dense index that is reused after physRemove.
 
 /**
@@ -15,7 +18,8 @@ export const physReset: () => void
 export const physSetGravity: (y: number) => void
 /**
  * The world bound: a dynamic body below minY (m), or beyond +-halfX / +-halfZ (m), is put back at
- * its creation pose with zero velocity. The creation pose is the last physSetPose.
+ * its creation pose with zero velocity. The creation pose is the last physSetPose. A projectile (kind 4 or 5) that
+ * leaves it is stopped instead: zero velocity, asleep where it is, reported once by physReadAwake, never put back.
  */
 export const physSetBound: (minY: number, halfX: number, halfZ: number) => void
 /** A box of half-extents hx, hy, hz (m) at the origin. Returns its index, or -1. */
@@ -76,13 +80,33 @@ export const physStepEnd: () => number
 export const physReadAwake: (out: Float32Array) => number
 /** Writes px, py, pz, qx, qy, qz, qw of one body into out (7 floats). Returns 1, or 0 if there is no such body. */
 export const physReadPose: (i: number, out: Float32Array) => number
-/** Writes vx, vy, vz of one body (m/s) into out (3 floats). Returns 1, or 0 if there is no such body. */
+/**
+ * Writes vx, vy, vz of one body (m/s) into out and, when out.length >= 6, also its angular velocity wx, wy, wz (rad/s,
+ * about the world axes) after them. Never writes past out.length. Returns 1, or 0 if there is no such body or
+ * out.length < 3.
+ */
 export const physReadVelocity: (i: number, out: Float32Array) => number
 /**
- * Takes the contacts that began since the last call: 3 floats each, body a, body b, approach
- * speed (m/s, along the contact normal). Returns the count (at most out.length / 3); contacts
- * beyond that, or beyond an internal 1024, are dropped.
+ * Takes the contacts that began since the last call, one record of 6 floats each:
+ *   [a, b, approachSpeed, px, py, pz]
+ * a and b are body indices (every body has one, the static ground included: there is no "-1"; the order of the two is
+ * Jolt's, so check both ways), approachSpeed is m/s along the contact normal, p is the world contact point (m, on a's
+ * surface). Returns the number of RECORDS written (at most floor(out.length / 6)), or -1 if out is not a Float32Array.
+ * Between drains an internal buffer holds 1024 records: an ordinary contact is dropped once it holds 960, a contact
+ * with a watched body (physWatch) only at 1024, so a watched body's hits survive a collapse. A contact begins once:
+ * one that lasts over several steps is not reported again.
  */
 export const physDrainContacts: (out: Float32Array) => number
-/** How many dynamic bodies are awake (0 means the scene has settled). */
+/** How many dynamic bodies are awake (0 means the scene has settled). Characters and projectiles are not counted. */
 export const physAwakeDynamic: () => number
+/**
+ * Marks (on != 0) or unmarks a body of any kind as watched: its contacts use the contact buffer's reserve (see
+ * physDrainContacts). Projectiles start watched. The mark goes with physRemove / physReset; a reused index starts unmarked.
+ */
+export const physWatch: (i: number, on: number) => void
+/**
+ * A blast at (cx, cy, cz): every dynamic body (characters and projectiles included) whose centre of mass is within
+ * radius (m) gets a velocity change of strength * (1 - d / radius) m/s away from the centre (straight up for one at it),
+ * whatever its mass, and is woken with its sleep cap restarted. Returns how many bodies were pushed.
+ */
+export const physExplode: (cx: number, cy: number, cz: number, radius: number, strength: number) => number

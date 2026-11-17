@@ -43,6 +43,13 @@ assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surf
     assert.equal(S.checkWorldProgram(travel, t), '', 'the travel example plays for travel ' + t)
   }
   assert.match(S.checkWorldProgram(worldExample, 'self'), /P0014 .*goes anywhere by itself/, 'the throwing example has nothing that travels')
+  // The guide tells of shooting, breaking and a blast in general terms, and of what struck, a tap and action carry.
+  for (const w of ['"struck"', 'e.dx, e.dy, e.dz', 'e.other its\n  label', '- Shooting:', '- Breaking:', '- A blast:', 'scene.split(thing, n, burst)',
+    'at most 16 shots', 'never "shot", "piece" or "body"']) assert.ok(worldGuide.includes(w), 'the world guide says ' + w)
+  // The fixtures for shooting and breaking play through the route's own check.
+  for (const name of ['world-shoot', 'world-break']) {
+    assert.equal(S.checkWorldProgram(fs.readFileSync(path.join(__dirname, 'examples', name + '.vera'), 'utf8')), '', name + ' passes the route check')
+  }
 }
 
 // The gate: game words ask, everything else goes straight to the agent.
@@ -55,6 +62,10 @@ for (const p of ['帮我做一个小时候红白机风格的坦克大战', '霓�
 for (const p of ['dice game', '3D solar system', 'cubes knocking over', 'a 3D cube', 'planets orbiting the sun', 'physics stack of blocks',
   'dominoes toppling'])
   assert.ok(S.looksLikeSurface(p), p + ' is asked about')
+for (const p of ['break the 3D vases', 'smash crates', 'shatter glass', 'destroy the tower', 'a 3D cannon', 'exploding barrels'])
+  assert.ok(S.looksLikeSurface(p), p + ' is asked about')
+for (const p of ['breakfast log', 'a meal planner for breakfast and lunch'])
+  assert.ok(!S.looksLikeSurface(p), p + ' is not asked about')
 for (const p of ['立方体', '太阳系模型', '掷骰子', '三维地球', '物理堆叠'])
   assert.ok(S.looksLikeSurface(p), p + ' is asked about')
 for (const p of ['帮我创建一张吃药卡，提醒我每天吃药', '西湖一日游', '成绩和绩点计算器'])
@@ -73,6 +84,8 @@ assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "world", "trave
 assert.equal(S.parseSurfaceBrief('{"surface": "whole", "engine": "flat", "travel": "steered", "title": "T", "design": "D"}').travel, 'none',
   'a flat app has no travel')
 for (const w of ['"travel"', '"self"', '"steered"']) assert.ok(S.SURFACE_CLASSIFY_PROMPT.includes(w), 'the classifier says ' + w)
+for (const w of ['up to two buttons beside', 'what it or anything else shoots', 'a tap that aims at the point tapped',
+  'what breaks into pieces when struck hard enough']) assert.ok(S.SURFACE_CLASSIFY_PROMPT.includes(w), 'the world design asks ' + w)
 assert.equal(S.parseSurfaceBrief('not json'), null)
 // The engine: world only for a whole app that says so, flat otherwise.
 assert.equal(S.parseSurfaceBrief('{"surface": "whole", "title": "T", "design": "D"}').engine, S.ENGINE_FLAT, 'no engine is flat')

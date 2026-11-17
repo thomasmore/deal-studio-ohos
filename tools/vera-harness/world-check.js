@@ -28,7 +28,7 @@ const calls = S.SCENE_FUNCTIONS.map((f, i) => {
     : p.kind === 'boolean' ? 'true' : p.kind === 'thing' ? thingArg : p.kind === 'thing[]' ? '[' + thingArg + ']'
     : p.kind === 'number[]' ? '[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]'
     : p.name === 'id' ? '"b' + i + '"' : '"t"')
-  return `let v${i}: scene.Thing = scene.${f.name}(${args.join(', ')});`
+  return `let v${i}: ${f.result === 'thing[]' ? 'scene.Thing[]' : 'scene.Thing'} = scene.${f.name}(${args.join(', ')});`
 })
 const program = (buildBody, extra = '', world = 'ui.World("default", 0, "build", "")') => `
 @jsonable class AppState { n: number; }
@@ -775,7 +775,7 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     // The rate, with an engine that reports nine pairs hard every step (and one too soft).
     const fake = new P.FakePhys()
     let pairs = []
-    fake.drainContacts = out => { pairs.forEach((v, k) => { out[k] = v }); return pairs.length / 3 }
+    fake.drainContacts = out => { pairs.forEach((v, k) => { out[k] = v }); return pairs.length / 6 }
     const sim = new P.WorldSim(fake)
     const items = [call('floor', 'surface')]
     for (let k = 0; k < 11; k++) items.push(call('loose', call('box', 'c' + k, k * 0.3, 0.05, 0, 0.1, 0.1, 0.1, 'ink'), 1))
@@ -783,8 +783,8 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     sim.apply(S.diffWorld(null, w), w)
     const idx = id => sim.index.get(id)
     pairs = []
-    for (let k = 0; k < 9; k++) pairs.push(idx('c' + k), idx('c' + (k + 1)), 2 + k * 0.1)
-    pairs.push(idx('c10'), -1, 0.5)   // too soft
+    for (let k = 0; k < 9; k++) pairs.push(idx('c' + k), idx('c' + (k + 1)), 2 + k * 0.1, k * 0.3 + 0.15, 0.05, 0)
+    pairs.push(idx('c10'), -1, 0.5, 3, 0, 0)   // too soft
     const told = []
     for (let f = 0; f < 60; f++) { sim.step(FRAME_MS, f / 60); for (const e of sim.takeEvents()) if (e.kind === 'hit') told.push([f, e]) }
     // The first at once, then one each quarter second: frames 0, 15, 30, 45.
@@ -921,7 +921,7 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
           constructor() { super(); this.fake = -1 }
           drainContacts(out) {
             if (this.fake < 0) return super.drainContacts(out)
-            out[0] = this.fake; out[1] = -1; out[2] = 5
+            out[0] = this.fake; out[1] = -1; out[2] = 5; out[3] = 0; out[4] = 0; out[5] = 0
             this.fake = -1
             return 1
           }
@@ -1192,7 +1192,12 @@ const prompt = describeCatalogForPrompt()
 assert.ok(prompt.includes('ui.World(style, height, build, event)'), 'the World signature is in the prompt')
 assert.ok(prompt.includes('World: default fill'))
 for (const f of S.SCENE_FUNCTIONS) assert.ok(prompt.includes('  scene.' + f.name + '('), 'scene.' + f.name + ' is in the prompt')
-assert.ok(prompt.includes('class scene.Event { kind: string; body: string; other: string; x: number; y: number; z: number; speed: number; bodies: string[]; values: number[] }'))
+assert.ok(prompt.includes('class scene.Event { kind: string; body: string; other: string; x: number; y: number; z: number; dx: number; dy: number; dz: number; speed: number; bodies: string[]; values: number[] }'))
+assert.ok(prompt.includes('  scene.split(thing: scene.Thing, n, burst): scene.Thing[]  -- '), 'split says it gives a scene.Thing[]')
+assert.ok(prompt.includes('  scene.from(thing: scene.Thing, parentId, burst): scene.Thing  -- '))
+assert.ok(prompt.includes('  scene.player(thing: scene.Thing, speed, action, [fire]): scene.Thing  -- '), 'fire is optional')
+assert.ok(prompt.includes('"struck"') && /struck a scene\.target/.test(prompt), 'struck is described')
+for (const f of S.SCENE_FUNCTIONS) assert.ok(['thing', 'thing[]'].includes(f.result), f.name + ' gives a thing or things')
 assert.ok(!prompt.includes('A die is not a Motion: build the solid with ui.Stage'), 'Motion no longer sends a die to Stage')
 assert.ok(prompt.includes('ui.World with scene.die'))
 assert.ok(describeComponents(['World']).includes('std/scene (always available as scene'), 'asking about World is asking about std/scene')
@@ -1273,6 +1278,182 @@ assert.ok(/stopped when the program starts/.test(smoke) && /two bodies have the 
   sim.apply(S.diffWorld(w1, w2), w2)
   sim.apply(S.diffWorld(w1, w2), w2)
   assert.equal(fp.bodies.filter(b => b.alive && b.kind === P.PHYS_DYNAMIC).length, 1, 'one body for x, not two')
+}
+
+// ---- interaction: from, shoot, aim, target, split, blast (the language side; the physics is interaction-check.js)
+{
+  const Sh = loadVera('VeraShapes')
+  const near = (a, b, eps, msg) => assert.ok(Math.abs(a - b) < eps, msg + ': ' + a + ' vs ' + b)
+  const nums = a => new VeraArrayValue(a.map(v => new VeraNumberValue(v)))
+  // Compiles: split is a scene.Thing[], from is a name after a dot, the player takes a second button, events have dx, dy, dz.
+  assert.deepEqual(codes(program(`let parts: scene.Thing[] = scene.split(scene.target(scene.box("v", 0, 0.5, 0, 1, 1, 1, "ink")), 4, 1);
+  for (let p: scene.Thing of parts) { things.push(p); }
+  things.push(scene.from(scene.aim(scene.shoot(scene.sphere("s1", 0.5, 0, 0, 0.05, "accent"), 20, false), 0, 1, 5), "me", 0));
+  things.push(scene.player(scene.box("me", 0, 0.5, 0, 1, 1, 1, "ink"), 3, "Jump", "Fire"));
+  things.push(scene.blast("bang", 1, 0, 0, 0, 2, 5));`,
+    'function onWorld(state: AppState, e: scene.Event): AppState { let d: number = e.dx + e.dy + e.dz; if (e.kind === "struck") { return {n: state.n + d}; } return state; }',
+    'ui.World("default", 0, "build", "onWorld")')), [], 'the interaction functions compile')
+  assert.ok(codes(program('let one: scene.Thing = scene.split(scene.box("v", 0, 0.5, 0, 1, 1, 1, "ink"), 2, 0);')).some(c => c.startsWith('E2019')),
+    'a split is not one Thing')
+  // Traps.
+  traps(() => call('from', box('a'), '', 0), 'R0029', /needs the id/, 'from needs a parent')
+  traps(() => call('from', box('a'), 'a', 0), 'R0029', /cannot come from itself/)
+  traps(() => call('from', call('spin', box('a'), 3), 'p', 0), 'R0029', /cannot come from another body/, 'from on a kinematic body')
+  traps(() => call('from', call('player', box('a'), 3, ''), 'p', 0), 'R0029', /is the player/)
+  traps(() => call('player', call('from', box('a'), 'p', 0), 3, ''), 'R0029', /cannot be the player/)
+  traps(() => call('shoot', call('player', box('a'), 3, ''), 10, false), 'R0029', /cannot be a shot/)
+  traps(() => call('shoot', box('a'), 0, false), 'R0029', /more than 0/)
+  traps(() => world([box('x'), call('blast', 'x', 1, 0, 0, 0, 1, 1)]), 'R0029', /id of its own/, 'a blast shares the ids')
+  traps(() => world([call('blast', 'x', 1, 0, 0, 0, 1, 1), box('x')]), 'R0029', /two bodies have the id/)
+  // Fields resolved.
+  {
+    const w = world([call('player', box('me'), 3, 'Jump', 'Fire'), call('target', box('t', 3)),
+      call('from', call('aim', call('shoot', call('sphere', 's', 0.6, 0, 0, 0.05, 'accent'), 25, true), 1, 2, 3), 'me', 0.5)])
+    const me = w.bodies[0], t = w.bodies[1], sh = w.bodies[2]
+    assert.equal(me.player.fire, 'Fire'); assert.equal(me.player.action, 'Jump')
+    assert.equal(call('player', box('p'), 3, 'Jump').thing.player.fire, '', 'without a fourth argument, no second button')
+    assert.ok(t.target && t.motion === 'static' && !t.from && !t.shot)
+    assert.deepEqual({from: {...sh.from}, shot: {...sh.shot}, aim: sh.aim, motion: sh.motion, mass: sh.mass, position: sh.position},
+      {from: {parent: 'me', burst: 0.5, base: []}, shot: {speed: 25, arc: true}, aim: [1, 2, 3], motion: 'loose', mass: 1, position: [0.6, 0, 0]})
+    const ev = S.sceneEventValue('tap', '', '', 1, 2, 3, 0, [], [], [0, -0.6, 0.8])
+    assert.deepEqual(['dx', 'dy', 'dz'].map(k => ev.fields.get(k).value), [0, -0.6, 0.8])
+    const plain = S.sceneEventValue('hit', 'a', 'b', 0, 0, 0, 2, [], [])
+    assert.deepEqual(['dx', 'dy', 'dz'].map(k => plain.fields.get(k).value), [0, 0, 0], 'dir defaults to 0, 0, 0')
+    assert.ok(S.SCENE_EVENT_KINDS.includes('struck'))
+  }
+  // Split, every kind: n pieces id-1..id-n, each from the parent, its colour and bounce, the mass shared by volume, no two
+  // overlapping, together about the parent's volume.
+  const insideHull = (pts, q, eps = 1e-6) => Sh.hullTriangles(pts).every(t => {
+    const a = pts.slice(3 * t[0], 3 * t[0] + 3), b = pts.slice(3 * t[1], 3 * t[1] + 3), c = pts.slice(3 * t[2], 3 * t[2] + 3)
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+    const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+    return n[0] * (q[0] - a[0]) + n[1] * (q[1] - a[1]) + n[2] * (q[2] - a[2]) <= eps * Math.hypot(...n)
+  })
+  const insideOutline = (pts, x, z) => {
+    let inside = false
+    for (let i = 0, j = pts.length / 2 - 1; i < pts.length / 2; j = i++) {
+      const xi = pts[2 * i], zi = pts[2 * i + 1], xj = pts[2 * j], zj = pts[2 * j + 1]
+      if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) inside = !inside
+    }
+    return inside
+  }
+  const contains = (p, q) => {
+    const l = [q[0] - p.x, q[1] - p.y, q[2] - p.z]
+    if (p.kind === 'box') return [0, 1, 2].every(k => Math.abs(l[k]) < [p.w, p.h, p.d][k] / 2 - 1e-9)
+    if (p.kind === 'hull') return insideHull(p.points, l, -1e-6)
+    if (p.kind === 'shape') return Math.abs(l[1]) < p.h / 2 && insideOutline(p.points, l[0], l[2])
+    if (p.kind === 'group') return p.parts.some(part => contains(part, l))
+    if (p.kind === 'sphere') return Math.hypot(...l) < p.w / 2
+    return false
+  }
+  const volume = t => t.kind === 'box' || t.kind === 'die' ? t.w * t.h * t.d : t.kind === 'hull' ? Sh.hullVolume(t.points) : t.kind === 'shape' ? Sh.outlineArea(t.points) * t.h
+    : t.kind === 'sphere' ? Math.PI * t.w ** 3 / 6 : t.kind === 'cylinder' ? Math.PI * t.w * t.w * t.h / 4 : t.parts.reduce((s, p) => s + volume(p), 0)
+  const parents = {
+    box: call('loose', call('turn', call('box', 'crate', 1, 0.5, 2, 1.2, 0.6, 0.3, 'accent'), 0, 30, 0), 3),
+    die: call('die', 'd', 0, 0.15, 0, 0.3, 'white'),
+    sphere: call('bounce', call('sphere', 'ball', 0, 1, 0, 0.4, 'accent'), 0.8, 0.2),
+    cylinder: call('cylinder', 'can', 0, 0.5, 0, 0.2, 1, 'ink'),
+    shape: call('thick', call('shape', 'ell', 0, 0.1, 0, nums([0, 0, 2, 0, 2, 0.5, 0.5, 0.5, 0.5, 2, 0, 2]), 'ink'), 0.2),
+    star: call('shape', 'star', 0, 0.1, 0, nums([...Array(10)].flatMap((_, k) => { const r = k % 2 ? 0.4 : 1, a = k * Math.PI / 5; return [r * Math.cos(a), r * Math.sin(a)] })), 'ink'),
+    hull: call('hull', 'gem', 0, 1, 0, nums([0, 1, 0, 1, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, -1, 0, -1, 0]), 'accent'),
+    group: call('loose', call('group', 'snowman', 0, 0, 0, new VeraArrayValue([call('sphere', 'bottom', 0, 0.4, 0, 0.4, 'surface'),
+      call('sphere', 'middle', 0, 1.1, 0, 0.3, 'surface'), call('swing', call('box', 'arm', 0.5, 1.1, 0, 0.4, 0.05, 0.05, 'ink'), 20, 1, 0),
+      call('sphere', 'head', 0, 1.6, 0, 0.2, 'surface')])), 2),
+  }
+  for (const [kind, value] of Object.entries(parents)) {
+    const t = value.thing
+    for (const n of [2, 3, 4, 5, 7, 8]) {
+      const got = call('split', value, n, 1.5)
+      assert.ok(got instanceof VeraArrayValue, 'split gives an array')
+      const ps = got.elements.map(e => e.thing)
+      const want = kind === 'group' ? Math.min(n, t.parts.length) : n
+      assert.equal(ps.length, want, kind + ' in ' + n + ': ' + ps.length + ' pieces')
+      assert.deepEqual(ps.map(p => p.id), ps.map((_, k) => t.id + '-' + (k + 1)), kind + ': ids are its id and a number')
+      const parentMass = t.motion === 'loose' ? t.mass : 1
+      near(ps.reduce((s, p) => s + p.mass, 0), parentMass, 1e-9, kind + ': the pieces weigh what it did')
+      const total = ps.reduce((s, p) => s + volume(p), 0)
+      const tol = kind === 'sphere' || kind === 'cylinder' ? 0.02 : 1e-6
+      near(total / volume(t), 1, tol, kind + ' in ' + n + ': the pieces hold its volume (' + (total / volume(t)).toFixed(4) + ')')
+      for (const p of ps) {
+        assert.ok(p.from && p.from.parent === t.id && p.from.burst === 1.5, kind + ': each piece comes from it')
+        assert.deepEqual(p.from.base, [t.x, t.y, t.z, t.rx, t.ry, t.rz], kind + ': and knows where it was built')
+        assert.equal(p.motion, 'loose'); assert.equal(p.color, t.color); assert.equal(p.restitution, t.restitution); assert.equal(p.friction, t.friction)
+        near(p.mass / parentMass, volume(p) / total, 1e-9, kind + ': mass by volume')
+        if (p.kind === 'hull') assert.equal(Sh.hullCheck(p.points), '', kind + ': a piece is a hull')
+        if (p.kind === 'shape') assert.equal(Sh.outlineCheck(p.points), '', kind + ': a piece is an outline')
+        if (p.kind === 'group') for (const part of p.parts) assert.equal(part.swing, null, 'a piece does not swing')
+      }
+      // No two overlap: points through the parent's box are inside at most one piece.
+      const steps = 10
+      let covered = 0
+      for (let i = 0; i < steps; i++) for (let j = 0; j < steps; j++) for (let k = 0; k < steps; k++) {
+        const q = [(i + 0.5) / steps - 0.5, (j + 0.5) / steps - 0.5, (k + 0.5) / steps - 0.5].map((f, a) => f * [t.w, t.h, t.d][a] * 1.01)
+        const inside = ps.filter(p => contains(p, q))
+        assert.ok(inside.length <= 1, kind + ' in ' + n + ': ' + inside.map(p => p.id) + ' overlap at ' + q.map(v => v.toFixed(3)))
+        covered += inside.length
+      }
+      // ... and that test is not empty: the pieces fill about as much of the box round it as the body does.
+      if (kind !== 'shape' && kind !== 'star' && kind !== 'group') {
+        const fill = volume(t) / (t.w * t.h * t.d)
+        assert.ok(covered / steps ** 3 > 0.6 * fill, kind + ' in ' + n + ': the pieces fill ' + covered + ' of ' + steps ** 3)
+      }
+      // And none is wrapped in anything the world refuses: they decode.
+      assert.equal(world(got.elements).bodies.length, ps.length)
+    }
+  }
+  assert.equal(call('split', box('b'), 1, 0).elements.length, 2, 'n below 2 is 2'); assert.equal(call('split', box('b'), 40, 0).elements.length, Sh.MAX_SPLIT, 'n above 8 is 8')
+  // A box is cut into its least elongated grid.
+  assert.deepEqual(Sh.boxGrid([2, 1, 1], 2).map(c => c[3]), [1, 1]); assert.deepEqual(Sh.boxGrid([1, 1, 1], 8).map(c => c.slice(3).join()), Array(8).fill('0.5,0.5,0.5'))
+  // Cutting a hull: the two sides hold its volume.
+  {
+    const cube = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1]
+    const [a, b] = Sh.cutHull(cube, [1, 0, 0], 0.25)
+    near(Sh.hullVolume(a), 0.75, 1e-9); near(Sh.hullVolume(b), 0.25, 1e-9)
+    assert.deepEqual(Sh.cutHull(cube, [1, 0, 0], 2)[0], [], 'a plane past it leaves one side empty')
+  }
+
+  // Shots: only the last MAX_SHOTS are kept, in build order; a thousand shots do not stop the program.
+  {
+    const items = [call('floor', 'surface'), call('player', box('me'), 3, '', 'Fire')]
+    for (let k = 0; k < 1000; k++) items.push(call('from', call('shoot', call('sphere', 'shot' + k, 0.6, 0, 0, 0.05, 'accent'), 20, false), 'me', 0))
+    const w = world(items)
+    const shots = w.bodies.filter(b => b.shot)
+    assert.equal(shots.length, S.MAX_SHOTS); assert.equal(S.MAX_SHOTS, 16)
+    assert.deepEqual(shots.map(b => b.id), Array.from({length: 16}, (_, k) => 'shot' + (984 + k)), 'the last sixteen')
+    assert.equal(w.droppedShots, 984)
+    // The window moves: a new shot, the oldest of the sixteen goes; nothing else is touched.
+    items.push(call('from', call('shoot', call('sphere', 'shot1000', 0.6, 0, 0, 0.05, 'accent'), 20, false), 'me', 0))
+    const d = S.diffWorld(w, world(items))
+    assert.deepEqual(d.create.map(b => b.id), ['shot1000']); assert.deepEqual(d.remove, ['shot984'])
+    assert.equal(d.recreate.length + d.material.length + d.setPose.length, 0)
+  }
+  // Over the cap, the oldest pieces go before the cap stops the program; plain bodies still stop it.
+  {
+    const items = Array.from({length: 290}, (_, i) => box('b' + i, i * 2))
+    for (let k = 0; k < 4; k++) items.push(...call('split', box('v' + k, -10 - 2 * k), 5, 0).elements)
+    const w = world(items)
+    assert.equal(w.bodies.length, S.MAX_WORLD_BODIES); assert.equal(w.droppedPieces, 10)
+    assert.deepEqual(w.bodies.filter(b => b.from).map(b => b.id), ['v2-1', 'v2-2', 'v2-3', 'v2-4', 'v2-5', 'v3-1', 'v3-2', 'v3-3', 'v3-4', 'v3-5'],
+      'the oldest pieces went first')
+    traps(() => world([...Array.from({length: 301}, (_, i) => box('b' + i, i * 2)), ...call('split', box('v'), 4, 0).elements]), 'R0028', /at most 300/)
+  }
+  // The diff: from, shoot and aim are read at creation only; target is a material change; a blast goes off on its trigger.
+  {
+    const scene1 = (parent, ax, tgt, trigger) => world([call('floor', 'surface'), box('p'), box('q', 3),
+      (tgt ? c => call('target', c) : c => c)(call('from', call('aim', call('shoot', call('sphere', 's', 0.6, 0, 0, 0.05, 'accent'), 9, false), ax, 0, 0), parent, 0)),
+      call('blast', 'bang', trigger, 0, 0, 0, 2, 4)])
+    const a = scene1('p', 5, false, 0)
+    let d = S.diffWorld(null, a)
+    assert.deepEqual(d.blast, [], 'a blast made with trigger 0 does not go off')
+    assert.ok(S.diffWorld(null, scene1('p', 5, false, 1)).blast.length === 1, 'one made with another trigger does')
+    d = S.diffWorld(a, scene1('q', 7, false, 0))
+    assert.ok(d.empty(), 'a new parent or aim moves nothing')
+    d = S.diffWorld(a, scene1('p', 5, true, 0))
+    assert.deepEqual(d.material.map(b => b.id), ['s'], 'target is watched in place'); assert.equal(d.recreate.length, 0)
+    d = S.diffWorld(a, scene1('p', 5, false, 1))
+    assert.deepEqual(d.blast.map(x => x.id), ['bang']); assert.ok(!d.empty())
+    assert.equal(S.diffWorld(scene1('p', 5, false, 1), scene1('p', 5, false, 1)).blast.length, 0, 'the same trigger: no blast')
+  }
 }
 
 console.log('world-check ok')

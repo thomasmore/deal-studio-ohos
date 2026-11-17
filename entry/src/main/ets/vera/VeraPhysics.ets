@@ -10,9 +10,10 @@
  * Pure: imports only relative modules, never a platform kit, so tools/vera-harness loads it under node.
  */
 
-import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, orbitPositions, topFace } from './VeraScene'
+import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, SceneFrom, SceneShot, orbitPositions,
+  topFace } from './VeraScene'
 import { PlayerDrive, ZoneEnter, yawOf, PLAYER_STOP } from './VeraLocomotion'
-import { pointBounds, PartRecords, PART_RECORD, addPartRecords } from './VeraShapes'
+import { pointBounds, PartRecords, PART_RECORD, addPartRecords, turnPoint } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
 
 /** Body kinds, as the native library numbers them. */
@@ -21,6 +22,19 @@ export const PHYS_DYNAMIC: number = 1
 export const PHYS_KINEMATIC: number = 2
 /** A dynamic body kept upright, turning only about y, without friction or bounce, moved by drive (the player). */
 export const PHYS_CHARACTER: number = 3
+/**
+ * A shot (scene.shoot): a dynamic body with continuous collision, without gravity until it first touches something and
+ * with it from then on; and one that falls all the way (arc). Both are watched from the start. One that leaves the bound
+ * stops where it is (asleep, reported once among the awake records) instead of going back where it was made; awakeDynamic
+ * does not count them, so no throw waits on a shot.
+ */
+export const PHYS_PROJECTILE: number = 4
+export const PHYS_PROJECTILE_ARC: number = 5
+/** Floats in one contact record of drainContacts: [a, b, approach speed, px, py, pz]. */
+export const CONTACT_RECORD: number = 6
+/** Contact records one drain holds at most (kContactCap), the last CONTACT_WATCH_RESERVE of them kept for watched bodies. */
+export const CONTACT_CAP: number = 1024
+export const CONTACT_WATCH_RESERVE: number = 64
 
 /**
  * The native physics API (entry/src/main/cpp/types/libphys/index.d.ts), one method per function. Metres, seconds,
@@ -62,12 +76,26 @@ export interface PhysEngine {
   readAwake(out: Float32Array): number
   /** px, py, pz, qx, qy, qz, qw of one body; 1, or 0 when there is no such body. */
   readPose(i: number, out: Float32Array): number
-  /** vx, vy, vz of one body (m/s); 1, or 0 when there is no such body. */
+  /**
+   * vx, vy, vz of one body (m/s), and wx, wy, wz (rad/s) after them when out holds 6 or more; 1, or 0 when there is no such
+   * body (or out holds fewer than 3).
+   */
   readVelocity(i: number, out: Float32Array): number
-  /** Triples [a, b, approach speed] of contacts begun since the last drain; returns how many. */
+  /**
+   * Records of CONTACT_RECORD floats [a, b, approach speed, px, py, pz] of contacts begun since the last drain (a and b
+   * engine indices -- the ground's too -- in either order; p a point of the contact); returns how many. Ordinary contacts
+   * stop at CONTACT_CAP - CONTACT_WATCH_RESERVE records; one with a watched body may use the whole CONTACT_CAP.
+   */
   drainContacts(out: Float32Array): number
-  /** Dynamic bodies awake, characters not counted. */
+  /** Dynamic bodies awake, characters and projectiles not counted. */
   awakeDynamic(): number
+  /** Whether the body's contacts go into the watched reserve (on 1, off 0). Projectiles are watched from the start. */
+  watch(i: number, on: number): void
+  /**
+   * Every dynamic body (characters and projectiles too) whose centre is within radius of cx, cy, cz is given
+   * strength * (1 - d / radius) m/s more velocity straight away from it, and woken; returns how many.
+   */
+  explode(cx: number, cy: number, cz: number, radius: number, strength: number): number
 }
 
 /**
@@ -209,6 +237,12 @@ class FakeBody {
   seed: number = 0
   /** Made as PHYS_CHARACTER: upright, turning about y only, no friction or bounce. */
   character: boolean = false
+  /** Made as PHYS_PROJECTILE(_ARC): its share of gravity (0 until it first touches something), watched, stopped at the bound. */
+  projectile: boolean = false
+  gravityFactor: number = 1
+  watched: boolean = false
+  /** A projectile stopped outside the bound: not stopped or reported again until it is placed or given a velocity. */
+  frozen: boolean = false
   /** Extents along the world axes, for this sub-step. */
   e: number[] = [0, 0, 0]
 }
@@ -261,6 +295,8 @@ export class FakePhys implements PhysEngine {
   private lastActive: number[] = []
   private touching: Set<string> = new Set<string>()
   private contacts: number[] = []
+  /** Records left out of the contact buffer because it was full (for checks). */
+  droppedContacts: number = 0
   private serial: number = 0
   /** Simulated seconds so far, for checks. */
   simSeconds: number = 0
@@ -286,7 +322,13 @@ export class FakePhys implements PhysEngine {
 
   private add(kind: number, hx: number, hy: number, hz: number, sphere: boolean): number {
     let b = new FakeBody()
-    b.kind = Math.max(0, Math.min(3, kind))
+    b.kind = Math.max(0, Math.min(PHYS_PROJECTILE_ARC, kind))
+    if (b.kind === PHYS_PROJECTILE || b.kind === PHYS_PROJECTILE_ARC) {
+      b.projectile = true
+      b.gravityFactor = b.kind === PHYS_PROJECTILE_ARC ? 1 : 0
+      b.watched = true
+      b.kind = PHYS_DYNAMIC
+    }
     if (b.kind === PHYS_CHARACTER) {
       b.kind = PHYS_DYNAMIC
       b.character = true
@@ -348,6 +390,7 @@ export class FakePhys implements PhysEngine {
     b.q = [qx, qy, qz, qw]
     normQ(b.q)
     b.home = [px, py, pz, b.q[0], b.q[1], b.q[2], b.q[3]]
+    b.frozen = false
     if (b.kind === PHYS_DYNAMIC) { this.wake(b) }
   }
 
@@ -364,6 +407,7 @@ export class FakePhys implements PhysEngine {
     let b = this.bodies[i]
     b.v = [vx, vy, vz]
     b.w = b.character ? [0, wy, 0] : [wx, wy, wz]
+    b.frozen = false
     if (b.kind === PHYS_DYNAMIC) { this.wake(b) }
   }
 
@@ -411,12 +455,22 @@ export class FakePhys implements PhysEngine {
     }
   }
 
-  private touch(a: number, b: number, speed: number, now: Map<string, number[]>): void {
+  private touch(a: number, b: number, speed: number, now: Map<string, number[]>, at: number[]): void {
     let lo = Math.min(a, b)
     let hi = Math.max(a, b)
     let key = lo.toString() + ':' + hi.toString()
     let known = now.get(key)
-    if (known === undefined) { now.set(key, [lo, hi, speed]) } else if (speed > known[2]) { known[2] = speed }
+    if (known === undefined) {
+      now.set(key, [lo, hi, speed, at[0], at[1], at[2]])
+    } else if (speed > known[2]) {
+      known[2] = speed
+      known[3] = at[0]; known[4] = at[1]; known[5] = at[2]
+    }
+    // A projectile falls once it has touched something.
+    for (let i of [a, b]) {
+      let body = this.bodies[i]
+      if (body.projectile) { body.gravityFactor = 1 }
+    }
   }
 
   /** Overlap of a and b along each axis (positive on all three means they touch), and the axis of least overlap. */
@@ -451,9 +505,14 @@ export class FakePhys implements PhysEngine {
     }
     let total = ma + mb
     if (total <= 0) { return }
+    // Where they touch: the middle of the box both overlap in, before they are pushed apart.
+    let at: number[] = [0, 0, 0]
+    for (let c = 0; c < 3; c++) {
+      at[c] = (Math.max(a.p[c] - a.e[c], b.p[c] - b.e[c]) + Math.min(a.p[c] + a.e[c], b.p[c] + b.e[c])) / 2
+    }
     a.p[k] -= s * pen[k] * ma / total
     b.p[k] += s * pen[k] * mb / total
-    this.touch(ia, ib, Math.max(0, rel), now)
+    this.touch(ia, ib, Math.max(0, rel), now, at)
     if (rel <= 0) { return }
     let e = Math.max(a.restitution, b.restitution)
     let bounce = rel > FAKE_BOUNCE_MIN ? e : 0
@@ -486,7 +545,7 @@ export class FakePhys implements PhysEngine {
       b.w[0] = 0
       b.w[2] = 0
     }
-    b.v[1] += this.gravity * h
+    b.v[1] += this.gravity * b.gravityFactor * h
     let lin = Math.max(0, 1 - FAKE_LINEAR_DAMPING * h)
     let ang = Math.max(0, 1 - FAKE_ANGULAR_DAMPING * h)
     for (let k = 0; k < 3; k++) {
@@ -555,35 +614,54 @@ export class FakePhys implements PhysEngine {
       if (b.kind === PHYS_DYNAMIC) { moving.push(i) } else { fixed.push(i) }
     }
     for (let s = 0; s < n; s++) {
+      // A projectile moves at most half its smallest half-extent a micro-step, so it cannot pass through a thin wall
+      // between two (the native engine casts it instead).
+      let m = 1
       for (let i of moving) {
         let b = this.bodies[i]
-        if (b.awake) { this.integrate(b, h) }
+        if (!b.awake || !b.projectile) { continue }
+        let reach = Math.max(1e-4, Math.min(b.half[0], b.half[1], b.half[2]) / 2)
+        m = Math.max(m, Math.ceil(Math.hypot(b.v[0], b.v[1], b.v[2]) * h / reach))
       }
-      for (let i of fixed) { this.extents(this.bodies[i]) }
-      for (let i of moving) { this.extents(this.bodies[i]) }
-      // Moving bodies against each other: sweep along x, so a wall of cubes is not every pair with every pair.
-      let order = moving.slice()
-      order.sort((a: number, b: number): number => {
-        let d = (this.bodies[a].p[0] - this.bodies[a].e[0]) - (this.bodies[b].p[0] - this.bodies[b].e[0])
-        return d !== 0 ? d : a - b
-      })
-      for (let x = 0; x < order.length; x++) {
-        let a = this.bodies[order[x]]
-        let reach = a.p[0] + a.e[0]
-        for (let y = x + 1; y < order.length; y++) {
-          let b = this.bodies[order[y]]
-          if (b.p[0] - b.e[0] > reach) { break }
-          if (!a.awake && !b.awake) { continue }
-          // A sleeping body holds still under an awake one (infinite mass) unless the knock wakes it.
-          this.resolve(order[x], a, order[y], b, a.awake ? 1 / a.mass : 0, b.awake ? 1 / b.mass : 0, h, now, pen)
-        }
-      }
-      for (let i of moving) {
-        let b = this.bodies[i]
-        if (!b.awake) { continue }
-        for (let j of fixed) { this.resolve(i, b, j, this.bodies[j], 1 / b.mass, 0, h, now, pen) }
+      m = Math.min(m, 256)
+      for (let micro = 0; micro < m; micro++) { this.subStep(h / m, moving, fixed, now, pen) }
+    }
+    this.finishStep(dt, moving, now)
+    return 0
+  }
+
+  private subStep(h: number, moving: number[], fixed: number[], now: Map<string, number[]>, pen: number[]): void {
+    for (let i of moving) {
+      let b = this.bodies[i]
+      if (b.awake) { this.integrate(b, h) }
+    }
+    for (let i of fixed) { this.extents(this.bodies[i]) }
+    for (let i of moving) { this.extents(this.bodies[i]) }
+    // Moving bodies against each other: sweep along x, so a wall of cubes is not every pair with every pair.
+    let order = moving.slice()
+    order.sort((a: number, b: number): number => {
+      let d = (this.bodies[a].p[0] - this.bodies[a].e[0]) - (this.bodies[b].p[0] - this.bodies[b].e[0])
+      return d !== 0 ? d : a - b
+    })
+    for (let x = 0; x < order.length; x++) {
+      let a = this.bodies[order[x]]
+      let reach = a.p[0] + a.e[0]
+      for (let y = x + 1; y < order.length; y++) {
+        let b = this.bodies[order[y]]
+        if (b.p[0] - b.e[0] > reach) { break }
+        if (!a.awake && !b.awake) { continue }
+        // A sleeping body holds still under an awake one (infinite mass) unless the knock wakes it.
+        this.resolve(order[x], a, order[y], b, a.awake ? 1 / a.mass : 0, b.awake ? 1 / b.mass : 0, h, now, pen)
       }
     }
+    for (let i of moving) {
+      let b = this.bodies[i]
+      if (!b.awake) { continue }
+      for (let j of fixed) { this.resolve(i, b, j, this.bodies[j], 1 / b.mass, 0, h, now, pen) }
+    }
+  }
+
+  private finishStep(dt: number, moving: number[], now: Map<string, number[]>): void {
     this.simSeconds += dt
     let touched = new Set<number>()
     now.forEach((c: number[]) => {
@@ -594,7 +672,20 @@ export class FakePhys implements PhysEngine {
     for (let i of moving) {
       let b = this.bodies[i]
       let p = b.p
-      if (p[1] < this.minY || Math.abs(p[0]) > this.halfX || Math.abs(p[2]) > this.halfZ || !isFinite(p[0] + p[1] + p[2])) {
+      if (b.frozen) { continue }
+      let out = p[1] < this.minY || Math.abs(p[0]) > this.halfX || Math.abs(p[2]) > this.halfZ
+      if (b.projectile && out && isFinite(p[0] + p[1] + p[2])) {
+        // A shot that left the world stops where it is, told once, and is never sent back.
+        b.v = [0, 0, 0]
+        b.w = [0, 0, 0]
+        b.awake = false
+        b.still = 0
+        b.awakeFor = 0
+        b.frozen = true
+        reset.push(i)
+        continue
+      }
+      if (out || !isFinite(p[0] + p[1] + p[2])) {
         b.p = [b.home[0], b.home[1], b.home[2]]
         b.q = [b.home[3], b.home[4], b.home[5], b.home[6]]
         b.v = [0, 0, 0]
@@ -627,12 +718,16 @@ export class FakePhys implements PhysEngine {
     for (let key of keys) {
       if (!this.touching.has(key)) {
         let c = now.get(key) as number[]
-        this.contacts.push(c[0], c[1], c[2])
+        let records = this.contacts.length / CONTACT_RECORD
+        let watched = this.bodies[c[0]].watched || this.bodies[c[1]].watched
+        if (records >= CONTACT_CAP || (!watched && records >= CONTACT_CAP - CONTACT_WATCH_RESERVE)) {
+          this.droppedContacts++
+          continue
+        }
+        this.contacts.push(c[0], c[1], c[2], c[3], c[4], c[5])
       }
     }
     this.touching = new Set<string>(keys)
-    if (this.contacts.length > 3 * 1024) { this.contacts = this.contacts.slice(0, 3 * 1024) }
-    return 0
   }
 
   private pose(i: number, out: Float32Array, at: number): void {
@@ -664,19 +759,47 @@ export class FakePhys implements PhysEngine {
     if (!this.valid(i) || out.length < 3) { return 0 }
     let v = this.bodies[i].v
     out[0] = v[0]; out[1] = v[1]; out[2] = v[2]
+    if (out.length >= 6) {
+      let w = this.bodies[i].w
+      out[3] = w[0]; out[4] = w[1]; out[5] = w[2]
+    }
     return 1
   }
 
   drainContacts(out: Float32Array): number {
-    let n = Math.min(Math.floor(out.length / 3), this.contacts.length / 3)
-    for (let k = 0; k < n * 3; k++) { out[k] = this.contacts[k] }
+    let n = Math.min(Math.floor(out.length / CONTACT_RECORD), this.contacts.length / CONTACT_RECORD)
+    for (let k = 0; k < n * CONTACT_RECORD; k++) { out[k] = this.contacts[k] }
     this.contacts = []
     return n
   }
 
   awakeDynamic(): number {
     let n = 0
-    for (let b of this.bodies) { if (b.alive && b.kind === PHYS_DYNAMIC && b.awake && !b.character) { n++ } }
+    for (let b of this.bodies) { if (b.alive && b.kind === PHYS_DYNAMIC && b.awake && !b.character && !b.projectile) { n++ } }
+    return n
+  }
+
+  watch(i: number, on: number): void {
+    if (this.valid(i)) { this.bodies[i].watched = on !== 0 }
+  }
+
+  explode(cx: number, cy: number, cz: number, radius: number, strength: number): number {
+    if (!(radius > 0)) { return 0 }
+    let n = 0
+    for (let b of this.bodies) {
+      if (!b.alive || b.kind !== PHYS_DYNAMIC) { continue }
+      let dx = b.p[0] - cx
+      let dy = b.p[1] - cy
+      let dz = b.p[2] - cz
+      let d = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (d >= radius) { continue }
+      let dir = d > 1e-9 ? [dx / d, dy / d, dz / d] : [0, 1, 0]
+      let dv = strength * (1 - d / radius)
+      for (let k = 0; k < 3; k++) { b.v[k] += dir[k] * dv }
+      b.frozen = false
+      this.wake(b)
+      n++
+    }
     return n
   }
 }
@@ -695,6 +818,16 @@ export const SIM_MAX_ELAPSED_MS: number = 100
  */
 export const HIT_MIN_SPEED: number = 1
 export const HIT_INTERVAL_S: number = 0.25
+/**
+ * `struck`: a knock on a watched body (scene.target, or a shot) closing faster than STRUCK_MIN_SPEED m/s. One pair is told
+ * at most once every STRUCK_PAIR_COOLDOWN_S, a finished step tells at most one struck (every knock since the last one
+ * gathered into it), and at most STRUCK_RATE a second: a knock that would go over waits and is told with the next.
+ */
+export const STRUCK_MIN_SPEED: number = 1.5
+export const STRUCK_PAIR_COOLDOWN_S: number = 0.3
+export const STRUCK_RATE: number = 10
+/** A shot slower than this (m/s) is no longer flying: frames are not kept going for it. */
+export const SHOT_FLYING_SPEED: number = 0.05
 /** Physics walls round a table stand this much of the table's longer side above the walls drawn, so a throw stays on it. */
 export const TABLE_GLASS_RATIO: number = 0.5
 /**
@@ -712,7 +845,7 @@ const SIM_POSE_CAPACITY: number = 2048
  * loses none (a 100-cube wall begins about 350 in one step). The native side writes no more than this array holds
  * (FloatCapacity); what a full drain leaves is dropped there.
  */
-const SIM_CONTACT_CAPACITY: number = 1024
+const SIM_CONTACT_CAPACITY: number = CONTACT_CAP
 
 /** One thing the world tells the program; VeraPreview turns it into a scene.Event (sceneEventValue). */
 export class SimEvent {
@@ -730,6 +863,10 @@ export class SimEvent {
    */
   bodies: string[] = []
   values: number[] = []
+  /** dx, dy, dz: a tap's ray, the player's heading for `action`; 0 for what the physics tells. */
+  dx: number = 0
+  dy: number = 0
+  dz: number = 0
   /** For `settled`: which throw it ends (WorldSim.kickSerial when it was kicked) and the simulated ms since that kick. */
   kick: number = 0
   afterMs: number = 0
@@ -791,7 +928,9 @@ export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set
     }
   }
   let floorTop = spec.floor !== null ? (table !== null ? -TABLE_TOP_THICKNESS : 0) : NaN
-  let candidates: BodySpec[] = created.filter((b: BodySpec): boolean => b.motion === 'loose' && !kicked.has(b.id))
+  // A piece (scene.from) or a shot is made moving where something else was: never put to sleep at the start.
+  let candidates: BodySpec[] = created.filter((b: BodySpec): boolean => b.motion === 'loose' && !kicked.has(b.id) &&
+    b.from === null && b.shot === null)
   let bounds = new Map<string, number[]>()
   for (let b of candidates) { bounds.set(b.id, specBounds(b)) }
   // Bottom up, so a body can rest on one that was found resting just before it.
@@ -839,6 +978,7 @@ export function bodyRecords(b: BodySpec): PartRecords {
 }
 
 function kindOf(b: BodySpec): number {
+  if (b.shot !== null && b.motion === 'loose') { return (b.shot as SceneShot).arc ? PHYS_PROJECTILE_ARC : PHYS_PROJECTILE }
   if (b.motion === 'loose') { return b.player !== null ? PHYS_CHARACTER : PHYS_DYNAMIC }
   if (b.motion === 'kinematic') { return PHYS_KINEMATIC }
   return PHYS_STATIC
@@ -854,15 +994,68 @@ const KNOCKED_TURN_DEG: number = 25
  * its smallest side from where it started, or turned more than KNOCKED_TURN_DEG. What "settled" tells for a body that is
  * not a die, so a game of knocking things over can count what fell.
  */
-export function knockedOver(b: BodySpec, pose: Float32Array): boolean {
-  let dx = pose[0] - b.position[0]
-  let dy = pose[1] - b.position[1]
-  let dz = pose[2] - b.position[2]
+export function knockedOver(b: BodySpec, pose: Float32Array, origin: number[] | null = null): boolean {
+  // A body made from another (scene.from) was built where WorldSim put it (its origin), not at its spec's position.
+  let o: number[] = origin !== null ? origin : b.position
+  let dx = pose[0] - o[0]
+  let dy = pose[1] - o[1]
+  let dz = pose[2] - o[2]
   let side = Math.max(0.001, Math.min(b.dims[0], b.dims[1], b.dims[2]))
   if (Math.sqrt(dx * dx + dy * dy + dz * dz) > side * KNOCKED_MOVE) { return true }
-  let q = quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2])
+  let q = origin !== null ? [origin[3], origin[4], origin[5], origin[6]] : quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2])
   let dot = Math.abs(q[0] * pose[3] + q[1] * pose[4] + q[2] * pose[5] + q[3] * pose[6])
   return 2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI > KNOCKED_TURN_DEG
+}
+
+/** The turn that points +x along (dx, dy, dz) and keeps it level sideways: a heading about y, then a pitch up. */
+export function lookQuat(dx: number, dy: number, dz: number): number[] {
+  let flat = Math.hypot(dx, dz)
+  if (flat < 1e-9 && Math.abs(dy) < 1e-9) { return [0, 0, 0, 1] }
+  let yaw = Math.atan2(-dz, dx)
+  let pitch = Math.atan2(dy, flat)
+  return mulQ([0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)], [0, 0, Math.sin(pitch / 2), Math.cos(pitch / 2)])
+}
+
+/**
+ * Where a body made from another (scene.from), a shot (scene.shoot) or an aimed body (scene.aim) starts: [pose
+ * [px, py, pz, qx, qy, qz, qw], velocity [vx, vy, vz], spin [wx, wy, wz]]. Pure.
+ *
+ * parent is the parent's live state [px, py, pz, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz], or null for none (then local is
+ * taken in the world, and nothing is inherited). local and rot (degrees about x, y, z) are the body's position and turn as
+ * the program built them. The frame is the parent's (p, q); with an aim point [x, y, z] it is the parent's place turned
+ * so its +x points at the aim, and the body itself is then turned to point its +x from where it is at the aim. pos =
+ * p + frame . local, rotation = turn . rot; velocity v + w x r + burst * r / |r| (r = frame . local, the way out of the
+ * parent's centre; straight up when it is at the centre), plus shotSpeed along the body's own +x; spin w.
+ */
+export function resolveFrom(parent: number[] | null, local: number[], rot: number[], aim: number[], burst: number,
+    shotSpeed: number): number[][] {
+  let p = parent !== null ? [parent[0], parent[1], parent[2]] : [0, 0, 0]
+  let q = parent !== null ? [parent[3], parent[4], parent[5], parent[6]] : [0, 0, 0, 1]
+  normQ(q)
+  let aimed = aim.length === 3
+  let frame = q
+  if (aimed && parent !== null) { frame = lookQuat(aim[0] - p[0], aim[1] - p[1], aim[2] - p[2]) }
+  let r = turnPoint(frame, local[0], local[1], local[2])
+  let pos = [p[0] + r[0], p[1] + r[1], p[2] + r[2]]
+  let turn = aimed ? lookQuat(aim[0] - pos[0], aim[1] - pos[1], aim[2] - pos[2]) : q
+  let qf = mulQ(turn, quatXYZ(rot[0], rot[1], rot[2]))
+  normQ(qf)
+  let v = [0, 0, 0]
+  let w = [0, 0, 0]
+  if (parent !== null) {
+    w = [parent[10], parent[11], parent[12]]
+    v = [parent[7] + w[1] * r[2] - w[2] * r[1], parent[8] + w[2] * r[0] - w[0] * r[2], parent[9] + w[0] * r[1] - w[1] * r[0]]
+    if (burst !== 0) {
+      let d = Math.hypot(r[0], r[1], r[2])
+      let out = d > 1e-9 ? [r[0] / d, r[1] / d, r[2] / d] : [0, 1, 0]
+      for (let k = 0; k < 3; k++) { v[k] += burst * out[k] }
+    }
+  }
+  if (shotSpeed !== 0) {
+    let ahead = turnPoint(qf, 1, 0, 0)
+    for (let k = 0; k < 3; k++) { v[k] += shotSpeed * ahead[k] }
+  }
+  return [[pos[0], pos[1], pos[2], qf[0], qf[1], qf[2], qf[3]], v, w]
 }
 
 /**
@@ -923,8 +1116,25 @@ export class WorldSim {
   private hitSpeeds: Map<string, number> = new Map<string, number>()
   private hitBest: SimEvent | null = null
   private lastHitAt: number = -1e9
-  private contacts: Float32Array = new Float32Array(SIM_CONTACT_CAPACITY * 3)
+  private contacts: Float32Array = new Float32Array(SIM_CONTACT_CAPACITY * CONTACT_RECORD)
   private one: Float32Array = new Float32Array(7)
+  /** Ids of the bodies the last apply made with scene.from whose parent was nowhere: placed as if from nothing. */
+  fromMissing: string[] = []
+  /** Where each body made from another or shot was made, [px, py, pz, qx, qy, qz, qw]: what knockedOver compares with. */
+  private origin: Map<string, number[]> = new Map<string, number[]>()
+  /** scene.target bodies, shots, and both (whose knocks are struck). */
+  private targets: Set<string> = new Set<string>()
+  private shots: string[] = []
+  private watched: Set<string> = new Set<string>()
+  /** Shots still flying after the last step or apply. */
+  shotsFlying: number = 0
+  /** Knocks gathered for the next struck: each body's hardest and the hardest; when each pair was last taken; the bucket. */
+  private struckSpeeds: Map<string, number> = new Map<string, number>()
+  private struckBest: SimEvent | null = null
+  private pairAt: Map<string, number> = new Map<string, number>()
+  private struckTokens: number = 1
+  private struckClock: number = 0
+  private spin: Float32Array = new Float32Array(6)
   private events: SimEvent[] = []
   /** The player (scene.player), '' for none; the stick as the renderer last set it; its driving; whether it was driven last step. */
   private player: string = ''
@@ -958,7 +1168,8 @@ export class WorldSim {
 
   /** Whether frames are needed: loose bodies awake, a throw whose settling has not been told yet, or the player going. */
   needsFrames(): boolean {
-    return this.loose.length > 0 && (this.awake > 0 || this.settlePending || this.hitBest !== null || this.playerGoing())
+    return this.loose.length > 0 && (this.awake > 0 || this.settlePending || this.hitBest !== null || this.playerGoing() ||
+      this.shotsFlying > 0 || this.struckBest !== null)
   }
 
   /** The player's id, '' for none. */
@@ -1017,6 +1228,17 @@ export class WorldSim {
     this.hitBest = null
     this.lastHitAt = -1e9
     this.events = []
+    this.fromMissing = []
+    this.origin.clear()
+    this.targets.clear()
+    this.shots = []
+    this.watched.clear()
+    this.shotsFlying = 0
+    this.struckSpeeds.clear()
+    this.struckBest = null
+    this.pairAt.clear()
+    this.struckTokens = 1
+    this.struckClock = this.simTime
     this.awake = 0
     this.poseCount = 0
     this.player = ''
@@ -1042,14 +1264,28 @@ export class WorldSim {
       if (!first) { this.wakeResting() }
     }
     let freed = new Set<number>()
-    // The player made again (a new mark, a new shape, or a body that only now became it) stays where the person took
-    // it, not where it was built, and facing the way it faced -- but stood upright: a character turns only about y, so
-    // a tilt kept now (a box that had tumbled onto its side) would be kept for good.
+    this.fromMissing = []
+    // Bodies made from another (scene.from) start in their parent's frame as it is now: taken before anything is removed,
+    // so a body broken into pieces in this same apply gives them where it was, how it went and how it turned.
+    let parents = new Map<string, number[]>()
+    for (let b of diff.create) {
+      if (b.from === null) { continue }
+      let id = (b.from as SceneFrom).parent
+      if (parents.has(id)) { continue }
+      let live = this.liveState(id)
+      if (live !== null) { parents.set(id, live) }
+    }
+    // A loose body made again (a new mark, a new shape, the player only now) stays where the physics took it, not where it
+    // was built, facing the way it faced and going as it went. The player is stood upright: a character turns only about
+    // y, so a tilt kept now (a box that had tumbled onto its side) would be kept for good. (Before this only the player
+    // was kept; any other loose body went back to where it was built.)
     let kept = new Map<string, number[]>()
     for (let b of diff.recreate) {
-      if (b.player === null || b.motion !== 'loose') { continue }
-      let at = this.poseOf(b.id)
-      if (at !== null) { kept.set(b.id, uprightPose(at)) }
+      if (b.motion !== 'loose') { continue }
+      let live = this.liveState(b.id)
+      if (live === null) { continue }
+      let pose = live.slice(0, 7)
+      kept.set(b.id, (b.player !== null ? uprightPose(pose) : pose).concat(live.slice(7)))
     }
     for (let id of diff.remove) { this.removeBody(id, freed) }
     for (let b of diff.recreate) { this.removeBody(b.id, freed) }
@@ -1060,20 +1296,39 @@ export class WorldSim {
     if (this.held && freed.size > 0) { this.dropPoses(freed) }
     let created: BodySpec[] = []
     for (let b of diff.recreate) {
-      this.createBody(b)
+      this.createBody(b, parents, kept.has(b.id))
+      if (!kept.has(b.id)) { created.push(b) }
+    }
+    // Bodies made from others last, in build order, so a parent made in this apply is there for them.
+    for (let b of diff.create) {
+      if (b.from !== null) { continue }
+      this.createBody(b, parents, false)
       created.push(b)
     }
     for (let b of diff.create) {
-      this.createBody(b)
+      if (b.from === null) { continue }
+      this.createBody(b, parents, false)
       created.push(b)
     }
     kept.forEach((at: number[], id: string) => {
       let i = this.index.get(id)
-      if (i !== undefined) { this.engine.setPose(i, at[0], at[1], at[2], at[3], at[4], at[5], at[6]) }
+      if (i === undefined) { return }
+      this.engine.setPose(i, at[0], at[1], at[2], at[3], at[4], at[5], at[6])
+      let player = this.playerOf(next, id)
+      if (player) {
+        // A character is woken where it stands, to settle on its feet; it keeps its velocity, never a tumble.
+        this.engine.setVelocity(i, at[7], at[8], at[9], 0, 0, 0)
+      } else if (Math.hypot(at[7], at[8], at[9]) < 1e-3 && Math.hypot(at[10], at[11], at[12]) < 1e-3) {
+        this.engine.sleep(i)
+      } else {
+        this.engine.setVelocity(i, at[7], at[8], at[9], at[10], at[11], at[12])
+      }
     })
     for (let b of diff.material) {
       let i = this.index.get(b.id)
-      if (i !== undefined) { this.engine.setMaterial(i, b.mass, b.restitution, b.friction) }
+      if (i === undefined) { continue }
+      this.engine.setMaterial(i, b.mass, b.restitution, b.friction)
+      this.engine.watch(i, b.target || b.shot !== null ? 1 : 0)
     }
     for (let b of diff.setPose) {
       let i = this.index.get(b.id)
@@ -1104,6 +1359,10 @@ export class WorldSim {
       }
       kicked.add(b.id)
     }
+    // A blast is a throw of whatever it pushes: settled is told once they have come to rest.
+    for (let x of diff.blast) {
+      thrown += this.engine.explode(x.x, x.y, x.z, x.radius, x.strength)
+    }
     let resting = created.length > 0 ? restingAtStart(next, created, kicked, this.standing(next, created)) : []
     for (let id of resting) {
       let i = this.index.get(id)
@@ -1125,8 +1384,13 @@ export class WorldSim {
     this.loose = []
     this.kinematic = []
     let player = ''
+    this.targets.clear()
+    this.watched.clear()
+    this.shots = []
     for (let b of next.bodies) {
       if (!this.index.has(b.id)) { continue }
+      if (b.target) { this.targets.add(b.id); this.watched.add(b.id) }
+      if (b.shot !== null && b.motion === 'loose') { this.shots.push(b.id); this.watched.add(b.id) }
       if (b.motion === 'loose') { this.loose.push(b.id) } else if (b.motion === 'kinematic') { this.kinematic.push(b.id) }
       if (b.player !== null && b.motion === 'loose') {
         player = b.id
@@ -1146,6 +1410,37 @@ export class WorldSim {
     if (this.loose.length === 0) { this.settlePending = false }
     this.awake = this.engine.awakeDynamic()
     if (thrown > 0) { this.lastKickAwake = this.awake }
+    this.shotsFlying = this.countFlying()
+  }
+
+  /** Whether the body id is the player in spec. */
+  private playerOf(spec: WorldSpec, id: string): boolean {
+    for (let b of spec.bodies) { if (b.id === id) { return b.player !== null } }
+    return false
+  }
+
+  /** A body's state now, [px, py, pz, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]; null for one the engine does not have. */
+  private liveState(id: string): number[] | null {
+    let i = this.index.get(id)
+    if (i === undefined || this.engine.readPose(i, this.one) === 0) { return null }
+    let o = this.one
+    let out: number[] = [o[0], o[1], o[2], o[3], o[4], o[5], o[6]]
+    let w = this.spin
+    for (let k = 0; k < 6; k++) { w[k] = 0 }
+    if (this.engine.readVelocity(i, w) !== 1) { for (let k = 0; k < 6; k++) { w[k] = 0 } }
+    for (let k = 0; k < 6; k++) { out.push(w[k]) }
+    return out
+  }
+
+  /** Shots going faster than SHOT_FLYING_SPEED. */
+  private countFlying(): number {
+    let n = 0
+    for (let id of this.shots) {
+      let i = this.index.get(id)
+      if (i === undefined || this.engine.readVelocity(i, this.spin) !== 1) { continue }
+      if (Math.hypot(this.spin[0], this.spin[1], this.spin[2]) > SHOT_FLYING_SPEED) { n++ }
+    }
+    return n
   }
 
   /**
@@ -1241,6 +1536,7 @@ export class WorldSim {
     this.poseCount = Math.max(0, this.engine.readAwake(this.poses))
     this.collectHits()
     this.awake = this.engine.awakeDynamic()
+    this.shotsFlying = this.countFlying()
     if (this.settlePending) {
       // Settled is told from poses after the kick: only once a step has had the thrown world awake and a later one has
       // it all asleep (or the kick never woke anything), never from the poses the bodies had before it.
@@ -1261,12 +1557,15 @@ export class WorldSim {
     e.afterMs = Math.round((this.simTime - this.kickAt) * 1000)
     let spec = this.spec as WorldSpec
     for (let b of spec.bodies) {
-      if (b.motion !== 'loose' || b.player !== null) { continue }
+      // Shots are never waited on, nor told.
+      if (b.motion !== 'loose' || b.player !== null || b.shot !== null) { continue }
       let i = this.index.get(b.id)
       if (i === undefined) { continue }
       let value = 0
       if (this.engine.readPose(i, this.one) === 1) {
-        value = b.isDie ? topFace(this.one[3], this.one[4], this.one[5], this.one[6]) : (knockedOver(b, this.one) ? 1 : 0)
+        // A piece (scene.from) is not where anything was built: it counts as knocked.
+        value = b.isDie ? topFace(this.one[3], this.one[4], this.one[5], this.one[6]) : b.from !== null ? 1
+          : (knockedOver(b, this.one) ? 1 : 0)
       }
       e.bodies.push(b.id)
       e.values.push(value)
@@ -1282,10 +1581,15 @@ export class WorldSim {
     let n = this.engine.drainContacts(this.contacts)
     if (n > this.mostContacts) { this.mostContacts = n }
     for (let k = 0; k < n; k++) {
-      let speed = this.contacts[k * 3 + 2]
+      let o = k * CONTACT_RECORD
+      let speed = this.contacts[o + 2]
+      let a = this.idAt(Math.round(this.contacts[o]))
+      let b = this.idAt(Math.round(this.contacts[o + 1]))
+      let px = this.contacts[o + 3]
+      let py = this.contacts[o + 4]
+      let pz = this.contacts[o + 5]
+      if (speed > STRUCK_MIN_SPEED && this.watched.size > 0) { this.gatherStruck(a, b, speed, px, py, pz) }
       if (!(speed > HIT_MIN_SPEED)) { continue }
-      let a = this.idAt(Math.round(this.contacts[k * 3]))
-      let b = this.idAt(Math.round(this.contacts[k * 3 + 1]))
       if (a.length === 0) {
         a = b
         b = ''
@@ -1300,15 +1604,13 @@ export class WorldSim {
         e.body = a
         e.other = b
         e.speed = speed
-        let i = this.index.get(a)
-        if (i !== undefined && this.engine.readPose(i, this.one) === 1) {
-          e.x = this.one[0]
-          e.y = this.one[1]
-          e.z = this.one[2]
-        }
+        e.x = px
+        e.y = py
+        e.z = pz
         this.hitBest = e
       }
     }
+    this.tellStruck()
     if (this.hitBest === null || this.simTime - this.lastHitAt < HIT_INTERVAL_S - 1e-9) { return }
     let e = this.hitBest as SimEvent
     let ids: string[] = []
@@ -1324,6 +1626,72 @@ export class WorldSim {
     this.hitBest = null
     this.lastHitAt = this.simTime
     if (ids.length > 0) { this.events.push(e) }
+  }
+
+  /** One knock with a watched body, kept for the next struck if it counts (see STRUCK_MIN_SPEED). */
+  private gatherStruck(a: string, b: string, speed: number, px: number, py: number, pz: number): void {
+    let wa = a.length > 0 && this.watched.has(a)
+    let wb = b.length > 0 && this.watched.has(b)
+    if (!wa && !wb) { return }
+    let body = ''
+    let other = ''
+    if (a.length > 0 && this.targets.has(a)) {
+      body = a
+      other = b
+    } else if (b.length > 0 && this.targets.has(b)) {
+      body = b
+      other = a
+    } else {
+      // Only a shot: told when it hits a body, never the ground.
+      body = wa ? a : b
+      other = wa ? b : a
+      if (other.length === 0) { return }
+    }
+    let key = body < other ? body + '|' + other : other + '|' + body
+    let last = this.pairAt.get(key)
+    if (last !== undefined && this.simTime - last < STRUCK_PAIR_COOLDOWN_S - 1e-9) { return }
+    this.pairAt.set(key, this.simTime)
+    let known = this.struckSpeeds.get(body)
+    if (known === undefined || speed > known) { this.struckSpeeds.set(body, speed) }
+    let best = this.struckBest
+    if (best === null || speed > best.speed) {
+      let e = new SimEvent()
+      e.kind = 'struck'
+      e.body = body
+      e.other = other
+      e.speed = speed
+      e.x = px
+      e.y = py
+      e.z = pz
+      this.struckBest = e
+    }
+  }
+
+  /** What was gathered becomes one struck, if the bucket has a token for it (STRUCK_RATE a second, one at most). */
+  private tellStruck(): void {
+    this.struckTokens = Math.min(1, this.struckTokens + Math.max(0, this.simTime - this.struckClock) * STRUCK_RATE)
+    this.struckClock = this.simTime
+    if (this.pairAt.size > 64) {
+      let old: string[] = []
+      this.pairAt.forEach((t: number, key: string) => { if (this.simTime - t >= STRUCK_PAIR_COOLDOWN_S) { old.push(key) } })
+      for (let key of old) { this.pairAt.delete(key) }
+    }
+    if (this.struckBest === null || this.struckTokens < 1 - 1e-9) { return }
+    let e = this.struckBest as SimEvent
+    let ids: string[] = []
+    this.struckSpeeds.forEach((v: number, id: string) => { if (this.index.has(id)) { ids.push(id) } })
+    let speeds = this.struckSpeeds
+    ids.sort((x: string, y: string): number => {
+      let d = (speeds.get(y) as number) - (speeds.get(x) as number)
+      return d !== 0 ? d : (x < y ? -1 : x > y ? 1 : 0)
+    })
+    e.bodies = ids
+    e.values = ids.map((id: string): number => speeds.get(id) as number)
+    this.struckSpeeds = new Map<string, number>()
+    this.struckBest = null
+    if (ids.length === 0) { return }
+    this.struckTokens -= 1
+    this.events.push(e)
   }
 
   private gather(id: string, speed: number): void {
@@ -1396,7 +1764,7 @@ export class WorldSim {
     this.ground.push(i)
   }
 
-  private createBody(b: BodySpec): void {
+  private createBody(b: BodySpec, parents: Map<string, number[]> | null = null, keptPose: boolean = false): void {
     let kind = kindOf(b)
     let i = -1
     if (b.shape === 'sphere') {
@@ -1412,12 +1780,51 @@ export class WorldSim {
     if (i < 0) { return }
     this.index.set(b.id, i)
     this.setName(i, b.id)
-    // A new loose die lies on a face drawn at random (dieStartTurn); the renderer takes its pose from here.
-    this.placeBody(i, b, b.isDie && b.motion === 'loose' ? dieStartTurn(this.draw(b.id + '#start')) : null)
-    this.engine.setMaterial(i, b.mass, b.restitution, b.friction)
+    this.origin.delete(b.id)
+    let made = !keptPose && (b.from !== null || (b.shot !== null && b.motion === 'loose') || b.aim.length === 3)
+    if (!made) {
+      // A new loose die lies on a face drawn at random (dieStartTurn); the renderer takes its pose from here.
+      this.placeBody(i, b, b.isDie && b.motion === 'loose' ? dieStartTurn(this.draw(b.id + '#start')) : null)
+      this.engine.setMaterial(i, b.mass, b.restitution, b.friction)
+    } else {
+      let parent: number[] | null = null
+      let burst = 0
+      if (b.from !== null) {
+        let f = b.from as SceneFrom
+        burst = f.burst
+        let live = parents !== null ? parents.get(f.parent) : undefined
+        parent = live !== undefined ? live : this.liveState(f.parent)
+        if (parent === null) {
+          // Nowhere to come from: a piece goes where its parent was built, anything else where its own numbers put it.
+          if (f.base.length === 6) {
+            let q = quatXYZ(f.base[3], f.base[4], f.base[5])
+            parent = [f.base[0], f.base[1], f.base[2], q[0], q[1], q[2], q[3], 0, 0, 0, 0, 0, 0]
+          }
+          this.fromMissing.push(b.id)
+          console.info('VERA-WORLD from missing parent=' + f.parent + ' id=' + b.id)
+        }
+      }
+      let shot = b.shot !== null && b.motion === 'loose' ? (b.shot as SceneShot).speed : 0
+      let at = resolveFrom(parent, b.position, b.rotation, b.aim, burst, shot)
+      let pose = at[0]
+      this.engine.setPose(i, pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], pose[6])
+      this.engine.setMaterial(i, b.mass, b.restitution, b.friction)
+      if (b.motion === 'loose') {
+        let v = at[1]
+        let w = at[2]
+        this.engine.setVelocity(i, v[0], v[1], v[2], w[0], w[1], w[2])
+      }
+      if (b.from !== null || shot !== 0) { this.origin.set(b.id, pose) }
+    }
+    if (b.target) { this.engine.watch(i, 1) }
   }
 
   private placeBody(i: number, b: BodySpec, turn: number[] | null = null): void {
+    if (b.aim.length === 3 && b.from === null) {
+      let at = resolveFrom(null, b.position, b.rotation, b.aim, 0, 0)[0]
+      this.engine.setPose(i, at[0], at[1], at[2], at[3], at[4], at[5], at[6])
+      return
+    }
     let q = quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2])
     if (turn !== null) { q = mulQ(q, turn as number[]) }
     this.engine.setPose(i, b.position[0], b.position[1], b.position[2], q[0], q[1], q[2], q[3])
@@ -1434,9 +1841,11 @@ export class WorldSim {
     for (let b of created) { fresh.add(b.id) }
     let out = new Map<string, number[]>()
     for (let b of next.bodies) {
-      if (b.motion !== 'loose' || fresh.has(b.id)) { continue }
+      if (b.motion !== 'loose' || fresh.has(b.id) || b.shot !== null) { continue }
       let i = this.index.get(b.id)
-      if (i === undefined || this.engine.readPose(i, this.one) !== 1 || knockedOver(b, this.one)) { continue }
+      let origin = this.origin.get(b.id)
+      if (i === undefined || this.engine.readPose(i, this.one) !== 1 ||
+          knockedOver(b, this.one, origin !== undefined ? origin : null)) { continue }
       out.set(b.id, [this.one[0], this.one[1], this.one[2]])
     }
     return out
@@ -1462,6 +1871,7 @@ export class WorldSim {
     if (freed !== null) { freed.add(i) }
     this.engine.remove(i)
     this.index.delete(id)
+    this.origin.delete(id)
     this.setName(i, '')
   }
 }

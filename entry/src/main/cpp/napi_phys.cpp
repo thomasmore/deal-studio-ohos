@@ -228,14 +228,25 @@ napi_value PhysReadVelocity(napi_env env, napi_callback_info info)
     ARGS(2);
     size_t len;
     float *out = argc > 1 ? FloatArray(env, argv[1], &len) : nullptr;
-    return Num(env, out && len >= 3 && Idle().readVelocity(I(0, 0), out) ? 1 : 0);
+    return Num(env, out && len >= 3 && Idle().readVelocity(I(0, 0), out, len) ? 1 : 0);
 }
 napi_value PhysDrainContacts(napi_env env, napi_callback_info info)
 {
     ARGS(1);
     size_t len;
     float *out = argc > 0 ? FloatArray(env, argv[0], &len) : nullptr;
-    return Num(env, out ? Idle().drainContacts(out, static_cast<int>(len / 3)) : -1);
+    return Num(env, out ? Idle().drainContacts(out, static_cast<int>(len / vphys::PhysWorld::kContactRecord)) : -1);
+}
+napi_value PhysWatch(napi_env env, napi_callback_info info)
+{
+    ARGS(2);
+    Idle().watch(I(0, 0), I(0, 1));
+    return nullptr;
+}
+napi_value PhysExplode(napi_env env, napi_callback_info info)
+{
+    ARGS(5);
+    return Num(env, Idle().explode(F(0, 0), F(0, 1), F(0, 2), F(0, 3), F(0, 4)));
 }
 napi_value PhysAwakeDynamic(napi_env env, napi_callback_info) { return Num(env, Idle().awakeDynamic()); }
 
@@ -270,6 +281,8 @@ napi_value Register(napi_env env, napi_value exports)
         D("physReadVelocity", PhysReadVelocity),
         D("physDrainContacts", PhysDrainContacts),
         D("physAwakeDynamic", PhysAwakeDynamic),
+        D("physWatch", PhysWatch),
+        D("physExplode", PhysExplode),
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -502,3 +502,294 @@ export function addPartRecords(out: PartRecords, shape: string, dims: number[], 
     head(0, dims[0] / 2, dims[1] / 2, dims[2] / 2, 0)
   }
 }
+
+// ---------------------------------------------------------------- pieces: what scene.split cuts a body into
+
+/** The most pieces scene.split makes of one body. */
+export const MAX_SPLIT: number = 8
+
+/** The area of an outline [x1, z1, ...] in square metres. */
+export function outlineArea(points: number[]): number {
+  return Math.abs(area2(points)) / 2
+}
+
+/**
+ * A box of extents dims cut into n cells as a grid: the counts along x, y, z whose product is n and whose cells are the
+ * least elongated (ties go to cutting the longer sides), each cell [cx, cy, cz, w, h, d] about the box's centre.
+ */
+export function boxGrid(dims: number[], n: number): number[][] {
+  let best: number[] = [n, 1, 1]
+  let bestScore = Infinity
+  for (let a = 1; a <= n; a++) {
+    if (n % a !== 0) { continue }
+    for (let b = 1; b <= n / a; b++) {
+      if ((n / a) % b !== 0) { continue }
+      let c = n / a / b
+      let cell = [dims[0] / a, dims[1] / b, dims[2] / c]
+      let score = Math.max(cell[0], cell[1], cell[2]) / Math.max(1e-9, Math.min(cell[0], cell[1], cell[2]))
+      // Ties: the grid whose cuts go across the longer sides (the larger count on the longer side) wins.
+      let tie = a * dims[0] + b * dims[1] + c * dims[2]
+      let bestTie = best[0] * dims[0] + best[1] * dims[1] + best[2] * dims[2]
+      if (score < bestScore - 1e-9 || (Math.abs(score - bestScore) <= 1e-9 && tie > bestTie)) {
+        bestScore = score
+        best = [a, b, c]
+      }
+    }
+  }
+  let out: number[][] = []
+  let w = dims[0] / best[0], h = dims[1] / best[1], d = dims[2] / best[2]
+  for (let i = 0; i < best[0]; i++) {
+    for (let j = 0; j < best[1]; j++) {
+      for (let k = 0; k < best[2]; k++) {
+        out.push([-dims[0] / 2 + (i + 0.5) * w, -dims[1] / 2 + (j + 0.5) * h, -dims[2] / 2 + (k + 0.5) * d, w, h, d])
+      }
+    }
+  }
+  return out
+}
+
+/** Points [x, y, z, ...] with near repeats left out. */
+function distinct(points: number[]): number[] {
+  let out: number[] = []
+  for (let i = 0; i + 2 < points.length; i += 3) {
+    let seen = false
+    for (let j = 0; j + 2 < out.length && !seen; j += 3) {
+      seen = Math.abs(out[j] - points[i]) < 1e-7 && Math.abs(out[j + 1] - points[i + 1]) < 1e-7 && Math.abs(out[j + 2] - points[i + 2]) < 1e-7
+    }
+    if (!seen) { out.push(points[i], points[i + 1], points[i + 2]) }
+  }
+  return out
+}
+
+/** Only the points that are corners of their hull, and at most MAX_SHAPE_POINTS of them (the ones nearest the middle go first). */
+function hullCorners(points: number[]): number[] {
+  let p = distinct(points)
+  let used = new Set<number>()
+  for (let t of hullTriangles(p)) { used.add(t[0]); used.add(t[1]); used.add(t[2]) }
+  let out: number[] = []
+  for (let i = 0; i < p.length / 3; i++) { if (used.has(i)) { out.push(p[3 * i], p[3 * i + 1], p[3 * i + 2]) } }
+  if (out.length / 3 <= MAX_SHAPE_POINTS) { return out }
+  let c = [0, 0, 0]
+  let m = out.length / 3
+  for (let i = 0; i < m; i++) { c[0] += out[3 * i] / m; c[1] += out[3 * i + 1] / m; c[2] += out[3 * i + 2] / m }
+  let order: number[] = []
+  for (let i = 0; i < m; i++) { order.push(i) }
+  let far = (i: number): number => Math.hypot(out[3 * i] - c[0], out[3 * i + 1] - c[1], out[3 * i + 2] - c[2])
+  order.sort((a: number, b: number): number => far(b) - far(a))
+  let kept: number[] = []
+  for (let k = 0; k < MAX_SHAPE_POINTS; k++) { kept.push(out[3 * order[k]], out[3 * order[k] + 1], out[3 * order[k] + 2]) }
+  return kept
+}
+
+/**
+ * The convex hull of points [x, y, z, ...] cut by the plane n . p = d: [the part in front (n . p >= d), the part behind],
+ * each as the corners of its hull ([] for a side with no volume).
+ */
+export function cutHull(points: number[], normal: number[], offset: number): number[][] {
+  let tris = hullTriangles(points)
+  let front: number[] = []
+  let back: number[] = []
+  let side = (i: number): number => normal[0] * points[3 * i] + normal[1] * points[3 * i + 1] + normal[2] * points[3 * i + 2] - offset
+  let used = new Set<number>()
+  let edges = new Set<string>()
+  for (let t of tris) {
+    for (let k = 0; k < 3; k++) {
+      let a = t[k]
+      let b = t[(k + 1) % 3]
+      used.add(a)
+      let key = Math.min(a, b).toString() + ':' + Math.max(a, b).toString()
+      if (edges.has(key)) { continue }
+      edges.add(key)
+      let sa = side(a)
+      let sb = side(b)
+      if ((sa > 1e-12 && sb < -1e-12) || (sa < -1e-12 && sb > 1e-12)) {
+        let f = sa / (sa - sb)
+        let x = points[3 * a] + (points[3 * b] - points[3 * a]) * f
+        let y = points[3 * a + 1] + (points[3 * b + 1] - points[3 * a + 1]) * f
+        let z = points[3 * a + 2] + (points[3 * b + 2] - points[3 * a + 2]) * f
+        front.push(x, y, z)
+        back.push(x, y, z)
+      }
+    }
+  }
+  used.forEach((i: number) => {
+    let s = side(i)
+    if (s >= -1e-12) { front.push(points[3 * i], points[3 * i + 1], points[3 * i + 2]) }
+    if (s <= 1e-12) { back.push(points[3 * i], points[3 * i + 1], points[3 * i + 2]) }
+  })
+  let keep = (p: number[]): number[] => hullTriangles(distinct(p)).length >= 4 && hullVolume(distinct(p)) > 1e-12 ? hullCorners(p) : []
+  return [keep(front), keep(back)]
+}
+
+/**
+ * A convex hull cut into n pieces by planes: the largest piece so far cut through the middle of its box, across its
+ * longest side, until there are n (fewer only if a piece will not cut).
+ */
+export function splitHull(points: number[], n: number): number[][] {
+  let pieces: number[][] = [hullCorners(points)]
+  while (pieces.length < n) {
+    let at = 0
+    for (let k = 1; k < pieces.length; k++) { if (hullVolume(pieces[k]) > hullVolume(pieces[at])) { at = k } }
+    let b = pointBounds(pieces[at], 3)
+    let axis = 0
+    for (let k = 1; k < 3; k++) { if (b[k + 3] - b[k] > b[axis + 3] - b[axis]) { axis = k } }
+    let normal = [0, 0, 0]
+    normal[axis] = 1
+    let two = cutHull(pieces[at], normal, (b[axis] + b[axis + 3]) / 2)
+    if (two[0].length === 0 || two[1].length === 0) { break }
+    pieces.splice(at, 1, two[0], two[1])
+  }
+  return pieces
+}
+
+/**
+ * A ball of radius r as n chunks from its centre outward: n sectors about the upright, or, for an even n of 4 or more,
+ * n / 2 sectors each cut at the equator (8: the octants). Each chunk is a hull's points about the ball's centre, scaled
+ * so that together they hold the ball's volume (scaling about the centre keeps them apart: each is a cone from it).
+ */
+export function sphereChunks(r: number, n: number): number[][] {
+  let layers = n % 2 === 0 && n >= 4 ? 2 : 1
+  let sectors = n / layers
+  let span = 2 * Math.PI / sectors
+  let steps = Math.max(2, Math.ceil(span / (Math.PI / 6)))
+  let rows = layers === 1 ? 6 : 4
+  let chunks: number[][] = []
+  for (let layer = 0; layer < layers; layer++) {
+    let lo = layers === 1 ? -Math.PI / 2 : (layer === 0 ? -Math.PI / 2 : 0)
+    let hi = layers === 1 ? Math.PI / 2 : (layer === 0 ? 0 : Math.PI / 2)
+    for (let s = 0; s < sectors; s++) {
+      let p: number[] = [0, 0, 0]
+      for (let i = 0; i <= steps; i++) {
+        let a = s * span + span * i / steps
+        for (let j = 0; j <= rows; j++) {
+          let phi = lo + (hi - lo) * j / rows
+          p.push(r * Math.cos(phi) * Math.cos(a), r * Math.sin(phi), -r * Math.cos(phi) * Math.sin(a))
+        }
+      }
+      chunks.push(distinct(p))
+    }
+  }
+  let total = 0
+  for (let c of chunks) { total += hullVolume(c) }
+  let k = total > 0 ? Math.cbrt(4 / 3 * Math.PI * r * r * r / total) : 1
+  return chunks.map((c: number[]): number[] => c.map((v: number): number => v * k))
+}
+
+/**
+ * An upright cylinder of radius r and height h as n wedges about its axis, each a hull's points about its centre, widened
+ * so that together they hold the cylinder's volume.
+ */
+export function cylinderWedges(r: number, h: number, n: number): number[][] {
+  let span = 2 * Math.PI / n
+  let steps = Math.max(1, Math.ceil(span / (Math.PI / 8)))
+  let wedges: number[][] = []
+  for (let s = 0; s < n; s++) {
+    let p: number[] = [0, h / 2, 0, 0, -h / 2, 0]
+    for (let i = 0; i <= steps; i++) {
+      let a = s * span + span * i / steps
+      p.push(r * Math.cos(a), h / 2, -r * Math.sin(a), r * Math.cos(a), -h / 2, -r * Math.sin(a))
+    }
+    wedges.push(p)
+  }
+  let total = 0
+  for (let w of wedges) { total += hullVolume(w) }
+  let k = total > 0 ? Math.sqrt(Math.PI * r * r * h / total) : 1
+  return wedges.map((w: number[]): number[] => {
+    let out: number[] = []
+    for (let i = 0; i < w.length; i += 3) { out.push(w[i] * k, w[i + 1], w[i + 2] * k) }
+    return out
+  })
+}
+
+/** A convex outline cut by the line where (nx, nz) . p = d: [in front, behind], each [] when it has no area. */
+function cutOutline(p: number[], nx: number, nz: number, d: number): number[][] {
+  let front: number[] = []
+  let back: number[] = []
+  let m = p.length / 2
+  for (let i = 0; i < m; i++) {
+    let j = (i + 1) % m
+    let si = nx * p[2 * i] + nz * p[2 * i + 1] - d
+    let sj = nx * p[2 * j] + nz * p[2 * j + 1] - d
+    if (si >= 0) { front.push(p[2 * i], p[2 * i + 1]) }
+    if (si <= 0) { back.push(p[2 * i], p[2 * i + 1]) }
+    if ((si > 0 && sj < 0) || (si < 0 && sj > 0)) {
+      let f = si / (si - sj)
+      let x = p[2 * i] + (p[2 * j] - p[2 * i]) * f
+      let z = p[2 * i + 1] + (p[2 * j + 1] - p[2 * i + 1]) * f
+      front.push(x, z)
+      back.push(x, z)
+    }
+  }
+  let clean = (q: number[]): number[] => {
+    let out: number[] = []
+    for (let i = 0; i < q.length; i += 2) {
+      let k = out.length
+      if (k >= 2 && Math.hypot(out[k - 2] - q[i], out[k - 1] - q[i + 1]) <= EPS) { continue }
+      out.push(q[i], q[i + 1])
+    }
+    while (out.length >= 4 && Math.hypot(out[0] - out[out.length - 2], out[1] - out[out.length - 1]) <= EPS) { out.splice(out.length - 2, 2) }
+    return out.length >= 6 && outlineArea(out) > EPS ? out : []
+  }
+  return [clean(front), clean(back)]
+}
+
+/** Two outlines that share a side (a to b in one, b to a in the other), joined into one; null when they share none. */
+function mergeOutlines(one: number[], two: number[]): number[] | null {
+  let n1 = one.length / 2
+  let n2 = two.length / 2
+  let same = (p: number[], i: number, q: number[], j: number): boolean =>
+    Math.abs(p[2 * i] - q[2 * j]) <= 1e-9 && Math.abs(p[2 * i + 1] - q[2 * j + 1]) <= 1e-9
+  for (let i = 0; i < n1; i++) {
+    let i2 = (i + 1) % n1
+    for (let j = 0; j < n2; j++) {
+      let j2 = (j + 1) % n2
+      if (!same(one, i, two, j2) || !same(one, i2, two, j)) { continue }
+      // one from i2 round to i, then two from j2 + 1 round to j - 1 (its corners other than the shared side's).
+      let out: number[] = []
+      for (let k = 0; k < n1; k++) { let c = (i2 + k) % n1; out.push(one[2 * c], one[2 * c + 1]) }
+      for (let k = 1; k < n2 - 1; k++) { let c = (j2 + k) % n2; out.push(two[2 * c], two[2 * c + 1]) }
+      return out
+    }
+  }
+  return null
+}
+
+/**
+ * An outline cut into n pieces: its convex pieces (outlineParts), neighbours joined, the two smallest together first, while
+ * there are more than n, and the largest cut across its longest side while there are fewer. Each piece is an outline
+ * [x1, z1, ...] about the same origin.
+ */
+export function splitOutline(points: number[], n: number): number[][] {
+  let parts = outlineParts(points).map((p: number[]): number[] => counterClockwise(p))
+  while (parts.length > n) {
+    let best: number[] | null = null
+    let bx = -1
+    let by = -1
+    let bestArea = Infinity
+    for (let x = 0; x < parts.length; x++) {
+      for (let y = x + 1; y < parts.length; y++) {
+        let area = outlineArea(parts[x]) + outlineArea(parts[y])
+        if (area >= bestArea) { continue }
+        let m = mergeOutlines(parts[x], parts[y])
+        if (m === null) { continue }
+        best = m
+        bestArea = area
+        bx = x
+        by = y
+      }
+    }
+    if (best === null) { break }
+    parts.splice(by, 1)
+    parts[bx] = best as number[]
+  }
+  while (parts.length < n) {
+    let at = 0
+    for (let k = 1; k < parts.length; k++) { if (outlineArea(parts[k]) > outlineArea(parts[at])) { at = k } }
+    let b = pointBounds(parts[at], 2)
+    let alongX = b[2] - b[0] >= b[3] - b[1]
+    let two = alongX ? cutOutline(parts[at], 1, 0, (b[0] + b[2]) / 2) : cutOutline(parts[at], 0, 1, (b[1] + b[3]) / 2)
+    if (two[0].length === 0 || two[1].length === 0) { break }
+    parts.splice(at, 1, two[0], two[1])
+  }
+  return parts
+}

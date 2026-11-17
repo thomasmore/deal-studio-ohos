@@ -29,21 +29,23 @@ import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, Geo
   PlaneGeometry, Material, MaterialType, MetallicRoughnessMaterial, UnlitMaterial, Vec2, Vec3, Vec4, Quaternion, Node, Geometry,
   MeshResource, EnvironmentBackgroundType, PostProcessSettings, RaycastResult, RaycastParameters, Color, SpotLight, CustomGeometry,
   PrimitiveTopology } from '@kit.ArkGraphics3D'
-import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, diffWorld, orbitPositions, MotionCarry, travelPace } from '../vera/VeraScene'
+import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, SceneFrom, diffWorld, orbitPositions, MotionCarry,
+  travelPace } from '../vera/VeraScene'
 import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
 import { prismMesh, hullMesh } from '../vera/VeraShapes'
-import { PhysEngine, WorldSim, SimEvent, enterEvent } from '../vera/VeraPhysics'
-import { Follower, ZoneWatch, swingTurn, hasSwing, yawOf } from '../vera/VeraLocomotion'
+import { PhysEngine, WorldSim, SimEvent, enterEvent, resolveFrom } from '../vera/VeraPhysics'
+import { Follower, StickFrame, ZoneWatch, swingTurn, hasSwing, yawOf, FOLLOW_BEHIND_DEG } from '../vera/VeraLocomotion'
 import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physAddParts, physRemove, physSetPose,
   physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physDrive, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose, physReadVelocity,
-  physDrainContacts, physAwakeDynamic } from 'libphys.so'
+  physDrainContacts, physAwakeDynamic, physWatch, physExplode } from 'libphys.so'
 import { ResolvedTheme } from '../vera/VeraTheme'
 import { LOOK_SUN_INTENSITY, LOOK_SUN_POSITION, LOOK_SUN_TARGET, sunFor, LOOK_SHADOWS, LOOK_AMBIENT, LOOK_FOV, LOOK_FLOOR_ROLE,
   LOOK_TABLE_ROLE, LOOK_PIP_ROLE, LOOK_BACKGROUND_ROLE, TABLE_TOP_THICKNESS, PIP_RADIUS, lookLinear, lookColorKey, quatXYZ,
   lookAtQuat, CameraPose, worldCamera, orbitEye, pinchDistance, zoomPose, worldBounds, tableParts, floorSize, pipLayout, floorColor, worldGlows,
   floorGain, floorBaseLinear, linearHex, FLOOR_ROUGHNESS, FLOOR_METALLIC, FLOOR_SPECULAR, projectPoint, metresPerVp, floorDirection,
   GLOW_AMBIENT, GLOW_SPOTS, GLOW_SPOT_INNER, GLOW_SPOT_OUTER, TRAIL_POINTS, glowCandela, worldBackgroundRgba, isDarkRgba,
-  worldHasBackdrop, starField, worldTrails, worldSuns, lookRgba, srgbToLinear, followTarget, followPlanes } from '../vera/VeraLook3D'
+  worldHasBackdrop, starField, worldTrails, worldSuns, lookRgba, srgbToLinear, followTarget, followPlanes, screenRay,
+  framedOut } from '../vera/VeraLook3D'
 
 /** A SurfaceMesh as the kit's geometry: its colours turned from sRGB to the linear values a vertex colour is. */
 function customGeometry(m: SurfaceMesh): CustomGeometry {
@@ -130,8 +132,17 @@ const DRAG_SLOP_VP: number = 8
 /** A swipe's speed is the finger's over the last this many ms, in m/s at the body's distance, at most SWIPE_MAX. */
 const SWIPE_WINDOW_MS: number = 100
 const SWIPE_MAX: number = 10
-/** Events waiting for the caller beyond this drop their oldest hit (a settle is never dropped). */
+/**
+ * Events waiting for the caller beyond this drop their oldest hit, else their oldest struck; a settle or an entry into a
+ * zone is never dropped.
+ */
 const EVENT_QUEUE: number = 64
+/** A tap on nothing tells a point this far (m) along the ray. */
+const TAP_MISS_M: number = 40
+/** The follow camera swings behind the player only while it goes faster than this (m/s). */
+const FOLLOW_TURN_SPEED: number = 0.3
+/** How often (ms) VERA-WORLD sums up the struck events told. */
+const STRUCK_LOG_MS: number = 2000
 const PHYSICS_MISSING: string = 'Physics is not available in this build: bodies stay where they are put.'
 
 /** The native physics behind the PhysEngine interface WorldSim drives. */
@@ -173,8 +184,13 @@ class NativePhys implements PhysEngine {
   readAwake(out: Float32Array): number { return physReadAwake(out) }
   readPose(i: number, out: Float32Array): number { return physReadPose(i, out) }
   readVelocity(i: number, out: Float32Array): number { return physReadVelocity(i, out) }
+  /** Records of 6 floats [a, b, speed, px, py, pz]; WorldSim sizes the array (CONTACT_CAP records). */
   drainContacts(out: Float32Array): number { return physDrainContacts(out) }
   awakeDynamic(): number { return physAwakeDynamic() }
+  watch(i: number, on: number): void { physWatch(i, on) }
+  explode(cx: number, cy: number, cz: number, radius: number, strength: number): number {
+    return physExplode(cx, cy, cz, radius, strength)
+  }
 }
 
 /** The one native engine, made on first use; its thread count once known (0: this build has no physics). */
@@ -251,7 +267,10 @@ const PACE_EASE: number = 6
 /** A follow camera that moved less than this (m) in a frame is not written again: the backdrop repaints with it. */
 const FOLLOW_EPS: number = 0.0005
 
-/** What a tap hit: the body's id ("" for empty space, the table or the floor) and where, in metres. */
+/**
+ * What a tap hit: the body's id ("" for empty space, the table or the floor) and where, in metres -- on nothing at all,
+ * TAP_MISS_M along the ray -- and the ray's direction from the eye through the finger, a unit dx, dy, dz.
+ */
 export class WorldPick {
   body: string = ''
   /** For a group, the id of the part hit; '' otherwise. */
@@ -259,6 +278,11 @@ export class WorldPick {
   x: number = 0
   y: number = 0
   z: number = 0
+  dx: number = 0
+  dy: number = 0
+  dz: number = 0
+  /** Whether the ray met anything (a body, the table, the floor): if not, x, y, z are along the ray. */
+  met: boolean = false
 }
 
 /**
@@ -350,6 +374,11 @@ export class WorldBox {
   private applied: WorldSpec | null = null
   private appliedTheme: ResolvedTheme | null = null
   private bodies: Map<string, BodyNode> = new Map<string, BodyNode>()
+  /**
+   * During an apply: the parents of the bodies it makes with scene.from, as their nodes stood when it began,
+   * [px, py, pz, qx, qy, qz, qw] and no velocity (resolveFrom's form): where those bodies go without physics.
+   */
+  private fromParents: Map<string, number[]> = new Map<string, number[]>()
   /** Node name -> body id, pips included, for a raycast hit. */
   private byName: Map<string, string> = new Map<string, string>()
   /** Node name -> part id, for a raycast that hits a part of a group. */
@@ -395,15 +424,26 @@ export class WorldBox {
    */
   @Trace hasPlayer: boolean = false
   @Trace action: string = ''
+  /** The second button's label (scene.player's fire), '' for none. */
+  @Trace fire: string = ''
   @Trace knobX: number = 0
   @Trace knobY: number = 0
   /** How far the stick is pushed (0..1) and which way on the screen, right and down. */
   private push: number = 0
   private pushX: number = 0
   private pushY: number = 0
+  /** The camera frame the held stick steers by (StickFrame): the camera as it was when the push began. */
+  private stickFrame: StickFrame = new StickFrame()
   /** The camera following a body (scene.follow, or the player), and whether it has still to catch up. */
   private follower: Follower = new Follower()
   private followBehind: boolean = false
+  /** When the person last tapped or pressed a button (Date.now(), 0 for none since a shot appeared), and which. */
+  private inputAt: number = 0
+  private inputKind: string = ''
+  /** struck events told since VERA-WORLD last summed them up, the bodies they named, and when it did. */
+  private struckCount: number = 0
+  private struckPairs: number = 0
+  private struckLogAt: number = 0
   /** Which bodies are in which zones, and the zones' rings. */
   private zoneWatch: ZoneWatch = new ZoneWatch()
   private zoneNodes: Node[] = []
@@ -459,9 +499,13 @@ export class WorldBox {
         if (e.kind === 'settled') {
           console.info('VERA-WORLD settled kick=' + e.kick.toString() + ' values=' + e.values.join(',') + ' afterMs=' +
             (Date.now() - this.kickWallAt).toString() + ' simMs=' + e.afterMs.toString())
+        } else if (e.kind === 'struck') {
+          this.struckCount++
+          this.struckPairs += e.bodies.length
         }
         this.queue(e)
       }
+      this.logStruck()
     }
     let dt = Math.min(0.1, Math.max(0, elapsedMs / 1000))
     this.writeSwing(dt)
@@ -482,10 +526,15 @@ export class WorldBox {
     this.pushX = dx
     this.pushY = dy
     this.push = Math.min(1, n / STICK_TRAVEL)
+    // A push that begins takes the camera's frame and keeps it while it is held (StickFrame); let go, it is dropped.
+    this.stickFrame.push(this.pose, this.push)
     this.steer()
   }
 
-  /** The stick's push given to the sim, along the floor as the camera sees it now (called again as the camera turns). */
+  /**
+   * The stick's push given to the sim, along the floor as the stick's frame sees it: the camera as it was when the push
+   * began or a drag last turned it, not as the follow camera swings round behind the player since.
+   */
   private steer(): void {
     let sim = this.sim
     let pose = this.pose
@@ -494,8 +543,39 @@ export class WorldBox {
       sim.setStick(0, 0, 0)
       return
     }
-    let d = floorDirection(pose, this.pushX, this.pushY)
+    this.stickFrame.push(pose, this.push)
+    let d = this.stickFrame.direction(pose, this.pushX, this.pushY)
     sim.setStick(d[0], d[2], this.push)
+  }
+
+  /** The way the player faces now, a unit [dx, 0, dz] along its +x; [1, 0, 0] without one. */
+  playerFacing(): number[] {
+    let p = playerOf(this.applied)
+    let entry = p !== null ? this.bodies.get(p.id) : undefined
+    if (entry === undefined) { return [1, 0, 0] }
+    // A heading of a degrees faces (cos a, -sin a) along the ground (headingDeg).
+    let a = yawOf(quatOf(entry.node)) * Math.PI / 180
+    return [Math.cos(a), 0, -Math.sin(a)]
+  }
+
+  /**
+   * The person tapped the world or pressed a player's button (kind): the next shot to appear is timed from now, for the
+   * VERA-WORLD line that says how long a shot takes to show.
+   */
+  noteInput(kind: string): void {
+    this.inputAt = Date.now()
+    this.inputKind = kind
+  }
+
+  /** Every STRUCK_LOG_MS while struck events come: how many, and how many bodies they named. */
+  private logStruck(): void {
+    if (this.struckCount === 0) { return }
+    let now = Date.now()
+    if (now - this.struckLogAt < STRUCK_LOG_MS) { return }
+    console.info('VERA-WORLD struck n=' + this.struckCount.toString() + ' pairs=' + this.struckPairs.toString())
+    this.struckLogAt = now
+    this.struckCount = 0
+    this.struckPairs = 0
   }
 
   /** The world as last fully applied (null before the first). */
@@ -551,7 +631,11 @@ export class WorldBox {
     })
   }
 
-  /** The follow camera catches up with its body; the stick's direction follows the camera. */
+  /**
+   * The follow camera catches up with its body and, when that is the player walking, swings round behind it
+   * (Follower.turnBehind). The held stick keeps the frame it began with (StickFrame), so the swing does not turn the
+   * push.
+   */
   private writeFollow(dt: number): void {
     let spec = this.applied
     let pose = this.pose
@@ -565,11 +649,18 @@ export class WorldBox {
       this.followBehind = false
       return
     }
-    if (this.follower.step(pose, entry.pos, f, dt, FOLLOW_EPS)) {
+    let player = playerOf(spec)
+    let moving = player !== null && player.id === f.target && this.sim !== null &&
+      this.sim.playerSpeedNow() > FOLLOW_TURN_SPEED
+    let heading = yawOf(quatOf(entry.node))
+    let moved = this.follower.step(pose, entry.pos, f, dt, FOLLOW_EPS)
+    if (this.follower.turnBehind(pose, heading, dt, moving)) { moved = true }
+    if (moved) {
       this.writeCamera()
       if (this.push > 0) { this.steer() }
     }
-    this.followBehind = this.follower.behind(entry.pos, f)
+    this.followBehind = this.follower.behind(entry.pos, f) ||
+      (this.follower.turning(moving) && Math.abs(this.follower.yawGap(heading)) > FOLLOW_BEHIND_DEG)
   }
 
   /** Bodies that move, against the zones: each one that came into a zone is told as `enter`. */
@@ -626,13 +717,16 @@ export class WorldBox {
     this.writeMs += Date.now() - t0
   }
 
+  /** An event for the caller; over EVENT_QUEUE the oldest hit goes, else the oldest struck, never anything else. */
   private queue(e: SimEvent): void {
     this.events.push(e)
     if (this.events.length <= EVENT_QUEUE) { return }
-    for (let i = 0; i < this.events.length; i++) {
-      if (this.events[i].kind === 'hit') {
-        this.events.splice(i, 1)
-        return
+    for (let kind of ['hit', 'struck']) {
+      for (let i = 0; i < this.events.length; i++) {
+        if (this.events[i].kind === kind) {
+          this.events.splice(i, 1)
+          return
+        }
       }
     }
   }
@@ -791,6 +885,7 @@ export class WorldBox {
     this.zoneNodes = []
     this.zoneWatch.reset()
     this.push = 0
+    this.stickFrame.reset()
     if (scene !== null) {
       try {
         scene.destroy()
@@ -871,6 +966,8 @@ export class WorldBox {
         pose.eye = orbitEye(pose.eye, pose.look, yaw, pitch, grounded ? 0.05 : -1.45, 1.45)
       }
       this.writeCamera()
+      // The person turned the camera: a held stick steers by the view as it is now.
+      this.stickFrame.refresh(pose)
       if (this.push > 0) { this.steer() }
     }
     this.lastX = x
@@ -985,11 +1082,25 @@ export class WorldBox {
 
   /**
    * What is under (x, y), in vp from the box's top left: the body the ray hits, else the body nearest on screen within
-   * TAP_SLOP_VP, else body "" with where the ray met the table or floor; null when there is no scene.
+   * TAP_SLOP_VP (at its centre), else body "" with where the ray met the table or floor, or TAP_MISS_M along the ray when
+   * it met nothing; always with the ray's direction. null when there is no scene.
    */
   async pick(x: number, y: number): Promise<WorldPick | null> {
     let pick = await this.raycast(x, y)
-    if (pick === null || pick.body.length > 0 || this.destroyed) { return pick }
+    if (pick === null || this.destroyed) { return pick }
+    let pose = this.pose
+    if (pose !== null) {
+      let ray = screenRay(pose, this.width, this.height, x, y)
+      pick.dx = ray[1][0]
+      pick.dy = ray[1][1]
+      pick.dz = ray[1][2]
+      if (!pick.met) {
+        pick.x = ray[0][0] + ray[1][0] * TAP_MISS_M
+        pick.y = ray[0][1] + ray[1][1] * TAP_MISS_M
+        pick.z = ray[0][2] + ray[1][2] * TAP_MISS_M
+      }
+    }
+    if (pick.body.length > 0) { return pick }
     let near = this.screenPick(x, y, TAP_SLOP_VP)
     let entry = this.bodies.get(near)
     if (entry !== undefined) {
@@ -1011,6 +1122,7 @@ export class WorldBox {
     let pick = new WorldPick()
     if (hits.length > 0) {
       let hit = hits[0]
+      pick.met = true
       pick.body = this.bodyOf(hit.node)
       pick.part = this.partOf(hit.node)
       pick.x = hit.hitPosition.x
@@ -1164,13 +1276,36 @@ export class WorldBox {
     let player = playerOf(next)
     this.hasPlayer = player !== null
     this.action = player !== null ? (player.player as ScenePlayer).action : ''
+    this.fire = player !== null ? (player.player as ScenePlayer).fire : ''
     if (player === null && this.push > 0) { this.setStick(0, 0) }
     if (themeChanged) {
       // Materials are by the colour a role comes out as; a new theme makes them again.
       this.materials.clear()
       this.writeBackground(theme)
     }
-    for (let id of diff.remove) { this.removeBody(id) }
+    // Bodies made from another (scene.from) start where that one is now. With physics the sim has placed them; without,
+    // they are placed from the parent's node here, read before anything is removed: a body broken into pieces in this
+    // same apply gives them where it stands. A parent removed for its pieces keeps its node until theirs exist, so the
+    // body does not blink out between.
+    this.fromParents.clear()
+    let removedFor = new Set<string>()
+    let goneIds = new Set<string>(diff.remove)
+    for (let b of diff.create.concat(diff.recreate)) {
+      if (b.from === null) { continue }
+      let parent = (b.from as SceneFrom).parent
+      let known = this.bodies.get(parent)
+      if (known !== undefined && !this.fromParents.has(parent)) {
+        this.fromParents.set(parent, [known.pos[0], known.pos[1], known.pos[2]].concat(quatOf(known.node), [0, 0, 0, 0, 0, 0]))
+      }
+      if (goneIds.has(parent)) { removedFor.add(parent) }
+    }
+    // A shot or a piece coming or going, or a body going to pieces, is play: it does not frame the world again.
+    let framing = 0
+    for (let id of diff.remove) {
+      let known = this.bodies.get(id)
+      if (known !== undefined && !framedOut(known.spec) && !removedFor.has(id)) { framing++ }
+    }
+    for (let id of diff.remove) { if (!removedFor.has(id)) { this.removeBody(id) } }
     let creating: BodySpec[] = []
     for (let b of diff.recreate) {
       this.removeBody(b.id)
@@ -1228,8 +1363,9 @@ export class WorldBox {
       if (this.destroyed) { return }
     }
     // A follow camera is placed once, and again only for a new body to follow: bodies coming and going leave it be.
+    for (let b of creating) { if (!framedOut(b)) { framing++ } }
     let reframe = prev === null || diff.cameraChanged || (next.camera === null && next.follow === null &&
-      (creating.length > 0 || diff.remove.length > 0 || diff.setPose.length > 0 || diff.tableChanged))
+      (framing > 0 || diff.setPose.length > 0 || diff.tableChanged))
     if (reframe) { this.resetCamera(next) }
     for (let i = 0; i < creating.length; i += BATCH) {
       let batch = creating.slice(i, i + BATCH)
@@ -1241,6 +1377,9 @@ export class WorldBox {
         if (this.destroyed) { return }
       }
     }
+    // The pieces are on screen: the bodies they broke from go now.
+    removedFor.forEach((id: string) => { this.removeBody(id) })
+    this.fromParents.clear()
     this.applied = next
     this.appliedTheme = theme
     this.writeKinematic()
@@ -1298,10 +1437,40 @@ export class WorldBox {
     if (subMeshes.length > 0) { subMeshes[0].material = material }
   }
 
+  /**
+   * A node where its spec puts it. A body made from another (scene.from) is placed in that one's frame as it stood when
+   * the apply began (fromParents; where it was built for a piece whose parent is not there) and an aimed one turned to
+   * its point, as WorldSim does it -- which places a loose one itself, and createBody takes its pose from there.
+   */
   private place(entry: BodyNode, b: BodySpec): void {
+    if (b.from !== null || b.aim.length === 3) {
+      let parent: number[] | null = null
+      if (b.from !== null) {
+        let f = b.from as SceneFrom
+        let live = this.fromParents.get(f.parent)
+        if (live !== undefined) {
+          parent = live
+        } else if (f.base.length === 6) {
+          let q = quatXYZ(f.base[3], f.base[4], f.base[5])
+          parent = [f.base[0], f.base[1], f.base[2], q[0], q[1], q[2], q[3], 0, 0, 0, 0, 0, 0]
+        }
+      }
+      let at = resolveFrom(parent, b.position, b.rotation, b.aim, 0, 0)[0]
+      entry.node.position = v3(at[0], at[1], at[2])
+      entry.node.rotation = quat([at[3], at[4], at[5], at[6]])
+      entry.pos = [at[0], at[1], at[2]]
+      return
+    }
     entry.node.position = v3(b.position[0], b.position[1], b.position[2])
     entry.node.rotation = quat(quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2]))
     entry.pos = [b.position[0], b.position[1], b.position[2]]
+  }
+
+  /** A shot's node is on screen: how long after the tap or button press before it, once per press. */
+  private noteShown(b: BodySpec): void {
+    if (b.shot === null || this.inputAt === 0) { return }
+    console.info('VERA-WORLD shot shown id=' + b.id + ' ms=' + (Date.now() - this.inputAt).toString() + ' after=' + this.inputKind)
+    this.inputAt = 0
   }
 
   /** A node of its own mesh. Meshes are not shared: the material is set on the mesh, and that is only proven per node. */
@@ -1360,6 +1529,7 @@ export class WorldBox {
     entry.names.push(name)
     this.bodies.set(b.id, entry)
     this.byName.set(name, b.id)
+    this.noteShown(b)
     if (b.isDie) { await this.addPips(rf, entry, theme) }
     await this.addMarks(rf, entry, b, theme)
   }
@@ -1405,6 +1575,7 @@ export class WorldBox {
       this.byName.set(partName, b.id)
       this.partByName.set(partName, p.id)
     }
+    this.noteShown(b)
     await this.addMarks(rf, entry, b, theme)
   }
 
@@ -1579,6 +1750,8 @@ export class WorldBox {
     this.worldRadius = bounds !== null ? bounds[3] : 1
     if (spec.follow !== null) { this.worldRadius = Math.max(this.worldRadius, this.framed * 2) }
     this.writeCamera()
+    // The view was put somewhere new: a held stick steers by it from now on.
+    this.stickFrame.refresh(pose)
     if (this.push > 0) { this.steer() }
   }
 
