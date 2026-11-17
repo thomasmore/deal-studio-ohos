@@ -81,6 +81,9 @@ export class NeedsPlan {
   /** Omitted in old replies and ordinary one-screen apps. */
   screens: NeedScreen[] = []
   startScreen: string = ''
+  /** Presentation is independent of entry point: peer views can be tabs; record flows use pages. */
+  presentation: string = 'pages'
+  compact: boolean = false
   transitions: NeedTransition[] = []
 }
 
@@ -131,8 +134,10 @@ export const NEEDS_PROMPT: string =
   'The quantities a figure may read: entries.count and entries.total (the first number field of the entries added up) when there are entries; ' +
   'clock.remaining, clock.elapsed and clock.duration, in seconds, when there is a countdown; clock.elapsed, in seconds, when there is a stopwatch. ' +
   'The app keeps its state between visits. ' +
-  'When the request needs distinct screens or an editor/detail flow, add optional top-level screens, startScreen and transitions to this SAME reply. ' +
-  'Do not add screens to an ordinary calculator, form, timer or simple list just to separate related information. Never add screens for a chat widget. ' +
+  'When the request needs distinct views or an editor/detail flow, you MUST add top-level screens, startScreen and transitions to this SAME reply, in Generate AND Chat. ' +
+  'Opening an item to see its details or edit it is a navigation flow even if the person never says screen. Do not hide destinations only in a need\'s prose. ' +
+  'Add presentation: "tabs" for peer views in a compact widget, or "pages" for list/detail/editor navigation. Tabs and pages share the same screen metadata and data ownership. ' +
+  'Do not add screens to an ordinary calculator, form, timer or simple list just to separate related information. A plain inline form is not a separate view. ' +
   'For a multi-screen app give EVERY need a unique camelCase id (including entries, content and other). Each collection has ONE owning need; ' +
   'another presentation, editor, summary or history refers to that need with uses: [need ids], never duplicates its records. ' +
   'screens: [{"id": camelCase, "needs": [need ids shown or edited here]}], startScreen: one screen id, ' +
@@ -279,6 +284,9 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
 
 /** Screen plans are validated before they can bypass the one-screen composer. No guessed dangling references. */
 function readScreens(plan: NeedsPlan, raw: Record<string, Object>): boolean {
+  let presentation = raw['presentation']
+  if (presentation !== undefined && presentation !== 'pages' && presentation !== 'tabs') { return false }
+  if (presentation !== undefined) { plan.presentation = presentation as string }
   let screens = raw['screens']
   if (screens === undefined) { return raw['startScreen'] === undefined && raw['transitions'] === undefined }
   if (!Array.isArray(screens) || screens.length < 1 || screens.length > 8) { return false }
@@ -325,6 +333,18 @@ function readScreens(plan: NeedsPlan, raw: Record<string, Object>): boolean {
     for (let t of plan.transitions) { if (reached.indexOf(t.from) >= 0 && reached.indexOf(t.to) < 0) { reached.push(t.to) } }
   }
   return reached.length === screenIds.length
+}
+
+/** A named destination in prose must not silently go through the lossy flat composer.
+ * Conservative English structural guard, not a semantic classifier of every possible request.
+ */
+export function navigationPlanProblem(plan: NeedsPlan): string {
+  if (plan.screens.length > 1) { return '' }
+  let words = plan.needs.map((n: Need): string => n.words).join('\n')
+  if (!/\b(?:detail|editor|edit|second|another|separate)\s+(?:screen|view|page)\b|\b(?:opens?|navigat\w*|go(?:es)?)\b[^.\n]{0,80}\b(?:details|editor|screen|page|view)\b/i.test(words)) { return '' }
+  return 'The needs describe navigation to a detail/editor or another view, but the plan has no multi-view metadata. ' +
+    'Declare screens, startScreen and transitions for every destination; use one shared collection and record IDs. ' +
+    'Use presentation pages for list/detail/editor flows or tabs for peer views. Do not flatten the navigation into a single inline section.'
 }
 
 /** Only metadata and questions, not the lossy one-list/one-clock projection, for the app-plan handoff. */
@@ -494,7 +514,9 @@ export const WIDGET_ROOM: number = 5
 /** Added to the request the plan is drawn from, for a widget; the cap below holds when the model does not keep to it. */
 export const WIDGET_NEEDS_NOTE: string =
   '\n\nThis app is a small widget inside a chat reply, about 360 by 420 points with no scrolling: plan only the ' +
-  WIDGET_ROOM.toString() + ' things the request names first or most plainly, and leave the rest out.'
+  WIDGET_ROOM.toString() + ' things the request names first or most plainly, and leave the rest out. ' +
+  'Keep requested navigation: declare the same screens/startScreen/transitions as a full app. Use tabs for peer views, pages for record detail/editor flows. ' +
+  'Do not cut a declared multi-view flow into independent blocks; keep each active view compact.'
 
 /**
  * A widget's plan cut to what fits in it: the first `room` needs the person sees, in the plan's order. A figure that only feeds

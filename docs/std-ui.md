@@ -538,7 +538,7 @@ The active screen, with a stable identity. Changing `id` replaces its native con
 
 Use one named view function per screen, all taking the same AppState. `view(state)` calls only the active function using `if/else`, inside one AppTheme. A handler switches screens by returning updated navigation state. Keep the ID stable while typing; include the record ID for an editor/detail screen. Do not construct inactive screen functions with `ui.When`, whose arguments are evaluated eagerly.
 
-See [Multi-screen runtime](multiscreen-runtime.md) for the complete contract, a minimal example and the hand-written PillPal port.
+See [Multi-screen runtime](multiscreen-runtime.md) for the contract, a minimal example and regression checks.
 
 ### `ui.BackHandler(action: string): View`
 

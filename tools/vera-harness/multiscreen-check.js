@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict'
-const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process')
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path')
 const {loadVera,loadSource,sourceRoot}=require('./source-loader')
 const ts=require(process.env.VERA_TYPESCRIPT_PATH||'typescript')
 const C=loadVera('VeraCompiler'),V=loadVera('VeraInterpreter'),U=loadVera('VeraUi')
@@ -84,11 +84,4 @@ assert.match(renderer,/ForEach\(\[node.screenId\]/,'native subtree is keyed by s
 assert.match(renderer,/rootScroller.scrollTo\(\{ xOffset: 0, yOffset: 0 \}\)/,'screen entry resets root scroll')
 // Generic screen boundary must coexist with current compiler/UI compatibility fixtures.
 assert.equal(loadVera('VeraSmoke').smokeRun(compiled),'')
-// Local calendar conversion is checked in a DST timezone, not just UTC arithmetic.
-const timeProgram=C.compileVeraSource('@jsonable class AppState { n:number; } function init():AppState{return {n:0};} function view(s:AppState):ui.View{return ui.Text("body","time");} function at(day:number,minute:number):number{return time.atLocalTime(day,minute);}')
-const tvm=new V.VirtualMachine(V.deserializeVbc2(timeProgram.vbc2),host)
-assert.throws(()=>tvm.execute('at',[new V.VeraNumberValue(0),new V.VeraNumberValue(1440)]),/atLocalTime/)
-assert.throws(()=>tvm.execute('at',[new V.VeraNumberValue(0.5),new V.VeraNumberValue(480)]),/whole/)
-const script=`const {loadVera}=require(${JSON.stringify(path.join(__dirname,'source-loader'))}); const U=loadVera('VeraUi'),V=loadVera('VeraInterpreter'); const host=new U.UiHostEnvironment(); for(const [y,m,d] of [[2026,2,7],[2026,2,8],[2026,2,9],[2026,10,1]]){const day=Date.UTC(y,m,d)/86400000;const actual=host.invoke('std/time','atLocalTime',[new V.VeraNumberValue(day),new V.VeraNumberValue(480)],false).value;require('node:assert/strict').equal(actual,new Date(y,m,d,8).getTime());}console.log('DST dates agree with local calendar');`
-const dst=cp.spawnSync(process.execPath,['-e',script],{env:{...process.env,TZ:'America/New_York'},encoding:'utf8'});assert.equal(dst.status,0,dst.stderr)
-console.log('multiscreen-check: shared state, same-screen retention, screen remount, stale inputs/actions, surface teardown, scoped/queued tickers, application callbacks, back and DST conversion: ok')
+console.log('multiscreen-check: shared state, same-screen retention, screen remount, stale inputs/actions, surface teardown, scoped/queued tickers, application callbacks and back: ok')

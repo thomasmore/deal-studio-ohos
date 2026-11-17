@@ -89,6 +89,43 @@ async function main() {
   assert.equal(reachRepaired.kind, 'agent', reachRepaired.reason); assert.equal(reachRetry.seen.code.length, 2)
   assert.match(reachRetry.seen.code[1].user, /Screen reachability check failed/)
   assert.match(reachRetry.seen.code[1].user, /notes, editor/); checks++
+  // Same shared writer and gate in Chat; presentation does not create another store or pipeline.
+  const chatHost = hostFor()
+  const chatBuilt = await buildScreen(Object.assign(new RouteRequest(), {agent: Object.assign(new AgentRequest(), {prompt:'Notes with overview and editor', widget:true})}), chatHost.host)
+  assert.equal(chatBuilt.kind, 'agent', chatBuilt.reason); assert.ok(chatBuilt.agent.vbc2)
+  assert.equal(chatBuilt.agent.screen.widget, true); assert.equal(chatBuilt.agent.composed.appPlan.compact, true)
+  assert.match(chatHost.seen.code[0].system, /compact Chat widget/); assert.equal(chatHost.seen.code.length, 1); checks++
+  const flatPlan = {title:'Books', needs:[{type:'entries',id:'books',label:'Books',fields:[]},{type:'content',id:'details',what:'Tapping a book opens its detail screen where the borrower is edited',from:'open a book'}]}
+  assert.match(np.navigationPlanProblem(parse(flatPlan)), /no multi-view metadata/)
+  assert.equal(np.navigationPlanProblem(parse({title:'Inline',needs:[{type:'entries',label:'Books',fields:[]},{type:'content',what:'Edit the borrower inline'}]})), ''); checks++
+  const plannedAgain = hostFor(n => n === 1 ? flatPlan : plan())
+  const afterPlanRepair = await run(plannedAgain.host, 'open a book')
+  assert.equal(afterPlanRepair.kind, 'agent', afterPlanRepair.reason); assert.equal(plannedAgain.seen.plans.length, 2)
+  assert.match(plannedAgain.seen.plans[1], /no multi-view metadata/); checks++
+  const foreverFlat = hostFor(flatPlan)
+  const flatRejected = await run(foreverFlat.host, 'open a book')
+  assert.equal(flatRejected.kind, 'not-built'); assert.equal(flatRejected.agent.composed.appPlanFailed, true)
+  assert.equal(foreverFlat.seen.code.length, 0); checks++
+  // Tabs use the SAME named screens, active-only construction and reachability gate.
+  const tabPlan = plan(); tabPlan.presentation = 'tabs'
+  const tabCode = good.replace(/if \(state.c_screen === "notes"\)[\s\S]*?(?=<\/view>)/, `let panes: ui.View[] = [];
+let selected: number = 0;
+if (state.c_screen === "notes") { selected = 1; }
+if (state.c_screen === "editor") { selected = 2; }
+if (selected === 0) { panes.push(c_view_home(state)); } else { panes.push(ui.Column("default", [])); }
+if (selected === 1) { panes.push(c_view_notes(state)); } else { panes.push(ui.Column("default", [])); }
+if (selected === 2) { panes.push(c_view_editor(state)); } else { panes.push(ui.Column("default", [])); }
+sections.push(ui.Tabs("default", ["Overview", "Notes", "Editor"], selected, "c_tab", panes));
+`).replace('</functions>', `function c_tab(state: AppState, value: number): AppState {
+if (value === 1) { return {c_screen:"notes"__PASSTHROUGH__}; }
+if (value === 2) { return {c_screen:"editor"__PASSTHROUGH__}; }
+return {c_screen:"home"__PASSTHROUGH__};
+}\n</functions>`)
+  const tabHost = hostFor(tabPlan, tabCode)
+  const tabBuilt = await buildScreen(Object.assign(new RouteRequest(), {agent:Object.assign(new AgentRequest(),{prompt:'Notes with peer tabs',widget:true})}),tabHost.host)
+  assert.equal(tabBuilt.kind,'agent',tabBuilt.reason); assert.match(tabHost.seen.code[0].system,/Use one ui.Tabs/)
+  assert.equal(smokeRun(compileVeraSource(tabBuilt.agent.source)), ''); checks++
+  const invalidPresentation = plan(); invalidPresentation.presentation = 'invented'; assert.equal(parse(invalidPresentation),null); checks++
   const qPlan = n => Object.assign(plan(), n === 1 ? {questions: [{id: 'subject', ask: 'Which notes?', options: ['Work', 'Home'], default: 0}]} : {})
   const clarified = hostFor(qPlan); clarified.host.askJev = async body => JSON.parse(body).questions['blocking.0'] ? '{"answers":{"blocking.0":{"probabilities":{"ask":1,"skip":0}}}}' : ''; clarified.host.ask = async () => 1
   const q = await run(clarified.host); assert.equal(q.kind, 'agent', q.reason); assert.equal(clarified.seen.plans.length, 2); assert.match(clarified.seen.code[0].user, /Which notes\? Home/); assert.equal(q.agent.asked.length, 1); checks++

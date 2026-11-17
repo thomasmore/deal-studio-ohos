@@ -19,7 +19,7 @@ import { playSurface } from '../VeraSurfacePlay'
 import { isScene } from '../VeraCompose'
 import { SCENE_GUIDE, SCENE_TOKENS } from './AgentScene'
 import { NeedsPlan } from '../NeedsPlan'
-import { APP_CONTRACT, appContext, unboundAppAction } from './AgentAppContract'
+import { APP_CONTRACT, appContext, appPresentation, unboundAppAction } from './AgentAppContract'
 import { deserializeVbc2 } from '../VeraInterpreter'
 import { applyRepair, SEARCH_MARK, SPLIT_MARK, REPLACE_MARK } from '../VeraRepair'
 
@@ -403,7 +403,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
   let found = foundTargets(request.phone)
   let phone = found.length > 0 ? request.phone : ''
   let scene = request.needs.some((n: string): boolean => isScene(n))
-  let system = language + (request.appPlan === null ? CONTRACT : APP_CONTRACT) + phoneRule(phone) + ASK_RULE + (scene ? SCENE_GUIDE : '')
+  let system = language + (request.appPlan === null ? CONTRACT : APP_CONTRACT + appPresentation(request.appPlan!)) + phoneRule(phone) + ASK_RULE + (scene ? SCENE_GUIDE : '')
   let asked = 'Request: ' + request.prompt + '\n\nThe section must do:\n- ' + request.needs.join('\n- ') +
     (request.inputs.length > 0 ? '\n\nThe person sets these on the screen and nothing else uses them yet; the section uses them:\n- ' +
       request.inputs.join('\n- ') : '') +

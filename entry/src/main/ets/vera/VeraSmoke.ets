@@ -58,7 +58,7 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
   let names = module.functions.map((fn): string => fn.name)
   // Generic refinements have no stored plan; generated c_view_ functions still retain the bounded view gate.
   let inferred = names.filter((name: string): boolean => name.startsWith('c_view_')).map((name: string): string => name.substring(7))
-  let screens = expectedScreens.length > 0 ? expectedScreens : (inferred.length > 1 ? inferred : [])
+  let screens = expectedScreens.length > 0 ? expectedScreens : (requireContent && inferred.length > 1 ? inferred : [])
   let state: RuntimeValue
   try {
     state = vm.execute('init')

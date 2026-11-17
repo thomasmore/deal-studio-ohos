@@ -15,7 +15,7 @@ export const APP_CONTRACT: string = '\n\nWrite ONE shared contribution implement
   '- Every field and function starts with c_; every class with C_. Reserve c_view_ for declared screens. Each declared screen has function c_view_<screenId>(state: AppState): ui.View. ' +
   'It returns ui.Screen("<screenId>", children); for an editor of a selected record the identity may be "<screenId>:" + the stable record id. ' +
   'These functions contain no AppTheme; the host wraps only the active Screen in one AppTheme. Start on startScreen.\n' +
-  '- Navigation is ordinary handlers changing c_screen: string. Dispatch with if/else, never eager ui.When, Tabs or a list of prebuilt screens. ' +
+  '- Navigation is ordinary handlers changing c_screen: string. Dispatch with if/else, never eager ui.When or a list of prebuilt screens. ' +
   'A secondary screen includes one BackHandler that returns to the appropriate screen or cancels its draft. The start screen has none.\n' +
   '- A handler returns only changed fields followed by __PASSTHROUGH__ just before its closing brace: return {c_screen: "home"__PASSTHROUGH__}; ' +
   'This placeholder preserves EVERY other shared field. A helper view is pure and all screen views take the SAME AppState.\n' +
@@ -33,6 +33,16 @@ export const APP_CONTRACT: string = '\n\nWrite ONE shared contribution implement
   '- Implement the supplied needs, shared references and transitions together; do not add unrelated screens or features. ' +
   'A repair or refinement preserves the declared views and shared ownership unless the person explicitly requests a change.\n' +
   '\nScreen and BackHandler are available without discovery:\n' + describeComponents(['Screen', 'BackHandler'])
+
+/** Same app writer for either entry point; presentation changes the shell, not state ownership. */
+export function appPresentation(plan: NeedsPlan): string {
+  let compact = plan.compact ? '\nThis is a compact Chat widget: no header of its own; keep each active view short. ' : ''
+  if (plan.presentation !== 'tabs') { return compact + '\nUse page navigation: push only the active named Screen. Do not add Tabs.\n' }
+  return compact + '\nUse one ui.Tabs for the planned peer views. Its labels follow screens order; its numeric selection handler maps the index to c_screen. ' +
+    'Build a children array with the active c_view_<id>(state) at its index and ui.Column("default", []) at every inactive index. ' +
+    'Only the selected Screen is constructed; never eagerly call inactive views. Keep one AppTheme and one active Screen. ' +
+    'Use startScreen as the initial selected tab. Record-specific detail/editor flows should use pages, not peer tabs.\n' + describeComponents(['Tabs'])
+}
 
 /** A cheap sanity check, not semantic coverage: a generated mutation must at least have a reference. */
 export function unboundAppAction(module: BytecodeModule): string {
@@ -68,6 +78,8 @@ export function appContext(plan: NeedsPlan): string {
   value['needs'] = needs
   value['screens'] = plan.screens
   value['startScreen'] = plan.startScreen
+  value['presentation'] = plan.presentation
+  value['compact'] = plan.compact
   value['transitions'] = plan.transitions
   return '\n\nAuthoritative shared app plan (uses are references, not duplicate owners):\n' + JSON.stringify(value)
 }

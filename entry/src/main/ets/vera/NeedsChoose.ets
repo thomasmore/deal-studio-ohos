@@ -13,7 +13,7 @@ import { OperationCancellation, isCancelled, throwIfCancelled } from './Operatio
 import { Sketch, SketchInput, ListField, SketchOption, SketchAsk, JevAsk, PlanReview, ComposeResult, composeFromSketch, closePartialJson, sketchSignature, describeSketch,
   listNeeds, clockOptions, listOptions, choice, askReady, askLive, SketchQuestion, answerTo, keepAnswers, LIST_SECTIONS, LIST_PUBLISHERS, PART } from './VeraCompose'
 import { NeedsPlan, Need, NEEDS_PROMPT, plainScenes, WIDGET_ROOM, WIDGET_NEEDS_NOTE, capForWidget, dropUnasked, NEED_COUNTDOWN, NEED_ACTION, NEED_FIGURE, ON_END, ON_ADDED, ON_TAP, parseNeedsPlan, sketchFrom, planningSketch,
-  needOf } from './NeedsPlan'
+  needOf, navigationPlanProblem } from './NeedsPlan'
 
 /** Whether the list keeps a reading in a unit the request gives a number in: a temperature, a pressure, a weight. */
 export function readsMeasure(sketch: Sketch, prompt: string): boolean {
@@ -359,13 +359,15 @@ async function drawPlan(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
     }
     let plan = reply !== null ? parseNeedsPlan(reply!) : null
     let sketch = plan !== null ? planningSketch(plan!) : null
-    if (plan !== null && sketch !== null) {
+    let navigation = plan !== null ? navigationPlanProblem(plan!) : ''
+    if (navigation.length > 0) { out.appAttempted = true }
+    if (plan !== null && sketch !== null && navigation.length === 0) {
       out.text = reply!
       out.plan = plan
       out.sketch = sketch
       return out
     }
-    let wrong = reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200)
+    let wrong = navigation.length > 0 ? navigation : (reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200))
     user = prompt + note + '\n\nThe last answer could not be used: ' + wrong + '. Answer with the JSON object only, in the form asked for.'
   }
   return out
@@ -440,9 +442,9 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   // A multi-screen app is written once from the full plan, before choosing any flat parts or sections.
   if (plan.screens.length > 1) {
     plan.request = prompt
+    plan.compact = widget
     result.appPlan = plan
-    result.note = widget ? 'a chat widget cannot contain a multi-screen app' :
-      'shared app: ' + plan.screens.map((s): string => s.id).join(', ')
+    result.note = 'shared app (' + plan.presentation + (widget ? ', compact' : '') + '): ' + plan.screens.map((s): string => s.id).join(', ')
     if (unasked.length > 0) {
       result.note += '; not in the request, so not built: ' + unasked.join('; ')
       result.dropped = unasked.map((words: string): string => 'not in the request: ' + words)

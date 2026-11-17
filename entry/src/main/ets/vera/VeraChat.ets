@@ -758,7 +758,8 @@ export function chatAgentRequest(context: WidgetBuildContext): AgentRequest | nu
 
 /**
  * Records what the agent made of a chat widget -- the trace, the attempt in `result`'s stats -- and puts the
- * widget into `result` when it was served. True when it was.
+ * widget into `result` when served. True when handled: served, or a recognized multi-view failure
+ * that must not fall through to flat generation (result.error explains it).
  */
 export function recordChatAgent(agent: AgentResult, context: WidgetBuildContext, result: MiniApp): boolean {
   let composed: ComposeResult = agent.composed
@@ -785,7 +786,13 @@ export function recordChatAgent(agent: AgentResult, context: WidgetBuildContext,
   stat.success = agent.vbc2.length > 0
   stat.verdict = agent.vbc2.length > 0 ? 'composed' : 'not composed'
   result.stats.push(stat)
-  if (agent.vbc2.length === 0) { return false }
+  if (agent.vbc2.length === 0) {
+    if (composed.appPlan !== null || composed.appPlanFailed) {
+      result.error = 'Not built: ' + (agent.errors || agent.note)
+      return true // Recognized multi-view failure is terminal, not a flat generation fallback.
+    }
+    return false
+  }
   result.vbc2 = agent.vbc2
   result.source = agent.source
   result.error = ''
