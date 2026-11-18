@@ -1103,6 +1103,14 @@ export class WorldBox {
     if (pick.body.length > 0) { return pick }
     let near = this.screenPick(x, y, TAP_SLOP_VP)
     let entry = this.bodies.get(near)
+    // When the ray met the floor or table, the nearest body on screen counts only if it stands in front of where the ray
+    // met it: a wide wall behind the place tapped covers half the screen by its size, and took every tap on the floor.
+    if (entry !== undefined && pick.met && pose !== null) {
+      let at = projectPoint(pose, this.width, this.height, [pick.x, pick.y, pick.z])
+      let seen = projectPoint(pose, this.width, this.height, entry.pos)
+      let half = Math.min(entry.spec.dims[0], entry.spec.dims[1], entry.spec.dims[2]) / 2
+      if (at !== null && seen !== null && seen[2] - half > at[2]) { entry = undefined }
+    }
     if (entry !== undefined) {
       pick.body = near
       pick.x = entry.pos[0]
