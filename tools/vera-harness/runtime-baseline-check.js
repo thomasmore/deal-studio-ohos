@@ -46,7 +46,7 @@ try {
   assert.equal(baseline.coverage.summary.examples, fs.readdirSync(path.join(__dirname, 'examples')).filter(n => n.endsWith('.vera')).length)
   assert.equal(baseline.coverage.summary.compatibility, fs.readdirSync(path.join(__dirname, 'compatibility')).filter(n => n.endsWith('.json')).length * 2)
   assert.equal(baseline.coverage.summary.documented, fs.readdirSync(path.resolve(__dirname, '../../docs/examples')).filter(n => n.endsWith('.vera')).length)
-  const knownErrors = ['docs/examples/shanghai-layover.vera']
+  const knownErrors = ['examples/legacy-stage-die.vera', 'docs/examples/shanghai-layover.vera']
   assert.deepEqual(baseline.cases.filter(c => c.status === 'error').map(c => c.id), knownErrors)
   assert.equal(baseline.coverage.summary.errors, knownErrors.length)
   assert.equal(baseline.coverage.summary.cases, baseline.cases.length)

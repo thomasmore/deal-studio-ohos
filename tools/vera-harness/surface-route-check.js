@@ -14,18 +14,18 @@ const {compileVeraSource} = loadVera('VeraCompiler')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
 const rawfile = name => fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile', name), 'utf8').replace(/\r\n/g, '\n')
+const exampleFile = name => fs.readFileSync(path.join(__dirname, 'examples', name), 'utf8').replace(/\r\n/g, '\n')
 const guide = rawfile('vera-surface-skill.txt')
 const worldGuide = rawfile('vera-world-skill.txt')
-const worldBasics = fs.readFileSync(path.join(__dirname, 'examples/world-basics.vera'), 'utf8')
+const worldBasics = exampleFile('world-basics.vera')
 // A dice app as the model might write one: the fixture for the route's 3D tests (not what the guide shows).
-const worldDice = fs.readFileSync(path.join(__dirname, 'examples/world-dice.vera'), 'utf8')
+const worldDice = exampleFile('world-dice.vera')
 const language = rawfile('vera-skill.txt')
 const example = guide.slice(guide.indexOf('--- EXAMPLE ---') + '--- EXAMPLE ---'.length, guide.indexOf('--- END EXAMPLE ---')).trim()
 
 // The guide's example is the program the model copies its structure from: it must compile, run and play.
 assert.equal(S.checkSurfaceProgram(example), '', 'the guide\'s example compiles, runs once and plays')
-assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surface-basics.vera'), 'utf8')
-  .slice(fs.readFileSync(path.join(__dirname, 'examples/surface-basics.vera'), 'utf8').indexOf('@jsonable')).trim(),
+assert.equal(example.trim(), exampleFile('surface-basics.vera').slice(exampleFile('surface-basics.vera').indexOf('@jsonable')).trim(),
  'the guide carries examples/surface-basics.vera as it is (regenerate the rawfile when the example changes)')
 
 {
@@ -36,7 +36,7 @@ assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surf
   assert.match(S.checkWorldProgram(example), /^1:1 P0008 .*shows no ui.World/, 'a flat game is not a 3D program')
   const tOpen = '--- TRAVEL EXAMPLE ---\n', tClose = '--- END TRAVEL EXAMPLE ---'
   const travel = worldGuide.slice(worldGuide.indexOf(tOpen) + tOpen.length, worldGuide.indexOf(tClose))
-  assert.equal(travel, fs.readFileSync(path.join(__dirname, 'examples/world-walk.vera'), 'utf8'),
+  assert.equal(travel, exampleFile('world-walk.vera'),
     'the world guide carries examples/world-walk.vera as it is (regenerate the rawfile when the example changes)')
   for (const t of ['none', 'self', 'steered', 'both']) {
     assert.equal(S.checkWorldProgram(travel, t), '', 'the travel example plays for travel ' + t)
@@ -116,7 +116,7 @@ assert.ok(!worldSystem.includes('FULL-CANVAS APPS'))
 
 // The play check refuses a surface that never moves, one that traps mid-game, and a program with no surface: on a game
 // with rounds (examples/surface-catch.vera, a fixture, not what the guide shows).
-const catchGame = fs.readFileSync(path.join(__dirname, 'examples/surface-catch.vera'), 'utf8')
+const catchGame = exampleFile('surface-catch.vera')
 const still = catchGame.replace('if (state.phase !== "playing") {\n    if (p.phase !== "down") {', 'if (true) {\n    if (true) {')
 assert.match(playSurface(compileVeraSource(still)), /nothing on the surface changed/, 'a game that never starts is refused')
 const trapping = catchGame.replace('let dt: number = math.min(elapsedMs, 50) / 1000;',
