@@ -3198,6 +3198,16 @@ export function appUsesWidgetError(source: string): string {
   return ''
 }
 
+/** Real top-level function names, independent of formatting and declaration-like comments/strings. */
+export function sourceFunctionNames(source: string): string[] {
+  let app = new Parser(source, '<functions>').parse()
+  let names: string[] = []
+  for (let declaration of app.declarations) {
+    if (declaration instanceof FunctionDeclaration) { names.push(declaration.name) }
+  }
+  return names
+}
+
 /** '' when `source` parses (types are not checked); else the parser's message, with its place. */
 export function parseErrorOf(source: string): string {
   try {

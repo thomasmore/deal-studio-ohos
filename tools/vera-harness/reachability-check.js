@@ -8,7 +8,7 @@ const {compileVeraSource} = loadVera('VeraCompiler')
 const {checkScreenReachability} = loadVera('VeraReachability')
 const {smokeRun} = loadVera('VeraSmoke')
 function check(source, screens) {
-  screens ||= [...source.matchAll(/function\s+c_view_([A-Za-z0-9_]+)\s*\(/g)].map(m => m[1])
+  screens ||= loadVera('VeraAppRefine').sourceScreenIds(source)
   return checkScreenReachability(compileVeraSource(source).vbc2, screens)
 }
 if (process.argv[2]) {
@@ -70,6 +70,16 @@ function view(s: AppState): ui.View {
   assert.deepEqual(check(tabHidden).missing, ['detail']); tests++
   const tabEnabled = tabHidden.replace('0, "", [ui.Text', '0, "selectTab", [ui.Text').replace('function back(', 'function selectTab(s: AppState, v: number): AppState { return {screen:"detail", records:s.records, title:s.title, selected:""}; }\nfunction back(')
   assert.equal(check(tabEnabled).diagnostic, ''); tests++
+  // Supported native numeric callbacks must be explored, with disabled controls excluded.
+  for (const control of [
+    'ui.IconButton("default", "plus", "Open", "open", strings.toNumber(record.id,0), true)',
+    'ui.Timeline("default", "Events", [ui.TimelineItem("default", record.title, "", "", "open", strings.toNumber(record.id,0), true, "")])'
+  ]) {
+    const interactive = fixed.replace('ui.ListItem("default",record.title,"","","open",strings.toNumber(record.id,0),true,"")', control)
+    assert.equal(check(interactive).diagnostic, ''); assert.equal(smokeRun(compileVeraSource(interactive)), ''); tests++
+    const disabled = interactive.replace(control, control.replace(', true', ', false'))
+    assert.deepEqual(check(disabled).missing, ['detail']); tests++
+  }
   const endless = fixed.replace('return {screen:s.screen, records:[record], title:"", selected:s.selected};', 'while (true) { let x: number = 1; } return s;')
   const bounded = check(endless)
   assert.deepEqual(bounded.missing, ['detail']); assert.ok(bounded.actions <= 768); assert.ok(bounded.states <= 192); tests++

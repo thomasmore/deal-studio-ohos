@@ -10,7 +10,7 @@ Generate and Chat share one optional view plan, one writer chain and one VM/AppS
 - `presentation: "tabs"`: peer views; Chat adds compact presentation instructions.
 - Ordinary single-view plans retain the existing parts/catalogue route.
 
-A conservative English-pattern guard detects explicit detail/editor navigation described in needs without screen metadata. It returns a diagnostic through the existing bounded planning retries. It is not a universal intent classifier. Recognized multi-view failures do not fall through to flat generation in either entry point.
+A conservative English-pattern guard detects explicit detail/editor navigation described in needs without screen metadata. It returns a diagnostic through the existing bounded planning retries. External phone-action needs are excluded. It is not a universal intent classifier. Recognized multi-view failures do not fall through to flat generation in either entry point.
 
 ## Writing and runtime
 
@@ -28,7 +28,7 @@ See [runtime contract](multiscreen-runtime.md) for native identity and teardown 
 
 The search freezes time, deep-clones branches, respects inactive tabs and never executes external effects. Bounds: 192 queued states, 768 actions, depth 16, 64 KiB state keys, and 2M aggregate VM steps checked between calls (100K per call). Missing paths return observations and witness paths to the existing repair loop. Exhaustion means **no witness found**, not proof of impossibility; unusual input or external prerequisites can fail the gate.
 
-Refinement validation carries pre-edit named-view identities, preventing accidental flattening. Local Generate asks before intentional view removal; Chat/server refinements preserve views conservatively.
+Refinement validation extracts pre-edit top-level function identities with the compiler parser (not line-based matching), preventing accidental flattening. Local Generate asks before intentional view removal; Chat/server refinements preserve views conservatively.
 
 Date-generation instructions initialize/reset new date drafts to `time.daysSinceEpoch()`, not `0` (1 January 1970). Editing preserves stored dates. This is prompt guidance, not renderer coercion or a migration.
 

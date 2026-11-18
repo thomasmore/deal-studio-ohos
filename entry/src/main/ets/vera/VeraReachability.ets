@@ -90,7 +90,7 @@ function isControl(node: VeraUiNode): boolean {
   // These components only render their action button when its label is nonempty.
   if ((node.kind === 'emptystate' || node.kind === 'insetbanner') && node.value.length === 0) { return false }
   return isInput(node) || ['button', 'cell', 'listitem', 'numberlistitem', 'emptystate', 'insetbanner',
-    'backhandler', 'tabs', 'path', 'keyvalueitem'].indexOf(node.kind) >= 0
+    'backhandler', 'tabs', 'path', 'iconbutton', 'timelineitem'].indexOf(node.kind) >= 0
 }
 
 function inputValue(node: VeraUiNode): RuntimeValue {

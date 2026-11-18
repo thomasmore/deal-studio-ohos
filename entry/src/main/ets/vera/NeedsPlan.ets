@@ -340,7 +340,8 @@ function readScreens(plan: NeedsPlan, raw: Record<string, Object>): boolean {
  */
 export function navigationPlanProblem(plan: NeedsPlan): string {
   if (plan.screens.length > 1) { return '' }
-  let words = plan.needs.map((n: Need): string => n.words).join('\n')
+  // Action needs describe the PHONE's destinations, not this app's internal views.
+  let words = plan.needs.filter((n: Need): boolean => n.type !== NEED_ACTION).map((n: Need): string => n.words).join('\n')
   if (!/\b(?:detail|editor|edit|second|another|separate)\s+(?:screen|view|page)\b|\b(?:opens?|navigat\w*|go(?:es)?)\b[^.\n]{0,80}\b(?:details|editor|screen|page|view)\b/i.test(words)) { return '' }
   return 'The needs describe navigation to a detail/editor or another view, but the plan has no multi-view metadata. ' +
     'Declare screens, startScreen and transitions for every destination; use one shared collection and record IDs. ' +

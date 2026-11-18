@@ -1,18 +1,12 @@
 /** Preserve pre-edit screen identities, not just the functions a replacement happened to leave behind. */
-import { CompileResult } from './VeraCompiler'
+import { CompileResult, sourceFunctionNames } from './VeraCompiler'
 import { deserializeVbc2 } from './VeraInterpreter'
 import { smokeRun } from './VeraSmoke'
 import { describeComponents } from './VeraUiCatalog'
 
 export function sourceScreenIds(source: string): string[] {
-  let ids: string[] = []
-  let pattern = /(?:^|\n)\s*function\s+c_view_([a-z][A-Za-z0-9_]*)\s*\(/g
-  let match = pattern.exec(source)
-  while (match !== null) {
-    if (ids.indexOf(match[1]) < 0) { ids.push(match[1]) }
-    match = pattern.exec(source)
-  }
-  return ids
+  if (source.trim().length === 0) { return [] }
+  return sourceFunctionNames(source).filter((name: string): boolean => name.startsWith('c_view_')).map((name: string): string => name.substring(7))
 }
 
 /** Empty for the existing single-screen path. Removal requires explicit confirmation by the person. */
