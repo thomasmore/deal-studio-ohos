@@ -56,6 +56,8 @@ export const CODE_NO_TRAVEL: string = 'P0014'
 export const CODE_STRUCK_UNREAD: string = 'P0015'
 /** A body made with scene.from names a parent that is nowhere in the world when it is made. */
 export const CODE_FROM_MISSING: string = 'P0016'
+/** Words on the screen show a body's id (e.body, e.other) instead of saying what it is. */
+export const CODE_ID_SHOWN: string = 'P0017'
 /** The stick is held this many frames ahead, then this many to the right, from STICK_FROM; the player must go this share of its speed's reach. */
 const STICK_FROM: number = 30
 const STICK_AHEAD: number = 120
@@ -89,6 +91,26 @@ function findWorld(node: VeraUiNode): VeraUiNode | null {
     if (found !== null) { return found }
   }
   return null
+}
+
+function textsIn(node: VeraUiNode, out: string[]): string[] {
+  if (node.text.length > 0) { out.push(node.text) }
+  for (let child of node.children) { textsIn(child, out) }
+  return out
+}
+
+/**
+ * An id that reads as an id, not as a word (it has a digit or a '-': "r0-pig1", "shot6"), and appears in the words on the
+ * screen; '' when none does. A plain word id ("sun") may well be what the thing is called.
+ */
+export function shownId(texts: string[], ids: string[]): string {
+  for (let id of ids) {
+    if (id.length < 3 || !/[0-9-]/.test(id)) { continue }
+    for (let t of texts) {
+      if (t.indexOf(id) >= 0) { return id }
+    }
+  }
+  return ''
 }
 
 function buttonsIn(node: VeraUiNode, out: VeraUiNode[]): VeraUiNode[] {
@@ -209,6 +231,11 @@ class WorldPlay {
   struckEvents: number = 0
   struckRead: number = 0
   playerPresses: number = 0
+  /** The first body id the words on the screen showed, and when ('' while none has). */
+  idShown: string = ''
+  idShownWhen: string = ''
+  /** Every body id any build has made so far: a broken body's id is gone from the world but may still be shown. */
+  seenIds: Set<string> = new Set<string>()
 
   constructor(node: VeraUiNode, state: RuntimeValue, vm: VirtualMachine, host: UiHostEnvironment,
       module: BytecodeModule) {
@@ -255,9 +282,26 @@ class WorldPlay {
     if (fingerprint(this.state) !== before) {
       this.stateChanged = true
       steps += this.rebuild(when)
+      this.watchTexts(when)
     }
     if (steps > this.slowest) { this.slowest = steps }
     return steps
+  }
+
+  /** After a change of state: whether the words on the screen now show a body's id (P0017). Only the first is kept. */
+  watchTexts(when: string): void {
+    if (this.idShown.length > 0 || this.spec === null) { return }
+    let texts: string[] = []
+    try {
+      for (let root of decodeVeraUi(this.vm.execute('view', [this.state]))) { textsIn(root, texts) }
+    } catch (e) {
+      return
+    }
+    let found = shownId(texts, Array.from(this.seenIds))
+    if (found.length > 0) {
+      this.idShown = found
+      this.idShownWhen = when
+    }
   }
 
   /** build for the state, decoded, checked where new bodies start, and applied to the physics. Returns the VM steps. */
@@ -281,6 +325,7 @@ class WorldPlay {
       // The player's kick is a jump, not a throw that settles.
       if (b.kick !== null && b.player === null) { this.thrower = true }
       if (b.target) { this.targets = true }
+      this.seenIds.add(b.id)
     }
     let kicksBefore = this.sim.kickSerial
     this.sim.apply(diff, next)
@@ -850,6 +895,11 @@ class WorldPlay {
         'on e.kind === "struck" (e.body the one struck, e.speed how hard, e.bodies and e.values every one struck), change ' +
         'the state -- a score, or the id kept when e.speed is over a strength so build returns scene.split of it from then ' +
         'on -- or leave scene.target out'
+    }
+    if (this.idShown.length > 0) {
+      return this.line('view').toString() + ':1 ' + CODE_ID_SHOWN + ' The program plays, but ' + this.idShownWhen +
+        ' the screen showed the id "' + this.idShown + '": ids are for the program, not the person. Say what the thing is ' +
+        '(a word kept in the state when the event names it), never e.body or e.other themselves'
     }
     return worldBudgetProblem(this.slowest, this.line(this.event.length > 0 ? this.event : this.build))
   }

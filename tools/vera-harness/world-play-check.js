@@ -13,7 +13,7 @@ const {loadVera} = require('./source-loader')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playWorld, WorldPlayReport, CODE_NOT_SEEN, CODE_OVERLAP, CODE_OUT_OF_WORLD, CODE_STILL, CODE_NO_SETTLE,
   CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL, CODE_STUCK, CODE_WALKS_THROUGH, CODE_ZONE_UNREACHABLE,
-  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING} = loadVera('VeraWorldPlay')
+  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING, CODE_ID_SHOWN, shownId} = loadVera('VeraWorldPlay')
 const B = loadVera('VeraBudget')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
@@ -275,6 +275,11 @@ function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.Wo
   // Targets struck and never read.
   refused(swap(smash, 'if (e.kind === "struck" && e.speed > 4) {', 'if (e.kind === "struck" && e.speed > 400) {'), CODE_STRUCK_UNREAD,
     /scene.target bodies were struck \d+ time\(s\) and onWorld left the state as it was/, 'struck never read')
+  // The screen shows an id (a broken crate's) instead of saying what it is.
+  refused(swap(shoot, 'result = ui.numberToString(state.score) + " of 7 crates smashed";', 'result = "Smashed " + state.broken[0];'),
+    CODE_ID_SHOWN, /the screen showed the id "r0-crate\d"/, 'an id on the screen')
+  assert.equal(shownId(['3 of 7 crates smashed', 'Sun'], ['sun', 'r0-crate1']), '', 'words and plain ids are not ids shown')
+  assert.equal(shownId(['Hit shot6'], ['shot6']), 'shot6', 'an id with a number is')
   // A shot is not held to where loose bodies start (P0004): one fired from past the floor's edge still plays.
   assert.equal(play(swap(swap(smash, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0, 0.5, 120,'),
     'things.push(scene.from(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ), "launcher", 0));',

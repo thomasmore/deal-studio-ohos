@@ -30,6 +30,24 @@ function walker(id: string, colour: string): scene.Thing {
   return scene.group(id, 0, 0, 0, parts);
 }
 
+// Say who and where, not their ids.
+function whoCame(id: string): string {
+  if (strings.contains(id, "walker")) {
+    return "the walker";
+  }
+  if (strings.contains(id, "roamer")) {
+    return "the ball";
+  }
+  return "you";
+}
+
+function whereCame(id: string): string {
+  if (strings.contains(id, "gate")) {
+    return "the gate";
+  }
+  return "the spring";
+}
+
 function build(state: AppState): scene.Thing[] {
   let r: string = "r" + ui.numberToString(state.round) + "-";
   let things: scene.Thing[] = [];
@@ -52,7 +70,7 @@ function onWorld(state: AppState, e: scene.Event): AppState {
     return {jumps: state.jumps + 1, pace: state.pace, round: state.round, entered: state.entered, last: state.last};
   }
   if (e.kind === "enter") {
-    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: e.body + " at " + e.other};
+    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: whoCame(e.body) + " at " + whereCame(e.other)};
   }
   return state;
 }

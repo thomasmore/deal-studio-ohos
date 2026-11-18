@@ -82,7 +82,14 @@ function view(state: AppState): ui.View {
     result = ui.numberToString(state.moved) + " of 3 moved";
   }
   if (state.picked !== "") {
-    result = result + " - picked " + state.picked;
+    // Say what was picked, not its id.
+    let what: string = "the ball";
+    if (strings.contains(state.picked, "-0")) {
+      what = "the cube";
+    } else if (strings.contains(state.picked, "-1")) {
+      what = "the cylinder";
+    }
+    result = result + " - " + what + " picked";
   }
   return ui.AppTheme("clean", "", [
     ui.Column("default", [
