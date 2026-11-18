@@ -1016,6 +1016,26 @@ export function lookQuat(dx: number, dy: number, dz: number): number[] {
   return mulQ([0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)], [0, 0, Math.sin(pitch / 2), Math.cos(pitch / 2)])
 }
 
+/** How far past the shooter's side a shot is moved when it was built inside it (m). */
+export const SHOT_CLEARANCE_M: number = 0.03
+
+/**
+ * A shot's position in its shooter's frame, moved ahead along +x when it would start inside the shooter: a shot placed low
+ * enough to hit things on the ground easily ends up inside a tall shooter's body. shooterDims are the shooter's sizes
+ * (x, y, z) about its centre, shotDims the shot's; aimed, the frame turns toward the point, so the shooter's widest
+ * horizontal reach is what to clear. Unchanged when the two do not overlap. Pure.
+ */
+export function clearOfShooter(local: number[], shotDims: number[], shooterDims: number[], aimed: boolean): number[] {
+  let half = Math.max(shotDims[0], shotDims[1], shotDims[2]) / 2
+  let hx = shooterDims[0] / 2
+  let hy = shooterDims[1] / 2
+  let hz = shooterDims[2] / 2
+  let reach = aimed ? Math.hypot(hx, hz) : hx
+  let inside = Math.abs(local[1]) < hy + half && Math.abs(local[0]) < reach + half && (aimed || Math.abs(local[2]) < hz + half)
+  if (!inside) { return local }
+  return [reach + half + SHOT_CLEARANCE_M, local[1], aimed ? 0 : local[2]]
+}
+
 /**
  * Where a body made from another (scene.from), a shot (scene.shoot) or an aimed body (scene.aim) starts: [pose
  * [px, py, pz, qx, qy, qz, qw], velocity [vx, vy, vz], spin [wx, wy, wz]]. Pure.
@@ -1090,6 +1110,8 @@ export class WorldSim {
   /** Simulated seconds. */
   simTime: number = 0
 
+  /** The world apply is putting in, while it does (bodySpec reads it for a shooter built in the same build). */
+  private building: WorldSpec | null = null
   private index: Map<string, number> = new Map<string, number>()
   /** Engine index -> body id; '' for the ground and for free indices. */
   private names: string[] = []
@@ -1254,6 +1276,7 @@ export class WorldSim {
 
   /** Bring the engine from the world it had to next, by the diff between them (diffWorld). */
   apply(diff: WorldDiff, next: WorldSpec): void {
+    this.building = next
     // A step still running belongs to the world before this apply: finish it now, while its engine indices still name
     // the bodies it moved (removing frees an index and creating takes it again) and before a kick restarts the count of
     // steps since the kick. Its poses are kept for the next frame, less those of the bodies this apply removes.
@@ -1767,6 +1790,17 @@ export class WorldSim {
     this.ground.push(i)
   }
 
+  /** The body id as the world being applied builds it, else as the last one did; null if neither has it. */
+  private bodySpec(id: string): BodySpec | null {
+    for (let w of [this.building, this.spec]) {
+      if (w === null) { continue }
+      for (let o of (w as WorldSpec).bodies) {
+        if (o.id === id) { return o }
+      }
+    }
+    return null
+  }
+
   private createBody(b: BodySpec, parents: Map<string, number[]> | null = null, keptPose: boolean = false): void {
     let kind = kindOf(b)
     let i = -1
@@ -1808,7 +1842,12 @@ export class WorldSim {
         }
       }
       let shot = b.shot !== null && b.motion === 'loose' ? (b.shot as SceneShot).speed : 0
-      let at = resolveFrom(parent, b.position, b.rotation, b.aim, burst, shot)
+      let local = b.position
+      if (shot !== 0 && b.from !== null) {
+        let shooter = this.bodySpec((b.from as SceneFrom).parent)
+        if (shooter !== null) { local = clearOfShooter(local, b.dims, shooter.dims, b.aim.length === 3) }
+      }
+      let at = resolveFrom(parent, local, b.rotation, b.aim, burst, shot)
       let pose = at[0]
       this.engine.setPose(i, pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], pose[6])
       this.engine.setMaterial(i, b.mass, b.restitution, b.friction)

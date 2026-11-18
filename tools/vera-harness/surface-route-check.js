@@ -44,7 +44,7 @@ assert.equal(example.trim(), fs.readFileSync(path.join(__dirname, 'examples/surf
   }
   assert.match(S.checkWorldProgram(worldExample, 'self'), /P0014 .*goes anywhere by itself/, 'the throwing example has nothing that travels')
   // The guide tells of shooting, breaking and a blast in general terms, and of what struck, a tap and action carry.
-  for (const w of ['"struck"', 'e.dx, e.dy, e.dz', 'e.other its\n  label', '- Shooting:', '- Breaking:', '- A blast:', 'scene.split(thing, n, burst)',
+  for (const w of ['"struck"', 'e.dx, e.dy, e.dz', 'e.other its\n  label', '- Shooting (whenever the request says shoot or fire', '- Breaking:', '- A blast:', 'scene.split(thing, n, burst)',
     'at most 16 shots', 'never "shot", "piece" or "body"']) assert.ok(worldGuide.includes(w), 'the world guide says ' + w)
   // The fixtures for shooting and breaking play through the route's own check.
   for (const name of ['world-shoot', 'world-break']) {

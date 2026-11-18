@@ -13,7 +13,7 @@ const {loadVera} = require('./source-loader')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playWorld, WorldPlayReport, CODE_NOT_SEEN, CODE_OVERLAP, CODE_OUT_OF_WORLD, CODE_STILL, CODE_NO_SETTLE,
   CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL, CODE_STUCK, CODE_WALKS_THROUGH, CODE_ZONE_UNREACHABLE,
-  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING, CODE_ID_SHOWN, shownId} = loadVera('VeraWorldPlay')
+  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING, CODE_ID_SHOWN, CODE_BUTTON_TWICE, CODE_SHOT_OVER, shownId} = loadVera('VeraWorldPlay')
 const B = loadVera('VeraBudget')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
@@ -240,8 +240,8 @@ function build(state: AppState): scene.Thing[] {
 }
 function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.World("fill", 0, "build", "")]); }
 `
-  refusedT(alone('things.push(scene.camera(0, 3, 0.5, 0, 0.3, 0, false));'), 'steered', CODE_NOT_SEEN, /walks out of view within two seconds/,
-    'a fixed camera that loses the player')
+  // A scene.camera beside a player is set aside: the camera follows the player, so it cannot lose it.
+  assert.equal(playT(alone('things.push(scene.camera(0, 3, 0.5, 0, 0.3, 0, false));'), 'steered'), '', 'a fixed camera gives way to following the player')
   assert.equal(playT(alone(''), 'steered'), '', 'with no camera the player is followed')
 }
 
@@ -265,10 +265,9 @@ function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.Wo
   assert.ok(breakReport.slowestMs < B.WORLD_BUILD_BUDGET_MS, 'world-break within budget')
   budgets.push('world-break: ' + breakReport.struckEvents + ' struck (' + breakReport.struckRead + ' read), ' +
     breakReport.slowestMs.toFixed(2) + ' ms (' + breakReport.slowestSteps + ' steps)')
-  // A shot made inside the one who shoots it.
-  refused(swap(shoot, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0.1, 0, 0,'),
-    CODE_OVERLAP, /shot "r0-ball0" starts inside "r0-me", the body it comes from: .*further ahead along \+x than half that body's length along x plus half its own size \(x of at least 0\.41/,
-    'a shot inside the player')
+  // A shot made inside the one who shoots it is moved ahead of it by the host, and plays.
+  assert.equal(play(swap(shoot, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0.1, 0, 0,')),
+    '', 'a shot built inside the player starts clear of it')
   // A shot from a body that is not there (the id without its round).
   refused(swap(shoot, 'scene.shoot(ball, 14, false), r + "me", 0)', 'scene.shoot(ball, 14, false), "me", 0)'), CODE_FROM_MISSING,
     /"r0-ball0" is made with scene.from\("me"\) and there is no body "me"/, 'a shot from nowhere')
@@ -280,6 +279,13 @@ function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.Wo
     CODE_ID_SHOWN, /the screen showed the id "r0-crate\d"/, 'an id on the screen')
   assert.equal(shownId(['3 of 7 crates smashed', 'Sun'], ['sun', 'r0-crate1']), '', 'words and plain ids are not ids shown')
   assert.equal(shownId(['Hit shot6'], ['shot6']), 'shot6', 'an id with a number is')
+  // Fire again as a ui.Button under the world: the same control twice.
+  refused(swap(shoot, 'ui.Button("secondary", "Start again", "onReset", 0, true)', 'ui.Button("primary", "fire", "onReset", 0, true)'),
+    CODE_BUTTON_TWICE, /the button "fire" under the world repeats the one the host draws beside the stick/, 'a stick button repeated')
+  // A straight shot started high above the shooter's centre passes over every crate.
+  refused(swap(shoot, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 1.5, 0,'),
+    CODE_SHOT_OVER, /shot "r0-ball0" starts [\d.]+ m above the ground and flies straight, over everything it could hit .*taken about the centre of "r0-me"/,
+    'a shot over every target')
   // A shot is not held to where loose bodies start (P0004): one fired from past the floor's edge still plays.
   assert.equal(play(swap(swap(smash, 'scene.sphere(r + "ball" + ui.numberToString(s), 0.6, 0, 0,', 'scene.sphere(r + "ball" + ui.numberToString(s), 0, 0.5, 120,'),
     'things.push(scene.from(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ), "launcher", 0));',

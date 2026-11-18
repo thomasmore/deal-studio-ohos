@@ -49,6 +49,11 @@ const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
   nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 1, 0], 1e-9, 'and keeps its own turn for how it looks')
   ;[pose, v] = P.resolveFrom(null, [0, 0, 0], [0, 90, 0], [], 0, 5)
   nearAll(v, [0, 0, -5], 1e-9, 'alone and unaimed, a shot goes along its own +x')
+  // A shot built inside its shooter is moved ahead along +x, clear of it; one already clear is left where it is.
+  nearAll(P.clearOfShooter([0.2, -0.3, 0], [0.1, 0.1, 0.1], [1.2, 1, 0.4], false), [0.6 + 0.05 + P.SHOT_CLEARANCE_M, -0.3, 0], 1e-9, 'moved ahead of the shooter')
+  nearAll(P.clearOfShooter([0.9, -0.3, 0], [0.1, 0.1, 0.1], [1.2, 1, 0.4], false), [0.9, -0.3, 0], 0, 'already clear')
+  nearAll(P.clearOfShooter([0.2, 0.8, 0], [0.1, 0.1, 0.1], [1.2, 1, 0.4], false), [0.2, 0.8, 0], 0, 'above the shooter is clear')
+  near(P.clearOfShooter([0.2, 0, 0.1], [0.1, 0.1, 0.1], [1.2, 1, 0.4], true)[0], Math.hypot(0.6, 0.2) + 0.05 + P.SHOT_CLEARANCE_M, 1e-9, 'aimed: past its widest reach')
   ;[pose] = P.resolveFrom(parent, [0, 0, 0], [0, 0, 90], [], 0, 0)
   // The parent's turn, then its own: its +x (turned 90 about z, so up) stays up; its +y (turned to -x) is the parent's -x, +z.
   nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 1, 0], 1e-9, 'its own turn is taken in the parent\'s frame (q . localRot)')

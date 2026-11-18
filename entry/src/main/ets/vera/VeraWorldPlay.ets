@@ -17,7 +17,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, ZoneSpec, ScenePlayer, decodeScene, diffWorld, orbitPositions,
-  sceneEventValue, MotionCarry, SceneOrbit, SceneFrom } from './VeraScene'
+  sceneEventValue, MotionCarry, SceneOrbit, SceneFrom, SceneShot } from './VeraScene'
 import { ZoneWatch } from './VeraLocomotion'
 import { FakePhys, WorldSim, SimEvent, specBounds, enterEvent } from './VeraPhysics'
 import { worldCamera, projectPoint, metresPerVp, floorDirection, CameraPose } from './VeraLook3D'
@@ -58,6 +58,10 @@ export const CODE_STRUCK_UNREAD: string = 'P0015'
 export const CODE_FROM_MISSING: string = 'P0016'
 /** Words on the screen show a body's id (e.body, e.other) instead of saying what it is. */
 export const CODE_ID_SHOWN: string = 'P0017'
+/** A ui.Button repeats one of the buttons the host draws beside the stick. */
+export const CODE_BUTTON_TWICE: string = 'P0018'
+/** A shot that flies straight starts above every target, so it passes over all of them. */
+export const CODE_SHOT_OVER: string = 'P0019'
 /** The stick is held this many frames ahead, then this many to the right, from STICK_FROM; the player must go this share of its speed's reach. */
 const STICK_FROM: number = 30
 const STICK_AHEAD: number = 120
@@ -288,6 +292,29 @@ class WorldPlay {
     return steps
   }
 
+  /**
+   * The player's buttons are drawn by the host beside the stick: a ui.Button with the same words is the same control
+   * twice (a generated game showed Fire and Jump both beside the stick and under the world).
+   */
+  checkButtonsOnce(buttons: VeraUiNode[]): void {
+    let spec = this.spec as WorldSpec
+    let labels: string[] = []
+    for (let b of spec.bodies) {
+      let pl = b.player
+      if (pl === null) { continue }
+      for (let l of [pl.action, pl.fire]) {
+        if (l.trim().length > 0) { labels.push(l.trim().toLowerCase()) }
+      }
+    }
+    for (let button of buttons) {
+      let words = button.text.trim().toLowerCase()
+      if (labels.indexOf(words) < 0) { continue }
+      throw new PlayStop(this.line('view').toString() + ':1 ' + CODE_BUTTON_TWICE + ' The program plays, but the button "' +
+        button.text + '" under the world repeats the one the host draws beside the stick (scene.player\'s action and fire ' +
+        'are those buttons, heard as e.kind === "action"). Leave the ui.Button out')
+    }
+  }
+
   /** After a change of state: whether the words on the screen now show a body's id (P0017). Only the first is kept. */
   watchTexts(when: string): void {
     if (this.idShown.length > 0 || this.spec === null) { return }
@@ -364,6 +391,9 @@ class WorldPlay {
         if (o.id === b.id) { continue }
         // Pieces of one parent start packed together, as the parent was.
         if (parent.length > 0 && o.from !== null && (o.from as SceneFrom).parent === parent) { continue }
+        // A shot is moved clear of its shooter by the host (clearOfShooter); the boxes here, square to the world, are
+        // wider than a turned shooter and would see it inside.
+        if (b.shot !== null && o.id === parent) { continue }
         let live = o.motion === 'loose' ? this.sim.poseOf(o.id) : null
         let op = live !== null ? live : o.position
         if (!overlapsPose(b, pose, box, o, op, live !== null ? boundsAt(o, live) : specBounds(o))) { continue }
@@ -379,7 +409,34 @@ class WorldPlay {
           o.id + '": make it where nothing else is -- a shot just ahead of what shoots it, clear of what stands by it -- or ' +
           'the physics throws them apart')
       }
+      this.checkShotHeight(b, pose, next, at)
     }
+  }
+
+  /**
+   * A shot that flies straight (no arc, no aim) keeps the height it starts at: started above the top of every target it
+   * passes over them all. Its y with scene.from is taken about the shooter's centre, which a program easily reads as a
+   * height above the ground (a generated rider fired over every animal from 1.8 m).
+   */
+  checkShotHeight(b: BodySpec, pose: number[], next: WorldSpec, at: number): void {
+    if (b.shot === null || (b.shot as SceneShot).arc || b.aim.length === 3) { return }
+    // What it could be meant to hit: the targets, and whatever moves (walks, wanders, rolls) -- not the shooter, other
+    // shots or pieces. A program that drops scene.target still shoots at its moving things.
+    let shooter = b.from !== null ? (b.from as SceneFrom).parent : ''
+    let tops: number[] = next.bodies.filter((o: BodySpec): boolean => o.id !== shooter && o.shot === null &&
+      o.from === null && o.player === null && (o.target || o.motion !== 'static'))
+      .map((o: BodySpec): number => specBounds(o)[4])
+    if (tops.length === 0) { return }
+    let highest = Math.max(...tops)
+    let bottom = pose[1] - Math.max(b.dims[0], b.dims[1], b.dims[2]) / 2
+    if (bottom <= highest) { return }
+    let parent = b.from !== null ? (b.from as SceneFrom).parent : ''
+    throw new PlayStop(at.toString() + ':1 ' + CODE_SHOT_OVER + ' The program plays, but shot "' + b.id + '" starts ' +
+      (Math.round(pose[1] * 100) / 100).toString() + ' m above the ground and flies straight, over everything it could hit ' +
+      '(the targets and the bodies that move; the tallest reaches ' + (Math.round(highest * 100) / 100).toString() + ' m), so it can hit none' +
+      (parent.length > 0 ? ': its y is taken about the centre of "' + parent + '", not from the ground -- lower it' : ': lower it') +
+      ' to the height of the middle of what it is meant to hit (y of about ' +
+      (Math.round((highest / 2 - (pose[1] - b.position[1])) * 100) / 100).toString() + ' here), or give it arc true')
   }
 
   /** New loose bodies: not inside another body, not under the ground, not outside the world they are in. */
@@ -634,6 +691,7 @@ class WorldPlay {
     this.checkZones()
     let buttons: VeraUiNode[] = []
     for (let root of decodeVeraUi(this.vm.execute('view', [this.state]))) { buttonsIn(root, buttons) }
+    this.checkButtonsOnce(buttons)
     let pressed = spread(buttons, PRESSED_BUTTONS)
     let inputs = this.script(pressed.length)
     let queue: SimEvent[] = []

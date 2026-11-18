@@ -120,7 +120,7 @@ What a world can do, combined as the request needs:
   (phaseDeg 0 and 180); they stop when it stands. A speed from the state (a Faster button) changes its pace and it
   goes on from where it is. scene.spin only turns a thing where it stands: never use it for a thing that moves about.
 - Steered by the person: scene.player(body, speed, action), one per world. The host draws the stick and the camera
-  follows the player (leave scene.camera out); action names a button beside the stick, "" for none, heard as
+  follows the player (a scene.camera is set aside then: leave it out); action names a button beside the stick, "" for none, heard as
   e.kind === "action"; scene.player(body, speed, action, fire) adds a second button, and e.other says which was
   pressed. These buttons are the controls: never repeat them as ui.Buttons under the world. A jump is the player's own kick, its trigger a count the action adds 1 to:
   scene.player(scene.kick(body, state.jumps, 0, 4, 0, 0), speed, "Jump"). The player starts on the floor, clear of
@@ -130,11 +130,12 @@ What a world can do, combined as the request needs:
   came into which zone: a finish, a checkpoint, something to collect (keep the ids collected in the state and leave
   them out of build). Others that go the same way are bodies on paths through the same zones: the order of their
   "enter" events is who came first.
-- Shooting: a count of shots in the state, which the button or tap that fires adds 1 to. build makes only the last
+- Shooting (whenever the request says shoot or fire, whatever the shooter holds): a count of shots in the state, which the button or tap that fires adds 1 to. build makes only the last
   few shots (a loop from the count less a few up to the count), each a new id from its number, so a shot once made
   flies on by itself: scene.from(scene.shoot(body, speed, false), shooterId, 0) with the body's x just ahead of the
-  shooter's centre along +x (more than half the shooter's length plus half its own), so it leaves the way the shooter
-  faces; wrap it in scene.aim(..., x, y, z) to send it at a point instead, the last tap's e.x, e.y, e.z kept in the
+  shooter's centre along +x (one built inside the shooter is moved ahead of it), so it leaves the way the shooter
+  faces, and its y at the height of the middle of what it is meant to hit (a shot that flies straight keeps the height it
+  starts at: from the top of a tall shooter it passes over everything low); wrap it in scene.aim(..., x, y, z) to send it at a point instead, the last tap's e.x, e.y, e.z kept in the
   state. A tap that fires sends the shot at the point tapped: keep e.x, e.y, e.z in the state and aim at them. arc true
   for a thing thrown or lobbed, false for one that flies straight. The host keeps at most 16 shots and drops the oldest.
   What a shot did is known only from "struck" when it lands, never when it is fired: count a hit there.

@@ -89,7 +89,7 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   assert.equal(w.follow.target, 'me', 'a world with a player and no camera follows it')
   assert.ok(w.follow.distance >= S.FOLLOW_MIN_BACK && w.follow.height >= S.FOLLOW_MIN_UP)
   const fixed = world([call('camera', 0, 3, 6, 0, 0, 0, false), call('player', box('me'), 3, '')])
-  assert.equal(fixed.follow, null, 'with the program\'s camera there is no follow')
+  assert.equal(fixed.follow.target, 'me', 'a scene.camera beside a player gives way: the camera follows the player'); assert.equal(fixed.camera, null)
   const chosen = world([call('follow', call('wander', box('cow'), 2, 1), 4, 2)])
   assert.deepEqual([chosen.follow.target, chosen.follow.distance, chosen.follow.height], ['cow', 4, 2], 'scene.follow on any body')
   const walker = world([call('path', box('w', 9, 0.5, 9), [0, 0, 2, 0], 1, false)]).bodies[0]

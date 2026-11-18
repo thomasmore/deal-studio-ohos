@@ -1323,7 +1323,10 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
     throw new RuntimeTrap('R0029', 'the world has a scene.camera and a scene.follow: the camera either stands where it is put ' +
       'or follows a body; leave one out')
   }
-  if (world.follow === null && world.camera === null && player !== '') {
+  // With a player the camera follows it, whatever scene.camera says: a camera that stands still loses the player or shows
+  // it as a speck (a generated rider game put one 8 m away), and the stick is read through the camera.
+  if (world.follow === null && player !== '') {
+    world.camera = null
     world.follow = defaultFollow(byId.get(player) as BodySpec)
   }
   return world
