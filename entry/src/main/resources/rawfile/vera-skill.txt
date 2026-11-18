@@ -26,6 +26,17 @@ Keep every unchanged field in the returned state.
 view is pure. Derive its output from state without mutation, clock reads, or platform calls.
 Local arrays of UI nodes can be built inside view.
 
+A program may define function expect(state: AppState): boolean.
+It returns true when the program's own outputs are in their valid ranges -- a BMI that is
+positive and below 60, a quiz score that cannot exceed the question count, a dice total that
+equals the sum of its two faces, an elapsed time that is not negative. It is checked once at the
+state init returns, before the program is served: a program whose expect returns false there is
+sent back as a repair, like a compile error. Write expect for any value the program computes and
+shows that has a range it must stay in. Call the same formulas init or the handlers use, so a
+wrong one is caught. Keep expect true at the initial state and for any input a person could give;
+do not write a range so narrow that a correct value fails it. expect must not read the clock, call
+the SDK, or mutate state; it is a pure boolean over state.
+
 Saved projects persist AppState and restore it when the project opens again.
 Do not add a storage API or a save button. Neither is needed for project state.
 Add history only when the request needs history. Widget mode can override this persistence assumption.

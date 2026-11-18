@@ -73,6 +73,25 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
   } catch (e) {
     return diagnostic(e as Error, 'when the program starts')
   }
+  // An optional expect(state): boolean the program writes to hold itself to its
+  // own invariants: a BMI that is positive and plausible, a quiz score that
+  // cannot exceed the question count, a dice total that equals its two faces.
+  // Checked once at the initial state, not after the synthetic taps -- their
+  // made-up values (a height of 1 cm) can push a correct program out of the
+  // range a person's real input would keep it in. A failure is a smoke failure
+  // like any other: it goes back to the model as a repair.
+  if (deserializeVbc2(compiled.vbc2).functions.some((fn): boolean => fn.name === 'expect')) {
+    try {
+      let verdict = vm.execute('expect', [state])
+      if (!(verdict instanceof VeraBooleanValue) || !verdict.value) {
+        return 'The program compiled, but its own expectation was not met at the initial state ' +
+          '(function expect returned false): an invariant the program set for itself does not hold. ' +
+          'Look at the formulas expect tests -- a value it should keep in range is computed wrong.'
+      }
+    } catch (e) {
+      return diagnostic(e as Error, 'checking the program\'s own expectation (function expect)')
+    }
+  }
   let tapped: string[] = []
   for (let pass = 0; pass < PASSES; pass++) {
     let names: string[] = []

@@ -75,6 +75,39 @@ function spin(state: AppState, ignored: number): AppState {
   assert.match(smokeRun(compileVeraSource(program(spin, '    i = i - 1;'))), /R0017 The program compiled, but stopped in spin after .*: execution exceeded .* inside the loop at line \d+, which never stopped or does too much work/)
 }
 
+// A program whose expect(state) returns false at the initial state is sent back as a repair.
+{
+  const src = `@jsonable
+class AppState { bmi: number; }
+
+function init(): AppState { return {bmi: -68.3}; }
+
+function expect(state: AppState): boolean { return state.bmi > 0 && state.bmi < 60; }
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [ui.Column("default", [ui.Text("default", "BMI")])]);
+}
+`
+  const found = smokeRun(compileVeraSource(src))
+  assert.ok(found.startsWith('The program compiled, but its own expectation was not met at the initial state (function expect returned false)'), found)
+}
+
+// The same program with a correct initial value passes: expect must not false-fail.
+{
+  const src = `@jsonable
+class AppState { bmi: number; }
+
+function init(): AppState { return {bmi: 24.2}; }
+
+function expect(state: AppState): boolean { return state.bmi > 0 && state.bmi < 60; }
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [ui.Column("default", [ui.Text("default", "BMI")])]);
+}
+`
+  assert.equal(smokeRun(compileVeraSource(src)), '')
+}
+
 // Bytecode from before lines were kept still runs, and its traps say what they did without a line.
 {
   const vbc2 = JSON.parse(compileVeraSource(program('', '')).vbc2)
