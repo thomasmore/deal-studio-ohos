@@ -430,6 +430,8 @@ export struct GeneratePage {
   private skillText: string = ''
   /** How a game is written on a ui.Surface (rawfile vera-surface-skill.txt), for the route; '' when it did not load. */
   private surfaceGuide: string = ''
+  /** How a 3D program is written on a ui.World (rawfile vera-world-skill.txt); '' when it did not load (3D is then written flat). */
+  private worldGuide: string = ''
   /** Components the current system prompt describes; empty means all of them. */
   private uiSelected: string[] = []
   private grammar: string = ''
@@ -943,6 +945,13 @@ export struct GeneratePage {
       } catch (e) {
         console.warn('VERA-SURFACE no guide, games go to the agent: ' + (e as Error).message)
       }
+      try {
+        let worldGuide = await loadRawfileText(mgr, 'vera-world-skill.txt')
+        if (this.disposed) { return }
+        this.worldGuide = worldGuide
+      } catch (e) {
+        console.warn('VERA-SURFACE no world guide, 3D is written flat: ' + (e as Error).message)
+      }
       if (this.disposed) { return }
       this.promptTemplate = skill
         .replace('{{UI_CATALOG}}', describeCatalogForPrompt())
@@ -1257,6 +1266,7 @@ export struct GeneratePage {
       this.previewVbc2 = vbc2
       this.previewNote = 'Sketching the screen...'
     }, (): boolean => run !== this.runId || this.cancelRequested, this.promptTemplate, this.surfaceGuide, operation)
+    host.worldGuide = this.worldGuide
     host.ask = (question: AgentQuestion): Promise<PersonAnswer> => this.askPerson(question, run, operation)
     // Every selector call the agent makes goes through host.askJev; count each
     // as one model request of this run.
@@ -2195,6 +2205,7 @@ export struct GeneratePage {
     let host = appAgentHost((text: string): void => { if (run === this.runId) { this.status = text } },
       (_vbc2: string): void => {}, (): boolean => run !== this.runId || this.cancelRequested,
       this.promptTemplate, this.surfaceGuide, operation)
+host.worldGuide = this.worldGuide
     // The edit agent's selector calls are model requests of this run too.
     let askJevForRun = host.askJev
     host.askJev = async (body: string): Promise<string> => {

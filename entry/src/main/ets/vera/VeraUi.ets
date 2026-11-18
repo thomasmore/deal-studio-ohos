@@ -12,6 +12,7 @@ import {
 } from './VeraInterpreter'
 import { resolveStyle } from './VeraUiCatalog'
 import { invokeStdGfx } from './VeraGfx'
+import { invokeStdScene } from './VeraScene'
 
 export class VeraUiNode {
   id: number = 0
@@ -475,6 +476,7 @@ export class UiHostEnvironment extends HostEnvironment {
     if (module === 'std/strings') { return invokeStdStrings(name, args) }
     if (module === 'std/sdk') { return this.queueSdk(args) }
     if (module === 'std/gfx') { return invokeStdGfx(name, args) }
+    if (module === 'std/scene') { return invokeStdScene(name, args) }
     if (module !== 'std/ui') {
       throw new RuntimeTrap('R0015', `external function unavailable: ${module}.${name}`)
     }
@@ -485,7 +487,7 @@ export class UiHostEnvironment extends HostEnvironment {
       case 'Scroll': return containerNode('scroll', args)
       case 'Canvas': return containerNode('canvas', args)
       case 'Transform':
-        // The pose is the one array prop (series), the glide duration rides numberValue, the side of the layer minimum (as Skeleton's width), the style says solid or not.
+        // The pose is the one array prop (series), the glide duration rides numberValue, the side of the layer minimum (as Skeleton's width).
         return viewNode('transform', [
           ['style', new VeraStringValue(argString(args, 0))],
           ['series', argArray(args, 1)],
@@ -494,10 +496,9 @@ export class UiHostEnvironment extends HostEnvironment {
           ['children', argArray(args, 4)],
         ])
       case 'Stage':
-        return viewNode('stage', [
-          ['style', new VeraStringValue(argString(args, 0))],
-          ['numberValue', new VeraNumberValue(argNum(args, 1))],
-          ['minimum', new VeraNumberValue(argNum(args, 2))],
+        // ui.Stage is gone (solid bodies are ui.World now); bytecode saved before that still names it: a plain column of its content.
+        return viewNode('column', [
+          ['style', new VeraStringValue('default')],
           ['children', argArray(args, 3)],
         ])
       case 'Layers':
@@ -615,6 +616,14 @@ export class UiHostEnvironment extends HostEnvironment {
           ['label', new VeraStringValue(argString(args, 3))],
           ['action', new VeraStringValue(argString(args, 4))],
           ['value', new VeraStringValue(argString(args, 5))],
+        ])
+      case 'World':
+        // As a Surface: the height rides minimum, the build function label, the event handler action.
+        return viewNode('world', [
+          ['style', new VeraStringValue(argString(args, 0))],
+          ['minimum', new VeraNumberValue(argNum(args, 1))],
+          ['label', new VeraStringValue(argString(args, 2))],
+          ['action', new VeraStringValue(argString(args, 3))],
         ])
       case 'Ticker':
         return viewNode('ticker', [

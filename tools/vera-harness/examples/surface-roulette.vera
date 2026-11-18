@@ -273,22 +273,29 @@ function draw(state: AppState): gfx.Shape[] {
   let wheel: gfx.Shape[] = [];
   let i: number = 0;
   while (i < 37) {
-    let a0: number = (i - 0.5) * step;
-    let a1: number = (i + 0.5) * step;
+    // Each pocket's sines and cosines once: a frame of the phone has room for a drawing, not for the same trig eight times.
+    let a0: number = (i - 0.5) * step * math.pi() / 180;
+    let a1: number = (i + 0.5) * step * math.pi() / 180;
+    let s0: number = math.sin(a0);
+    let c0: number = math.cos(a0);
+    let s1: number = math.sin(a1);
+    let c1: number = math.cos(a1);
     let n: number = order[i];
-    wheel.push(gfx.polygon([px(a0, 144), py(a0, 144), px(a1, 144), py(a1, 144), px(a1, 124), py(a1, 124),
-      px(a0, 124), py(a0, 124)], pocketColour(n)));
+    wheel.push(gfx.polygon([144 * s0, 0 - 144 * c0, 144 * s1, 0 - 144 * c1, 124 * s1, 0 - 124 * c1, 124 * s0, 0 - 124 * c0],
+      pocketColour(n)));
     wheel.push(gfx.group(px(i * step, 134), py(i * step, 134), i * step, 1, 1,
       [gfx.text(0, 0, 11, "center", "white", ui.numberToString(n), true)]));
-    wheel.push(gfx.line(px(a0, 144), py(a0, 144), px(a0, 124), py(a0, 124), 1.5, "#c9a25c"));
+    wheel.push(gfx.line(144 * s0, 0 - 144 * c0, 124 * s0, 0 - 124 * c0, 1.5, "#c9a25c"));
     i = i + 1;
   }
   wheel.push(gfx.arc(0, 0, 114, 0, 360, 20, "#3a2414"));
   wheel.push(gfx.arc(0, 0, 124, 0, 360, 1.5, "#c9a25c"));
   i = 0;
   while (i < 37) {
-    let a: number = (i - 0.5) * step;
-    wheel.push(gfx.line(px(a, 124), py(a, 124), px(a, 104), py(a, 104), 1.5, "#c9a25c"));
+    let a: number = (i - 0.5) * step * math.pi() / 180;
+    let s: number = math.sin(a);
+    let c: number = math.cos(a);
+    wheel.push(gfx.line(124 * s, 0 - 124 * c, 104 * s, 0 - 104 * c, 1.5, "#c9a25c"));
     i = i + 1;
   }
   wheel.push(gfx.circle(0, 0, 104, "#6b3f1f"));

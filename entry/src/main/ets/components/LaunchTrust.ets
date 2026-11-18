@@ -28,7 +28,7 @@ export const DEV_PARAMETER_NAMES: string[] = [
   'probeTarget', 'probeParams', 'probeMode', 'probeSdkTarget', 'probeSdkParams',
   'probeSdkSearch', 'veraBenchmark', 'veraSdkEval', 'veraUiEval', 'veraUiAb',
   'veraCompose', 'veraComposePlan', 'veraCustom', 'veraAlign', 'veraWhole',
-  'veraTemplateSelect'
+  'veraTemplateSelect', 'worldFloorGain'
 ]
 
 function textParam(params: Record<string, Object>, key: string): string {

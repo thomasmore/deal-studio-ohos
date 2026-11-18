@@ -105,3 +105,46 @@ target_link_libraries(usbnet PRIVATE
   libace_napi.z.so
   libhilog_ndk.z.so
 )
+
+# Physics (napi_phys.cpp, phys_world.h): Jolt Physics behind NAPI, for the 3D world's rigid
+# bodies. Jolt source -- fetch the pinned commit (v5.6.0) into this directory:
+#   cd entry/src/main/cpp
+#   git init JoltPhysics && cd JoltPhysics
+#   git fetch --depth 1 https://github.com/jrouwe/JoltPhysics e77f175595e64cb44218cc9d9d56fc365ad0e36a
+#   git checkout FETCH_HEAD
+# Jolt.cmake is included directly (not add_subdirectory: the repo's top-level CMakeLists
+# lives in Build/ and drags in tests and samples). Without the directory the build still
+# succeeds, as a stub libphys.so whose physInit() returns 0; ArkTS then says physics is
+# not available.
+set(PHYSICS_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/JoltPhysics)
+set(PHYSICS_PINNED_COMMIT e77f175595e64cb44218cc9d9d56fc365ad0e36a)
+
+if(EXISTS ${PHYSICS_REPO_ROOT}/Jolt/Jolt.cmake)
+  execute_process(COMMAND git -C ${PHYSICS_REPO_ROOT} rev-parse HEAD
+    OUTPUT_VARIABLE PHYSICS_ACTUAL_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET RESULT_VARIABLE PHYSICS_GIT_RESULT)
+  if(NOT PHYSICS_GIT_RESULT EQUAL 0 OR PHYSICS_ACTUAL_COMMIT STREQUAL "")
+    set(PHYSICS_ACTUAL_COMMIT "unknown")
+  endif()
+  if(NOT PHYSICS_ACTUAL_COMMIT STREQUAL PHYSICS_PINNED_COMMIT)
+    message(WARNING "JoltPhysics at ${PHYSICS_ACTUAL_COMMIT}, but this build is pinned to ${PHYSICS_PINNED_COMMIT}. "
+      "It may not compile for OpenHarmony or may not match phys_world.h; see the comment above.")
+  endif()
+
+  # 16-bit object layers (what the spike measured). Static lib, so libphys.so is the
+  # only .so produced from this block.
+  set(OBJECT_LAYER_BITS 16)
+  set(BUILD_SHARED_LIBS OFF)
+  include(${PHYSICS_REPO_ROOT}/Jolt/Jolt.cmake)
+  target_compile_options(Jolt PRIVATE -O3 -fno-exceptions -fno-rtti)
+  target_include_directories(Jolt PUBLIC ${PHYSICS_REPO_ROOT})
+  add_library(phys SHARED napi_phys.cpp)
+  target_compile_options(phys PRIVATE -O3 -fno-exceptions -fno-rtti)
+  target_link_libraries(phys PRIVATE Jolt libace_napi.z.so libhilog_ndk.z.so)
+else()
+  message(WARNING "JoltPhysics not found at ${PHYSICS_REPO_ROOT} -- building a stub with no physics. "
+    "The 3D world's dice and bodies will be off; see the comment above.")
+  add_library(phys SHARED napi_phys.cpp)
+  target_compile_definitions(phys PRIVATE PHYS_STUB=1)
+  target_link_libraries(phys PRIVATE libace_napi.z.so libhilog_ndk.z.so)
+endif()

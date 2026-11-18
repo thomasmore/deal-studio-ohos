@@ -1,0 +1,88 @@
+// Things that travel, with no game in them: the second example the world guide carries (vera-world-skill.txt).
+//
+// A body of parts, built facing +x, walks a closed route by itself (scene.path), its legs swinging two and two
+// (scene.swing, phases 0 and 180); a smaller one roams round where it is put (scene.wander). The person steers a third
+// with the stick the host draws (scene.player), and its button (here "Jump") throws it up through its kick trigger. Two
+// circles on the ground (scene.zone) tell the program when a body comes into one ("enter"). Faster changes only the
+// speed: the walker goes on from where it is. The program never keeps a position: the host moves everything.
+
+@jsonable
+class AppState {
+  jumps: number;
+  pace: number;
+  round: number;
+  entered: number;
+  last: string;
+}
+
+function init(): AppState {
+  return {jumps: 0, pace: 1, round: 0, entered: 0, last: ""};
+}
+
+function walker(id: string, colour: string): scene.Thing {
+  let parts: scene.Thing[] = [];
+  parts.push(scene.box("body", 0, 0.55, 0, 0.8, 0.3, 0.3, colour));
+  parts.push(scene.box("head", 0.5, 0.75, 0, 0.25, 0.2, 0.2, colour));
+  parts.push(scene.swing(scene.box("leg1", 0.3, 0.2, 0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 0));
+  parts.push(scene.swing(scene.box("leg2", 0.3, 0.2, -0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 180));
+  parts.push(scene.swing(scene.box("leg3", -0.3, 0.2, 0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 180));
+  parts.push(scene.swing(scene.box("leg4", -0.3, 0.2, -0.1, 0.08, 0.4, 0.08, "ink"), 25, 0.7, 0));
+  return scene.group(id, 0, 0, 0, parts);
+}
+
+function build(state: AppState): scene.Thing[] {
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let things: scene.Thing[] = [];
+  things.push(scene.sky("#9fd0f0", 0));
+  things.push(scene.floor("#6aa84f"));
+  // A route round the middle, its corners clear of the post; the walker's y is half its height (its feet on the ground).
+  things.push(scene.path(walker(r + "walker", "#8b5a2b"), [-4, -4, 4, -4, 4, 4, -4, 4], 1.2 * state.pace, true));
+  things.push(scene.wander(scene.sphere(r + "roamer", 6, 0.25, -6, 0.25, "white"), 2, 0.5 * state.pace));
+  things.push(scene.box(r + "post", 0, 0.75, 0, 0.3, 1.5, 0.3, "#5b4636"));
+  // The person's: it starts on the ground, clear of the rest; its kick trigger is the count of jumps.
+  let me: scene.Thing = scene.kick(scene.box(r + "me", -2, 0.3, 2, 0.5, 0.6, 0.4, "accent"), state.jumps, 0, 4, 0, 0);
+  things.push(scene.player(me, 3, "Jump"));
+  things.push(scene.zone(r + "gate", 4, 0, 1.2, "accent"));
+  things.push(scene.zone(r + "spring", -6, -6, 1.2, "warning"));
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "action") {
+    return {jumps: state.jumps + 1, pace: state.pace, round: state.round, entered: state.entered, last: state.last};
+  }
+  if (e.kind === "enter") {
+    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: e.body + " at " + e.other};
+  }
+  return state;
+}
+
+function onFaster(state: AppState, value: number): AppState {
+  let pace: number = state.pace * 1.5;
+  if (pace > 3) {
+    pace = 1;
+  }
+  return {jumps: state.jumps, pace: pace, round: state.round, entered: state.entered, last: state.last};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {jumps: 0, pace: 1, round: state.round + 1, entered: 0, last: ""};
+}
+
+function view(state: AppState): ui.View {
+  let result: string = "Steer with the stick";
+  if (state.last !== "") {
+    result = ui.numberToString(state.entered) + " came in - last " + state.last;
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Field", "", "Steer with the stick, jump with the button", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", result),
+      ui.ActionBar("spread", [
+        ui.Button("primary", "Faster", "onFaster", 0, true),
+        ui.Button("secondary", "Reset", "onReset", 0, state.round >= 0)
+      ])
+    ])
+  ]);
+}

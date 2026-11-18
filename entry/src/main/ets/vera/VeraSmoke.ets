@@ -14,6 +14,7 @@ import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberV
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { decodeGfx, pointerValue } from './VeraGfx'
+import { decodeScene, sceneEventValue } from './VeraScene'
 import { checkWidget } from './VeraWidgetRefine'
 
 /** Twice through the handlers: a list's second entry, a toggle switched back. */
@@ -29,13 +30,19 @@ function countNodes(node: VeraUiNode): number {
 function plainValue(kind: string): RuntimeValue {
   if (kind === 'number') { return new VeraNumberValue(1) }
   if (kind === 'pointer') { return pointerValue('down', 0, 12, 12) }
+  // A tap on empty space: the one event every world gets, whatever is in it.
+  if (kind === 'sceneEvent') { return sceneEventValue('tap', '', '', 0, 0, 0, 0, [], []) }
   if (kind === 'boolean') { return new VeraBooleanValue(true) }
   return new VeraStringValue('12')
 }
 
-/** Draw every ui.Surface in the frame once, as its first frame on the phone would: a draw() that traps is caught here. */
+/**
+ * Draw every ui.Surface in the frame once, as its first frame on the phone would, and build every ui.World: a draw() or
+ * build() that traps -- or a world that breaks its contract, two bodies with one id -- is caught here.
+ */
 function drawSurfaces(vm: VirtualMachine, node: VeraUiNode, state: RuntimeValue): void {
   if (node.kind === 'surface' && node.label.length > 0) { decodeGfx(vm.execute(node.label, [state])) }
+  if (node.kind === 'world' && node.label.length > 0) { decodeScene(vm.execute(node.label, [state])) }
   for (let child of node.children) { drawSurfaces(vm, child, state) }
 }
 

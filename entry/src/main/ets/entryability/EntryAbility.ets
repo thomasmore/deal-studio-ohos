@@ -23,6 +23,7 @@ import { startPowerKeyProbe } from '../vera/PowerKeyProbe'
 import { compileVeraSource } from '../vera/VeraCompiler'
 import { util } from '@kit.ArkTS'
 import { enableTemplateSelect, disableTemplateSelect } from '../vera/VeraTemplateSelectFlag'
+import { setFloorGainOverride } from '../vera/VeraLook3D'
 import { startedByApp, presentDevParameters, describeCaller } from '../components/LaunchTrust'
 
 const DOMAIN = 0x0000
@@ -121,6 +122,7 @@ export default class EntryAbility extends UIAbility {
     this.extractCompose(want)
     this.extractTemplateSelect(want)
     this.extractProof(want)
+    this.extractWorldFloorGain(want)
   }
 
   /**
@@ -280,6 +282,21 @@ export default class EntryAbility extends UIAbility {
     settings.init(this.context.filesDir)
     settings.setSelectorKey(text)
     hilog.info(DOMAIN, 'VERA', 'TypeSafe key updated from launch parameter')
+  }
+
+  /**
+   * Development only: the lit floor's gain in ui.World scenes (VeraLook3D.FLOOR_LIGHT_GAIN) for calibrating on the phone:
+   *     --ps worldFloorGain 1.55
+   * Not stored: it lasts until the process ends.
+   */
+  private extractWorldFloorGain(want: Want): void {
+    if (want.parameters === null || want.parameters === undefined) { return }
+    let params = want.parameters as Record<string, Object>
+    let v = params['worldFloorGain']
+    if (v === null || v === undefined) { return }
+    let g = typeof v === 'number' ? (v as number) : Number((v as string).trim())
+    setFloorGainOverride(g)
+    hilog.info(DOMAIN, 'VERA', 'World floor gain override ' + g.toString())
   }
 
   /**

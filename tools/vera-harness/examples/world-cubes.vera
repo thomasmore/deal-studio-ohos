@@ -1,0 +1,72 @@
+// A wall of a hundred loose cubes on the floor, and a ball thrown at it, as a ui.World.
+//
+// Each shot is a new ball: its id carries the shot number, so the last ball goes away and the new one starts
+// where it is written and is thrown at once (it is created with a kick trigger other than 0). Build again puts
+// the wall back the same way, under ids that carry the round.
+
+@jsonable
+class AppState {
+  shots: number;
+  round: number;
+  knocked: number;
+}
+
+function init(): AppState {
+  return {shots: 0, round: 0, knocked: 0};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(1.6, 1.0, 2.2, 0, 0.4, 0, true));
+  things.push(scene.floor("surface"));
+  let side: number = 0.1;
+  let tag: string = "r" + ui.numberToString(state.round) + "-";
+  let row: number = 0;
+  while (row < 10) {
+    let col: number = 0;
+    while (col < 10) {
+      let id: string = tag + ui.numberToString(row) + "-" + ui.numberToString(col);
+      let color: string = "#60a5fa";
+      if ((row + col) % 2 === 1) {
+        color = "#f59e0b";
+      }
+      let cube: scene.Thing = scene.box(id, (col - 4.5) * side, side / 2 + row * side, 0, side * 0.98, side * 0.98, side * 0.98, color);
+      things.push(scene.loose(cube, 0.2));
+      col = col + 1;
+    }
+    row = row + 1;
+  }
+  let ball: scene.Thing = scene.sphere("ball" + ui.numberToString(state.shots), 0, 0.1, 2, 0.1, "danger");
+  things.push(scene.kick(scene.loose(ball, 3), state.shots, 0, 2.2, -8, 0));
+  return things;
+}
+
+function onShoot(state: AppState, value: number): AppState {
+  return {shots: state.shots + 1, round: state.round, knocked: state.knocked};
+}
+
+function onRebuild(state: AppState, value: number): AppState {
+  return {shots: state.shots, round: state.round + 1, knocked: 0};
+}
+
+// A hit gathers every body knocked since the last one (at most four a second): count them all.
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "hit") {
+    return {shots: state.shots, round: state.round, knocked: state.knocked + e.bodies.length()};
+  }
+  return state;
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("technical", "", [
+    ui.Column("default", [
+      ui.Header("default", "Cubes", "", "", ""),
+      ui.World("default", 0, "build", "onWorld"),
+      ui.Text("body", "Knocks: " + ui.numberToString(state.knocked)),
+      ui.Row("default", [
+        ui.Button("primary", "Throw the ball", "onShoot", 0, true),
+        ui.Button("secondary", "Build again", "onRebuild", 0, true)
+      ])
+    ])
+  ]);
+}

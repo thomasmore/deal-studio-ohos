@@ -6,6 +6,10 @@
  *
  * Asked only when the request's words could mean such an app (looksLikeSurface), so a to-do list never pays for the
  * question; the plan model then decides, and a "no" goes on to the agent as before.
+ *
+ * Solid things in 3D -- dice thrown, cubes knocked over, planets on their orbits -- take the same route on another engine:
+ * the plan model answers "engine": "world", the program is written on one ui.World from the world guide (rawfile
+ * vera-world-skill.txt), and it is played on the host's physics (VeraWorldPlay.ets) instead of with fingers on a surface.
  */
 
 import { AgentHost, checkAgent, agentCancellation } from './AgentHost'
@@ -13,7 +17,11 @@ import { repairProgram } from './AgentRepair'
 import { compileVeraSource, CompileError } from '../VeraCompiler'
 import { smokeRun } from '../VeraSmoke'
 import { playSurface } from '../VeraSurfacePlay'
+import { playWorld, TRAVEL_KINDS } from '../VeraWorldPlay'
 import { describeCatalogForPrompt } from '../VeraUiCatalog'
+import { asksFor3D } from '../Asks3D'
+
+export { asksFor3D } from '../Asks3D'
 
 /** Room for a whole game: its records, its frame, its fingers and its drawing. */
 export const SURFACE_TOKENS: number = 14000
@@ -28,7 +36,7 @@ const SURFACE_WORDS: RegExp = new RegExp('\\b(game|games|play|playable|arcade|sh
   'planet\\w*|galaxy|starfield|joystick|dodge|catch|falling|neon|spaceship|ship|missile\\w*|zombie\\w*|enemy|enemies|' +
   'level|levels|score|arena|battle|fight\\w*|racket|paddle|tetris|puzzle|screensaver|kaleidoscope|spirograph|pendulum|' +
   'gravity|swarm|boids|life|roulette|casino|wheel|spin\\w*|dice|die|coin|lottery|slots?|plinko|marbles?|pendulum|' +
-  'signature|sign)\\b', 'i')
+  'signature|sign|3d|cubes?|solar|stack\\w*|domino\\w*|knock\\w*|toppl\\w*|tumbl\\w*)\\b', 'i')
 
 /**
  * The same, for requests written in Chinese, which people type although the Generate screen asks for English: the
@@ -36,7 +44,7 @@ const SURFACE_WORDS: RegExp = new RegExp('\\b(game|games|play|playable|arcade|sh
  */
 const SURFACE_WORDS_ZH: RegExp = new RegExp('游戏|小游戏|坦克|打砖块|弹球|贪吃蛇|射击|飞机大战|赛车|跑酷|俄罗斯方块|消除|闯关|关卡|' +
   '画板|画画|涂鸦|绘画|动画|模拟|物理|粒子|烟花|弹跳|重力|躲避|接住|掉落|霓虹|红白机|街机|太空|外星|僵尸|敌人|对战|大战|球|' +
-  '轮盘|转盘|骰子|抽奖|赌场|老虎机|签名|单摆')
+  '轮盘|转盘|骰子|抽奖|赌场|老虎机|签名|单摆|立方体|太阳系|行星|三维|3D')
 
 export function looksLikeSurface(prompt: string): boolean {
   return SURFACE_WORDS.test(prompt) || SURFACE_WORDS_ZH.test(prompt)
@@ -48,28 +56,60 @@ export function setSurfaceRouteEnabled(on: boolean): void { surfaceRoute = on }
 export function surfaceRouteEnabled(): boolean { return surfaceRoute }
 
 export const SURFACE_CLASSIFY_PROMPT: string = [
-  'You decide how an app request on a phone is built, and if it is a game or something like one, you design it.',
-  'Answer with one JSON object: {"surface": "whole" | "part" | "none", "title": "...", "design": "...", "scene": "..."}.',
+  'You decide how an app request on a phone is built, and if the whole screen is drawn, you design it.',
+  'Answer with one JSON object: {"surface": "whole" | "part" | "none", "engine": "flat" | "world", ' +
+    '"travel": "none" | "self" | "steered" | "both", "title": "...", "design": "...", "scene": "..."}.',
   '',
   'surface is "whole" when the heart of the request is something that moves continuously or is touched anywhere on a',
-  'drawing, and the whole screen is that: a real-time game (arcade, action, shooter, racing, a ball and a paddle, falling',
-  'things, a tank battle, a snake), a physics or particle toy, a simulation, an animated scene, a drawing or painting pad.',
+  'drawing, and the whole screen is that: a real-time game, a physics or particle toy, a model or simulation to watch, an',
+  'animated scene, a drawing or painting pad.',
   'surface is "part" when the request is a screen of ordinary controls -- forms, choices, amounts, lists, results -- with',
-  'one drawn picture among them that moves or is touched: a roulette or prize wheel that spins beside the bets and the',
-  'bank, dice that tumble above a score sheet, a signature area on a delivery form, a pendulum whose length a slider sets.',
+  'one drawn picture among them that moves or is touched, which the controls set going or read from.',
   'surface is "none" for everything built from controls and text alone: trackers, lists, timers, calculators, forms,',
-  'quizzes, flashcards, charts of figures, and turn-based games played by tapping buttons or cells (tic-tac-toe, hangman,',
-  'memory), and dice, coins or cards that only show a result.',
-  '"part" needs the request itself to ask for the picture: an animation, a wheel or ball that moves, something drawn or',
-  'signed with a finger. A request that only names a thing that could be animated (a coin flip, a dice roll, a timer) is',
-  '"none", however well an animation would suit it.',
+  'quizzes, charts of figures, turn-based games played by tapping buttons or cells, and anything that only shows a result.',
+  '"part" needs the request itself to ask for the picture: something that moves, something drawn or signed with a finger.',
+  'A request that only names a thing that could be animated is "none", however well an animation would suit it.',
+  'Something asked for in 3D is "whole".',
   '',
-  'When surface is "whole", title is a short name of your own for the app, and design is a short original game design in',
-  'plain sentences, at most 12 lines: the goal; what the player controls and exactly how on a touch screen (drag, tap,',
-  'a stick on the left half and fire on the right half); the objects and how each moves and behaves; collisions and what',
-  'they do; score, lives, levels and how the game gets harder; how a round starts and ends; the look, with 4 to 6 hex',
-  'colours; portrait (360 by 640) unless landscape clearly suits it better. A named game means its genre and mechanics:',
-  'describe your own take, never its levels, characters, names or artwork.',
+  'engine says how a "whole" app is made: "world" only when the request asks for 3D in its own words -- the phone has',
+  'real 3D with light, shadows and physics, so the program only describes the bodies and the physics throws, rolls and',
+  'stacks them; "flat" for everything else, drawn in 2D on a surface, whatever it shows. For "part" and "none", engine is',
+  '"flat". The request line says which.',
+  '',
+  'travel, for engine "world", says what goes from place to place over the ground: "self" when something in the request',
+  'walks, runs, drives, rolls along or roams by itself (an animal moving in a field, traffic, a herd); "steered" when the',
+  'person moves something themselves (they ride it, drive it, steer it, control it, or it is the one they play); "both"',
+  'when there are both; "none" when nothing goes anywhere (things thrown, stacked, knocked over, turning in place, or',
+  'circling a centre). A thing that moves, walks or goes somewhere, with no game or control asked for, is "self". For',
+  'engine "flat", travel is "none".',
+  '',
+  'When surface is "whole", title is a short name of your own for the app, and design is a short original design in plain',
+  'sentences, at most 12 lines. Make it what the request asks for: a game only when it asks for a game (or names one), a',
+  'model or simulation to watch when it names a thing or a system, a toy or a pad when it asks for one. For a game: the',
+  'goal; what the player controls and exactly how on a touch screen (drag, tap, a stick and a button); the objects and',
+  'how each moves; collisions and what they do; score and how it gets harder; how a round starts and ends. For anything',
+  'else: what it shows and how each part moves; what a finger does (drag, tap, nothing) and what the person can change;',
+  'what is read out. Always the look, with 4 to 6 hex colours, and portrait (360 by 640) unless landscape clearly suits',
+  'it better. A named game means its genre and mechanics: describe your own take, never its levels, characters, names',
+  'or artwork.',
+  'When engine is "world", design describes the scene instead, at most 10 lines: the table (just big enough: a bigger',
+  'one makes every body small) or floor, or none; the bodies with their sizes in metres (anything asked for flat or thin',
+  'by its outline alone, never a thickness) and their colours (sized for the',
+  'phone, not for reality: each body the person plays with a good part of the view, small real things made bigger; the scene',
+  '0.3 to 5 m across; bodies circling a centre not to scale: the widest orbit at most 4.5, the centre a tenth of it in radius, each body circling it at least a fiftieth,',
+  'for the phone screen is narrow; every body the request implies, as many as the real thing has, made smaller',
+  'rather than left out), a real body in its real colours and surface as you know them --',
+  'the design\'s own colours are for made-up worlds and the screen round them; what moves by itself (orbits, spins), and what',
+  'travels by itself and how (along a route round the scene, or roaming an area; legs, arms or a tail that swing as it',
+  'goes); what the person steers, if anything (with the stick the host draws over the world, and at most one button beside',
+  'it, named, such as a jump), the camera then following it; places on the ground to reach, pass or collect (circles the',
+  'world tells the program a body came into); what a tap, a swipe and each button do (throw, shoot, add one,',
+  'build again; with an orbiting camera a drag on empty space turns the view and a pinch zooms, both by the host); what',
+  'is behind the world (the app\'s background, or a sky of a colour with or without stars) and which orbit paths are',
+  'drawn; and what the screen shows from what the world tells: the face of a die, the hits, which bodies were knocked',
+  'from where they were built, the body tapped (it never tells where a body is or whether it left the table).',
+  'Nothing moves frame by frame in the program: physics and the host move the bodies, walk them along their routes and',
+  'steer the one the person steers.',
   'When surface is "part", scene is one or two plain sentences: what the picture shows, what moves or is touched, what',
   'sets it moving, and what it decides or changes on the screen. title and design are "".',
   'When surface is "none", title, design and scene are "".',
@@ -80,13 +120,21 @@ export const SURFACE_WHOLE: string = 'whole'
 export const SURFACE_PART: string = 'part'
 export const SURFACE_NONE: string = 'none'
 
+/** How a whole app is made: drawn flat on a ui.Surface, or solid in 3D on a ui.World. */
+export const ENGINE_FLAT: string = 'flat'
+export const ENGINE_WORLD: string = 'world'
+
 export class SurfaceBrief {
   /** SURFACE_WHOLE, SURFACE_PART or SURFACE_NONE. */
   kind: string = SURFACE_NONE
+  /** For SURFACE_WHOLE: ENGINE_FLAT or ENGINE_WORLD; always ENGINE_FLAT otherwise. */
+  engine: string = ENGINE_FLAT
   title: string = ''
   design: string = ''
   /** For SURFACE_PART: the scene, in words, for the agent's plan. */
   scene: string = ''
+  /** For ENGINE_WORLD: what goes from place to place (VeraWorldPlay TRAVEL_KINDS); the play holds the program to it. */
+  travel: string = 'none'
 }
 
 /** The plan model's answer, or null when it is not one. A bare true or false is read as whole or none. */
@@ -102,7 +150,14 @@ export function parseSurfaceBrief(text: string): SurfaceBrief | null {
     brief.title = typeof raw['title'] === 'string' ? (raw['title'] as string).trim() : ''
     brief.design = typeof raw['design'] === 'string' ? (raw['design'] as string).trim() : ''
     brief.scene = typeof raw['scene'] === 'string' ? (raw['scene'] as string).trim() : ''
-    if (brief.kind === SURFACE_WHOLE && brief.design.length === 0) { return null }
+    let engine = raw['engine']
+    brief.engine = brief.kind === SURFACE_WHOLE && typeof engine === 'string' && (engine as string).trim().toLowerCase() === ENGINE_WORLD ?
+      ENGINE_WORLD : ENGINE_FLAT
+    let travel = typeof raw['travel'] === 'string' ? (raw['travel'] as string).trim().toLowerCase() : 'none'
+    brief.travel = brief.engine === ENGINE_WORLD && TRAVEL_KINDS.indexOf(travel) >= 0 ? travel : 'none'
+    // A game needs its design; a 3D world can be written from the request and the world guide alone (the plan model
+    // has answered "world" with an empty design, and refusing it sent a solar system to the 2D composer).
+    if (brief.kind === SURFACE_WHOLE && brief.design.length === 0 && brief.engine !== ENGINE_WORLD) { return null }
     if (brief.kind === SURFACE_PART && brief.scene.length === 0) { return null }
     return brief
   } catch (e) {
@@ -113,6 +168,9 @@ export function parseSurfaceBrief(text: string): SurfaceBrief | null {
 /** The components a full-canvas program is shown: the surface, the frame around it, and a few controls for outside it. */
 const SURFACE_COMPONENTS: string[] = ['AppTheme', 'Surface', 'Column', 'Row', 'Text', 'Header', 'Button', 'ActionBar']
 
+/** The components a 3D program is shown: the world, the frame around it, and the few controls and texts beside it. */
+export const WORLD_COMPONENTS: string[] = ['AppTheme', 'World', 'Column', 'Row', 'Text', 'Header', 'Button', 'ActionBar']
+
 /**
  * The language for writing a full-canvas program: the generation prompt with its catalogue replaced by the surface's
  * components and std/gfx, and its advice on composing screens of sections replaced by the surface guide and example.
@@ -120,6 +178,11 @@ const SURFACE_COMPONENTS: string[] = ['AppTheme', 'Surface', 'Column', 'Row', 'T
  */
 export function surfaceLanguage(language: string, guide: string): string {
   return languageWith(language, SURFACE_COMPONENTS, guide)
+}
+
+/** The language for writing a 3D program: the World's components and std/scene, with the world guide and its example. */
+export function worldLanguage(language: string, guide: string): string {
+  return languageWith(language, WORLD_COMPONENTS, guide)
 }
 
 /**
@@ -157,6 +220,21 @@ export function checkSurfaceProgram(source: string): string {
   }
 }
 
+/**
+ * '' when a 3D program compiles, runs once with every handler tapped, and its world plays (VeraWorldPlay.ets); else what
+ * is wrong. travel is what the design says goes from place to place: the play holds the program to it.
+ */
+export function checkWorldProgram(source: string, travel: string = 'none'): string {
+  try {
+    let compiled = compileVeraSource(source)
+    let smoke = smokeRun(compiled)
+    if (smoke.length > 0) { return smoke }
+    return playWorld(compiled, true, null, travel)
+  } catch (e) {
+    return e instanceof CompileError ? (e as CompileError).message : (e as Error).message
+  }
+}
+
 export class SurfaceResult {
   /** The program served; '' when none passed. */
   source: string = ''
@@ -185,10 +263,16 @@ export async function briefSurface(prompt: string, host: AgentHost): Promise<Sur
   if (!surfaceRoute || host.surfaceGuide.length === 0 || host.askCode === null || !looksLikeSurface(prompt)) { return null }
   host.status('Is this a game?')
   checkAgent(host)
-  let reply = await host.askPlan(SURFACE_CLASSIFY_PROMPT, 'Request: ' + prompt, (_soFar: string): void => {}, false)
+  let threeD = asksFor3D(prompt) && host.worldGuide.length > 0
+  let ask = 'Request: ' + prompt + '\n' + (threeD ? 'It asks for 3D: when surface is "whole", engine is "world".' :
+    'It does not ask for 3D: engine is "flat".')
+  let reply = await host.askPlan(SURFACE_CLASSIFY_PROMPT, ask, (_soFar: string): void => {}, false)
   checkAgent(host)
   if (reply === null) { return null }
-  return parseSurfaceBrief(reply)
+  let brief = parseSurfaceBrief(reply)
+  // 3D only when asked for in so many words, and only with the world guide there to write it.
+  if (brief !== null && brief.engine === ENGINE_WORLD && !threeD) { brief.engine = ENGINE_FLAT }
+  return brief
 }
 
 /**
@@ -199,9 +283,16 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
   checkAgent(host)
   let out = new SurfaceResult()
   out.brief = brief
-  let system = surfaceLanguage(host.language, host.surfaceGuide)
-  let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + brief.design +
-    '\n\nWrite the complete program for it on one ui.Surface. Output the source only.'
+  let world = brief.engine === ENGINE_WORLD
+  let system = world ? worldLanguage(host.language, host.worldGuide) : surfaceLanguage(host.language, host.surfaceGuide)
+  let travel = brief.travel
+  let check: (source: string) => string = world ? (source: string): string => checkWorldProgram(source, travel) : checkSurfaceProgram
+  let design = brief.design.length > 0 ? brief.design : 'None given: design the scene yourself from the request.'
+  let moves = !world || travel === 'none' ? '' : travel === 'self' ? '\nSomething in it travels by itself (scene.path or scene.wander).' :
+    travel === 'steered' ? '\nThe person steers something in it (scene.player).' :
+    '\nSomething in it travels by itself (scene.path or scene.wander), and the person steers something (scene.player).'
+  let user = 'Request: ' + prompt + '\n\nDesign (' + brief.title + '):\n' + design + moves +
+    '\n\nWrite the complete program for it on one ' + (world ? 'ui.World' : 'ui.Surface') + '. Output the source only.'
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
     checkAgent(host)
     let think = attempt > 0
@@ -215,12 +306,12 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
     if (reply === null || reply.trim().length === 0) { out.failed = 'no program came back'; continue }
     let source = sourceIn(reply)
     let checkStart = Date.now()
-    let problem = checkSurfaceProgram(source)
+    let problem = check(source)
     out.checkMs += Date.now() - checkStart
     if (problem.length > 0 && !host.cancelled()) {
       host.status('Playing it and fixing what broke...')
       checkAgent(host)
-      let repaired = await repairProgram(source, problem, prompt, system, host.askCode!, checkSurfaceProgram, agentCancellation(host))
+      let repaired = await repairProgram(source, problem, prompt, system, host.askCode!, check, agentCancellation(host))
       checkAgent(host)
       out.rounds += repaired.rounds
       if (repaired.source.length > 0) {
@@ -236,7 +327,7 @@ export async function writeSurfaceApp(prompt: string, brief: SurfaceBrief, host:
     out.vbc2 = compileVeraSource(source).vbc2
     out.failed = ''
   }
-  out.note = 'surface "' + brief.title + '": ' + (out.source.length > 0 ? 'written' : 'not built (' + out.failed + ')') +
+  out.note = (world ? 'world "' : 'surface "') + brief.title + '": ' + (out.source.length > 0 ? 'written' : 'not built (' + out.failed + ')') +
     ' in ' + out.attempts.toString() + ' attempt(s), ' + out.rounds.toString() + ' repair round(s)'
   return out
 }

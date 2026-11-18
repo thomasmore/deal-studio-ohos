@@ -6,13 +6,15 @@
  *
  * What it reports goes back to the model as a repair, in the smoke run's form ("line:col CODE message"), so only what is
  * wrong whatever the person does counts: a trap in a frame, a draw or a finger; a surface that draws nothing; and a scene
- * that does not change at all although it has a frame handler and was touched.
+ * that does not change at all although it has a frame handler and was touched; and a game too slow for the phone, by the
+ * VM steps and shapes of each frame (VeraBudget.ets).
  */
 
 import { VirtualMachine, deserializeVbc2, RuntimeValue, RuntimeTrap, VeraNumberValue } from './VeraInterpreter'
 import { UiHostEnvironment, decodeVeraUi, VeraUiNode } from './VeraUi'
 import { CompileResult } from './VeraCompiler'
 import { decodeGfx, pointerValue, GfxOp } from './VeraGfx'
+import { FrameCosts, functionLine, surfaceBudgetProblem } from './VeraBudget'
 
 /** Frames played: four seconds at 60 a second, enough for a spawn timer, a first collision and a ball to reach an edge. */
 export const PLAY_FRAMES: number = 240
@@ -98,11 +100,14 @@ function diagnostic(e: Error, when: string): string {
  * '' when the program's surface plays, else what is wrong, for the repair prompt. `requireSurface`: a program with no
  * ui.Surface is itself the problem (the game route asked for one). `pressButtons`: the surface is one part of a screen, and
  * what sets it moving may be a button beside it (Spin, Roll, Start) rather than a finger on it -- when the fingers moved
- * nothing, each button on the screen is pressed in turn and the frames played again.
+ * nothing, each button on the screen is pressed in turn and the frames played again. `costsOut` collects what each
+ * scripted frame cost (for the host checks).
  */
-export function playSurface(compiled: CompileResult, requireSurface: boolean = true, pressButtons: boolean = false): string {
+export function playSurface(compiled: CompileResult, requireSurface: boolean = true, pressButtons: boolean = false,
+    costsOut: FrameCosts | null = null): string {
   let host = new UiHostEnvironment()
-  let vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), host)
+  let module = deserializeVbc2(compiled.vbc2)
+  let vm = new VirtualMachine(module, host)
   let state: RuntimeValue
   let surface: VeraUiNode | null = null
   try {
@@ -134,6 +139,8 @@ export function playSurface(compiled: CompileResult, requireSurface: boolean = t
     }
   }
   let touches = script()
+  // What each scripted frame ran (frame handler and draw) and drew, for the phone's frame time.
+  let costs = costsOut !== null ? costsOut : new FrameCosts()
   let first = ''
   let changed = false
   let frame = 0
@@ -148,12 +155,16 @@ export function playSurface(compiled: CompileResult, requireSurface: boolean = t
         where = 'in ' + s.value + ' (a finger ' + t.phase + ' at frame ' + frame.toString() + ')'
         state = handle(s.value, pointerValue(t.phase, t.id, t.x * w, t.y * h))
       }
+      let steps = 0
       if (s.action.length > 0) {
         where = 'in ' + s.action + ' at frame ' + frame.toString()
         state = handle(s.action, new VeraNumberValue(PLAY_STEP_MS))
+        steps += vm.stepsExecuted()
       }
       where = 'in ' + s.label + ' at frame ' + frame.toString()
       let drawn = decodeGfx(vm.execute(s.label, [state]))
+      steps += vm.stepsExecuted()
+      costs.add(steps, count(drawn))
       if (!changed && fingerprint(drawn) !== first) { changed = true }
     }
     if (pressButtons && s.action.length > 0 && !changed) {
@@ -188,5 +199,5 @@ export function playSurface(compiled: CompileResult, requireSurface: boolean = t
       ' seconds of frames after a tap in the middle and drags across it: a tap anywhere on the surface must start the game, ' +
       'and ' + s.action + ' must move things by elapsedMs'
   }
-  return ''
+  return surfaceBudgetProblem(costs, functionLine(module, s.label))
 }

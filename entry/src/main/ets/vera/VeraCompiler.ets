@@ -4,6 +4,7 @@ import { iconPath, iconNames } from './VeraIcons'
 import { isValidSdkTarget } from './VeraSdkIndex'
 import { GFX_FUNCTIONS, GFX_POINTER_FIELDS, GFX_ROLES, GFX_BLEND_MODES, DRIFT_DIRECTIONS, DRIFT_SPEEDS, isGfxColor, gfxFunction } from './VeraGfx'
 import { MOTION_PRESETS } from './VeraMotion'
+import { SCENE_FUNCTIONS, SCENE_EVENT_FIELDS, SCENE_THING, SCENE_EVENT, sceneFunction } from './VeraScene'
 
 // ===== AST Nodes =====
 
@@ -1424,11 +1425,57 @@ function buildStdGfxModule(): ModuleInterface {
   return new ModuleInterface('std/gfx', fns, [new ExternalClass('Shape', shapeType), new ExternalClass('Pointer', pointerType)])
 }
 
+/** A field type as VeraGfx/VeraScene's tables spell it. */
+function tableFieldType(kind: string): VeraType {
+  if (kind === 'number') return NUMBER
+  if (kind === 'boolean') return BOOLEAN
+  if (kind === 'string[]') return new VeraArrayType(STRING)
+  if (kind === 'number[]') return new VeraArrayType(NUMBER)
+  return STRING
+}
+
+/**
+ * What a ui.World shows: things in metres that the host moves, and the event its handler is handed. Generated from
+ * VeraScene's table, as std/gfx is from VeraGfx's.
+ */
+function buildStdSceneModule(): ModuleInterface {
+  let thingType = new VeraClassType(SCENE_THING, 'Thing')
+  let eventType = new VeraClassType(SCENE_EVENT, 'Event')
+  for (let pair of SCENE_EVENT_FIELDS) { eventType.fields.set(pair[0], tableFieldType(pair[1])) }
+  let fns: ExternalFunction[] = []
+  for (let f of SCENE_FUNCTIONS) {
+    let params: VeraType[] = []
+    let required = 0
+    for (let p of f.params) {
+      params.push(p.kind === 'thing' ? thingType : p.kind === 'thing[]' ? new VeraArrayType(thingType) : tableFieldType(p.kind))
+      if (!p.optional) required = params.length
+    }
+    fns.push(new ExternalFunction(f.name, params, thingType, false, required))
+  }
+  return new ModuleInterface('std/scene', fns, [new ExternalClass('Thing', thingType), new ExternalClass('Event', eventType)])
+}
+
+/**
+ * The functions a component names by string and the host calls later, by node kind and prop: each is only a string in
+ * the tree until the renderer calls it, so a wrong signature is caught here rather than as a trap on the first frame.
+ */
+class HandlerRole {
+  prop: string
+  /** '' allowed (no function). */
+  optional: boolean
+  constructor(prop: string, optional: boolean) { this.prop = prop; this.optional = optional }
+}
+
+const HANDLER_ROLES: Map<string, HandlerRole[]> = new Map<string, HandlerRole[]>([
+  ['surface', [new HandlerRole('draw', false), new HandlerRole('frame', true), new HandlerRole('pointer', true)]],
+  ['world', [new HandlerRole('build', false), new HandlerRole('event', true)]],
+])
+
 /** String methods a program may call on a string value; each is the std/strings function of that name. */
 const STRING_METHODS: string[] = ['toUpperCase', 'toLowerCase']
 
 /** std modules a program may use without importing them, each under its own name. */
-const PRELUDE_NAMES: string[] = ['ui', 'math', 'time', 'strings', 'sdk', 'gfx']
+const PRELUDE_NAMES: string[] = ['ui', 'math', 'time', 'strings', 'sdk', 'gfx', 'scene']
 
 class Scope {
   values: Map<string, VeraType> = new Map<string, VeraType>()
@@ -1558,6 +1605,7 @@ class Analyzer {
     registry.set('std/strings', buildStdStringsModule())
     registry.set('std/sdk', buildStdSdkModule())
     registry.set('std/gfx', buildStdGfxModule())
+    registry.set('std/scene', buildStdSceneModule())
     for (let decl of this.model.application.imports) {
       if (this.globals.find(decl.name) !== null) { this.addError('E2001', 'duplicate global ' + decl.name, decl.span); continue }
       let found = registry.get(decl.specifier)
@@ -1917,6 +1965,9 @@ class Analyzer {
         return new VeraFunctionType([], element, false, 'intrinsic:pop')
       }
     }
+    let ownField = target instanceof VeraClassType && target.fields.has(expr.field)
+    let shadowed = ownField ? '' : this.shadowedPrelude(expr)
+    if (shadowed.length > 0) { this.addError('E2116', shadowed, expr.span); return VOID }
     if (target instanceof VeraClassType) {
       let f = target.fields.get(expr.field)
       if (f === undefined) this.addError('E2031', 'class ' + target.name + ' has no field ' + expr.field, expr.span)
@@ -1925,6 +1976,26 @@ class Analyzer {
     if (target instanceof NullableType) this.addError('E2032', 'nullable value must be narrowed before field access', expr.span)
     else this.addError('E2033', 'field selection requires class, array, string, or namespace', expr.span)
     return VOID
+  }
+
+  /**
+   * '' unless `expr` is `name.member` where name is a prelude module's (scene, gfx, ...) that the program took for a
+   * function or variable of its own, and member is one of that module's: the prelude binds a name only while it is free
+   * (preludeNamespace), so `function scene()` beside scene.box(...) would otherwise read as "field selection requires
+   * class" -- true, and no help.
+   */
+  private shadowedPrelude(expr: SelectExpression): string {
+    if (!(expr.target instanceof NameExpression)) return ''
+    let name = (expr.target as NameExpression).name
+    if (PRELUDE_NAMES.indexOf(name) < 0) return ''
+    let resolved = this.stdModules.get('std/' + name)
+    if (resolved === undefined) return ''
+    let member = expr.field
+    let known = resolved.functions.some((f: ExternalFunction): boolean => f.name === member) ||
+      resolved.classes.some((c: ExternalClass): boolean => c.name === member)
+    if (!known) return ''
+    return 'the program has its own function or variable named "' + name + '", so ' + name + '.' + member +
+      ' is not std/' + name + '; rename yours (for example ' + name + 'Things or my' + name.charAt(0).toUpperCase() + name.substring(1) + ')'
   }
 
   private checkCall(expr: CallExpression, scope: Scope, awaited: boolean): VeraType {
@@ -1947,6 +2018,7 @@ class Analyzer {
     this.checkComposition(expr, callee)
     this.checkSdkArguments(expr, callee)
     this.checkGfxArguments(expr, callee)
+    this.checkSceneArguments(expr, callee)
     return callee.result
   }
 
@@ -2060,7 +2132,7 @@ class Analyzer {
       if (spec.name !== name) continue
       this.checkIconArguments(expr, spec)
       this.checkHandlerSignature(expr, spec)
-      if (spec.nodeKind === 'surface') this.checkSurfaceFunctions(expr, spec)
+      if (HANDLER_ROLES.has(spec.nodeKind)) this.checkNamedFunctions(expr, spec)
       return
     }
   }
@@ -2129,19 +2201,45 @@ class Analyzer {
   }
 
   /**
-   * A ui.Surface names three functions: what it draws, what happens each frame, and what a finger does. Each is
-   * only a string in the tree until the renderer calls it sixty times a second, so a wrong signature is caught
-   * here rather than as a trap on the first frame. "" means none, except for draw: a surface draws something.
+   * Literal colours of std/scene calls, as checkGfxArguments holds std/gfx's: a colour the scene does not know is
+   * drawn grey, which on a table of grey is a body that vanished.
    */
-  private checkSurfaceFunctions(expr: CallExpression, spec: ComponentSpec): void {
+  private checkSceneArguments(expr: CallExpression, callee: VeraFunctionType): void {
+    const prefix = 'external:std/scene:'
+    if (!callee.identity.startsWith(prefix)) return
+    let f = sceneFunction(callee.identity.substring(prefix.length))
+    if (f === null) return
+    for (let i = 0; i < f.params.length && i < expr.argumentsList.length; i++) {
+      let arg = expr.argumentsList[i]
+      if (!(arg instanceof StringExpression)) continue
+      let value = (arg as StringExpression).value
+      if (f.params[i].kind === 'color' && !isGfxColor(value)) {
+        this.addError('E2112', 'unknown colour "' + value + '"; a colour is one of ' + GFX_ROLES.join(' ') +
+          ', or "#rrggbb" / "#rrggbbaa", or gfx.rgb(red, green, blue)', arg.span)
+      } else if (f.params[i].name === 'id' && value.length === 0) {
+        this.addError('E2112', 'scene.' + f.name + ' needs an id: a name no other body in the world has', arg.span)
+      }
+    }
+  }
+
+  /**
+   * The functions a component names (HANDLER_ROLES): a ui.Surface's draw, frame and pointer, a ui.World's build and
+   * event. "" means none, except for the one that makes the picture: a surface draws something, a world builds something.
+   */
+  private checkNamedFunctions(expr: CallExpression, spec: ComponentSpec): void {
+    let roles = HANDLER_ROLES.get(spec.nodeKind)
+    if (roles === undefined) return
     for (let i = 0; i < spec.props.length && i < expr.argumentsList.length; i++) {
-      let role = spec.props[i].name
-      if (role !== 'draw' && role !== 'frame' && role !== 'pointer') continue
+      let role: HandlerRole | null = null
+      for (let r of roles) { if (r.prop === spec.props[i].name) role = r }
+      if (role === null) continue
       let arg = expr.argumentsList[i]
       if (!(arg instanceof StringExpression)) continue
       let name = (arg as StringExpression).value
       if (name.length === 0) {
-        if (role === 'draw') this.addError('E2106', 'a ui.Surface needs a draw function: function draw(state: AppState): gfx.Shape[]', arg.span)
+        if (!role.optional) this.addError('E2106', spec.nodeKind === 'world'
+          ? 'a ui.World needs a build function: function build(state: AppState): scene.Thing[]'
+          : 'a ui.Surface needs a draw function: function draw(state: AppState): gfx.Shape[]', arg.span)
         continue
       }
       let fn = this.model.functions.get(name)
@@ -2149,26 +2247,9 @@ class Analyzer {
         if (!this.options.allowMissingHandlers) { this.addError('E2106', 'no function named "' + name + '"', arg.span) }
         continue
       }
-      if (role === 'draw') {
-        let result = fn.result
-        let ok = fn.parameters.length === 1 && result instanceof VeraArrayType &&
-          (result as VeraArrayType).element instanceof VeraClassType &&
-          ((result as VeraArrayType).element as VeraClassType).identity === 'std/gfx:Shape'
-        if (!ok) {
-          this.addError('E2106', 'ui.Surface draws what "' + name + '" returns, so it must be function ' + name +
-            '(state: AppState): gfx.Shape[]', arg.span)
-        }
-      } else if (role === 'frame') {
-        if (fn.parameters.length !== 2 || !identical(fn.parameters[1], NUMBER)) {
-          this.addError('E2106', 'ui.Surface hands "' + name + '" the milliseconds since the last frame, so it must take (state, elapsedMs: number)', arg.span)
-        }
-      } else {
-        let p = fn.parameters.length === 2 ? fn.parameters[1] : null
-        let ok = p !== null && p instanceof VeraClassType && (p as VeraClassType).identity === 'std/gfx:Pointer'
-        if (!ok) {
-          this.addError('E2106', 'ui.Surface hands "' + name + '" a finger, so it must take (state, p: gfx.Pointer)', arg.span)
-        }
-      }
+      let init = this.model.functions.get('init')
+      let message = namedFunctionError(role.prop, name, fn, init !== undefined ? init.result : null)
+      if (message.length > 0) this.addError('E2106', message, arg.span)
     }
   }
 
@@ -2376,7 +2457,15 @@ class Analyzer {
         value = null
       }
     }
-    if (!(value instanceof VeraClassType)) { this.addError('E2038', 'unknown class type ' + name, node.span); return VOID }
+    if (!(value instanceof VeraClassType)) {
+      let head = this.globals.find(pieces[0])
+      if (pieces.length === 2 && head !== null && !(head instanceof NamespaceType) && PRELUDE_NAMES.indexOf(pieces[0]) >= 0) {
+        this.addError('E2116', 'the program has its own function or variable named "' + pieces[0] + '", so ' + name +
+          ' is not std/' + pieces[0] + '\'s; rename yours', node.span)
+        return VOID
+      }
+      this.addError('E2038', 'unknown class type ' + name, node.span); return VOID
+    }
     return value
   }
 
@@ -2955,12 +3044,49 @@ export class CompileResult {
   vbc2: string
   /**
    * Every handler a tap, a ticker or an answer can reach -- (state, value) to state -- with the kind of value
-   * it takes: number, string or boolean, or pointer for a ui.Surface's finger handler. For running a new program once before it is served.
+   * it takes: number, string or boolean, pointer for a ui.Surface's finger handler, or sceneEvent for a ui.World's event handler. For running a new program once before it is served.
    */
   handlers: Map<string, string> = new Map<string, string>()
   /** Fields of the app's state that no code reads (unreadStateFields): a setter writes them, nothing shows or uses what it wrote. */
   unreadFields: string[] = []
   constructor(vbc2: string) { this.vbc2 = vbc2 }
+}
+
+function returnsArrayOf(fn: VeraFunctionType, identity: string): boolean {
+  let result = fn.result
+  return result instanceof VeraArrayType && (result as VeraArrayType).element instanceof VeraClassType &&
+    ((result as VeraArrayType).element as VeraClassType).identity === identity
+}
+
+function takesClass(fn: VeraFunctionType, identity: string): boolean {
+  let p = fn.parameters.length === 2 ? fn.parameters[1] : null
+  return p !== null && p instanceof VeraClassType && (p as VeraClassType).identity === identity
+}
+
+/** '' when `fn` fits the role a component names it in (HANDLER_ROLES), else what it must be instead. */
+function namedFunctionError(role: string, name: string, fn: VeraFunctionType, state: VeraType | null): string {
+  if (role === 'draw') {
+    return fn.parameters.length === 1 && returnsArrayOf(fn, 'std/gfx:Shape') ? ''
+      : 'ui.Surface draws what "' + name + '" returns, so it must be function ' + name + '(state: AppState): gfx.Shape[]'
+  }
+  if (role === 'frame') {
+    return fn.parameters.length === 2 && identical(fn.parameters[1], NUMBER) ? ''
+      : 'ui.Surface hands "' + name + '" the milliseconds since the last frame, so it must take (state, elapsedMs: number)'
+  }
+  if (role === 'pointer') {
+    return takesClass(fn, 'std/gfx:Pointer') ? '' : 'ui.Surface hands "' + name + '" a finger, so it must take (state, p: gfx.Pointer)'
+  }
+  if (role === 'build') {
+    return fn.parameters.length === 1 && !fn.isAsync && returnsArrayOf(fn, SCENE_THING) ? ''
+      : 'ui.World shows what "' + name + '" returns, so it must be function ' + name + '(state: AppState): scene.Thing[]'
+  }
+  if (role === 'event') {
+    let fits = state === null || (identical(fn.parameters[0], state) && identical(fn.result, state))
+    return takesClass(fn, SCENE_EVENT) && !fn.isAsync && fits ? ''
+      : 'ui.World hands "' + name + '" what happened in the world, so it must be function ' + name +
+        '(state: AppState, e: scene.Event): AppState'
+  }
+  return ''
 }
 
 function handlersOf(model: SemanticModel): Map<string, string> {
@@ -2973,6 +3099,7 @@ function handlersOf(model: SemanticModel): Map<string, string> {
     let value = fn.parameters[1]
     if (value === NUMBER || value === STRING || value === BOOLEAN) { handlers.set(name, (value as PrimitiveType).name) }
     else if (value instanceof VeraClassType && (value as VeraClassType).identity === 'std/gfx:Pointer') { handlers.set(name, 'pointer') }
+    else if (value instanceof VeraClassType && (value as VeraClassType).identity === SCENE_EVENT) { handlers.set(name, 'sceneEvent') }
   })
   return handlers
 }

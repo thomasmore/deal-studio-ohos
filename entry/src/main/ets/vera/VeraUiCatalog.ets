@@ -13,6 +13,7 @@
 
 import { iconNames } from './VeraIcons'
 import { describeGfxForPrompt } from './VeraGfx'
+import { describeSceneForPrompt, MAX_WORLD_BODIES } from './VeraScene'
 import { MOTION_PRESETS } from './VeraMotion'
 import { CARD_MAX_PICTURES, CARD_MAX_SHAPES } from '../widget/CardModel'
 
@@ -147,11 +148,11 @@ export const STYLE_SETS: Map<string, string[]> = new Map<string, string[]>([
   // The preset is the style, so the compiler validates it and the prompt lists it. See VeraMotion.ets.
   ['motion', MOTION_PRESETS],
   ['layers', ['default']],
-  // transform: solid hides a layer while its back is to the viewer (the far faces of a cube); stage has no variants.
-  ['transform', ['default', 'solid']],
-  ['stage', ['default', 'floor']],
+  ['transform', ['default']],
   // surface: default is as wide as its column and as tall as its proportions; fill also runs to the bottom of the screen.
   ['surface', ['default', 'fill', 'clear', 'cover']],
+  // world: default is a box `height` tall (0 = square); fill runs to the bottom of the screen.
+  ['world', ['default', 'fill', 'full']],
   ['snackbar', ['default', 'success', 'warning', 'danger']],
   ['sparkline', ['default', 'accent', 'success', 'warning', 'danger']],
 ])
@@ -242,7 +243,7 @@ export const CATALOG: ComponentSpec[] = [
     [style('motion'), new PropSpec('trigger', 'number'), new PropSpec('children', 'view[]')],
     'plays a movement on its children each time the trigger number changes (27 presets, picked by what the movement means: pop, pulse, jelly, press, shake, hop, jump, spin, swing, fall, fade, launch, roll, ...); a wrong-answer shake, a counter that pops, a new row that bounces, a wheel that spins',
     '',
-    'Wrap the one thing that should animate: a rolled die, a flashcard, a result, a new row. Never wrap a board, grid, list, form or whole screen, and do not bump the trigger on every tap or move: a game board that pops on each move makes every square jump under the player\'s finger. Animate only what the person should notice -- a win message, a wrong answer, the die that was just thrown -- and keep the Motion around that one item, not around the controls they are pressing. The style is the movement; choose it by what the thing does, not by what it looks like. Emphasis (it stays where it is): pop swells once, pulse beats twice, jelly squashes and wobbles, press dips like a pushed button, flash blinks, breathe swells slowly. Reaction (a hit, a refusal, a wag): shake goes sideways, nod goes up and down, wobble rocks on its base, swing hangs from its top edge like a pendulum and slows, recoil is a sharp kick. Gravity (it leaves the ground): bounce drops in and settles, hop jumps once, jump crouches, leaps and lands squashed, fall drops in from above. Turning: spin turns two whole times and slows (a wheel, a dial), turn is one quick whole turn, tumble spins and hops and lands (a thrown die or coin), flip turns new content into view. Arrival (the content comes in): fade, rise from below, zoom from small, slide from the side. Ambient (a slow drift): float rises and sinks, drift sways sideways. The children are drawn normally; when the trigger changes they arrive with the animation, so change the content and the trigger in the same handler: keep a number in state, add 1 to it each time, and pass it as trigger. The first time the screen is drawn nothing animates, and a change of content without a new trigger does not animate either. A die is not a Motion: build the solid with ui.Stage and ui.Transform. Do not nest one Motion in another. On a home-screen card every preset plays once per change, in about a second, never in a loop, and several Motions can play at once, each around its own drawing or figure: a touch on a picture inside a Motion plays it by itself; otherwise keep a count in state, add 1 in the tap handler and pass it as trigger.', true),
+    'Wrap the one thing that should animate: a rolled die, a flashcard, a result, a new row. Never wrap a board, grid, list, form or whole screen, and do not bump the trigger on every tap or move: a game board that pops on each move makes every square jump under the player\'s finger. Animate only what the person should notice -- a win message, a wrong answer, the die that was just thrown -- and keep the Motion around that one item, not around the controls they are pressing. The style is the movement; choose it by what the thing does, not by what it looks like. Emphasis (it stays where it is): pop swells once, pulse beats twice, jelly squashes and wobbles, press dips like a pushed button, flash blinks, breathe swells slowly. Reaction (a hit, a refusal, a wag): shake goes sideways, nod goes up and down, wobble rocks on its base, swing hangs from its top edge like a pendulum and slows, recoil is a sharp kick. Gravity (it leaves the ground): bounce drops in and settles, hop jumps once, jump crouches, leaps and lands squashed, fall drops in from above. Turning: spin turns two whole times and slows (a wheel, a dial), turn is one quick whole turn, tumble spins and hops and lands (a thrown die or coin), flip turns new content into view. Arrival (the content comes in): fade, rise from below, zoom from small, slide from the side. Ambient (a slow drift): float rises and sinks, drift sways sideways. The children are drawn normally; when the trigger changes they arrive with the animation, so change the content and the trigger in the same handler: keep a number in state, add 1 to it each time, and pass it as trigger. The first time the screen is drawn nothing animates, and a change of content without a new trigger does not animate either. A die or any solid body that rolls, falls or tumbles, when the request asks for it in 3D, is a ui.World with scene.die (or scene.box), not a Motion; without 3D, the throw of a die is a Motion (tumble) around its face. Do not nest one Motion in another. On a home-screen card every preset plays once per change, in about a second, never in a loop, and several Motions can play at once, each around its own drawing or figure: a touch on a picture inside a Motion plays it by itself; otherwise keep a count in state, add 1 in the tap handler and pass it as trigger.', true),
   new ComponentSpec('Layers', 'layers',
     [style('layers'), new PropSpec('width', 'number'), new PropSpec('height', 'number'), new PropSpec('children', 'view[]')],
     'stacks its children one over another, each in the middle, the last on top: a scene made of parts that move on their own (a sky, a sun and clouds; a drum and its stick; a body and its shadow)',
@@ -251,20 +252,48 @@ export const CATALOG: ComponentSpec[] = [
   new ComponentSpec('Transform', 'transform',
     [style('transform'), new PropSpec('pose', 'number[]'), new PropSpec('durationMs', 'number'), new PropSpec('size', 'number'),
       new PropSpec('children', 'view[]')],
-    'turns, tilts and moves its children in 3D from a list of numbers and glides to the new numbers whenever they change: a card flipping over, a die, dice or coin tumbling, a spinning or rolling animation',
+    'turns, tilts and moves one flat element and its live content in 3D from a list of numbers and glides to the new numbers whenever they change: a card flipping over, a tile tilting',
     '',
-    'pose is [rotateX, rotateY, rotateZ, moveX, moveY, moveZ, scale, opacity]: degrees, points, 1 and 1 for the last two; leave out what you do not need ([0, 40] turns it 40 degrees about the vertical axis). The layer is scaled, turned about its own centre, then moved by the three moves (moveZ is towards the viewer), so one pose both spins a body and carries it to where it is. durationMs is how long the glide takes (0 = at once, 600 is a good turn; a body you move every few milliseconds from a ticker wants about the tick). size is the width and height of the layer in points (0 = as big as its content). When state changes the pose, the old pose glides to the new one by itself, so you only keep the numbers in state and change them in a handler. Angles glide by value, so 720 more is two whole extra turns. The first time the screen is drawn there is no glide. Style solid hides the layer while its back faces the viewer, for the far faces of a solid. A Transform holds either content or other Transforms, and a Transform inside a Transform is turned and moved with it. A flip card: ui.Transform("default", [0, state.turn], 500, 0, [the card]) with state.turn going 0, 180, 360 ... and the card showing the question or the answer by ui.When on the same state. Put it directly around the thing that moves, not around a wide card.'),
-  new ComponentSpec('Stage', 'stage',
-    [style('stage'), new PropSpec('perspective', 'number'), new PropSpec('height', 'number'), new PropSpec('children', 'view[]')],
-    'a 3D scene for building solid bodies from layers: a 3D cube, a die or dice that rolls and tumbles, a box, a coin; its Transforms share one viewpoint',
-    '',
-    'Use it when several Transforms make one body, such as a cube or a coin, or when several bodies share a space; a single card turning needs no Stage. perspective is the viewer distance in points (0 = 900; smaller is more dramatic). height is the height of the scene in points: everything in it is centred in a box that wide and that tall, and the moves of the bodies are measured from that centre, so give it room for the whole area they travel (0 = just as tall as its biggest layer). Style floor draws the box as a table or board with a frame and clips what leaves it. Children are Transforms only. Bodies nearer the viewer are drawn over farther ones by themselves. A cube of side 120 is one Transform whose pose [turnX, turnY, turnZ, x, y, z] is kept in state, holding six faces. A face is two nested Transforms: the outer turns it, the inner pushes it out by half the side, style solid, size 120, holding the picture of the face. Write that once as a function: face(turnX, turnY, n) returns ui.Transform(\"default\", [turnX, turnY], 0, 0, [ui.Transform(\"solid\", [0, 0, 0, 0, 0, 60], 0, 120, [faceView(n)])]). The six faces of a die are face(0, 0, 1) front, face(0, 180, 6) back, face(0, 90, 3) right, face(0, -90, 4) left, face(90, 0, 2) top, face(-90, 0, 5) bottom: copy these six calls exactly, in that order, with those numbers, because the landing table below is right only for them, and swapping the top with the bottom, or any two faces, makes the die land on the wrong number. faceView(n) is a function you write that returns a ui.Canvas for the face of n pips; its style must be \"large\", the only one that draws across the whole layer (\"default\" and \"small\" draw a smaller picture in the corner, which leaves gaps between the faces). Its first child is the body, which must fill the whole face edge to edge with square corners, no inset, no rounding and no outline, because the faces meet along their edges and any gap or rounded corner makes the cube fall apart into six separate pictures: ui.Path(\"light\", \"M0 0 L100 0 L100 100 L0 100 Z\"). Then one ui.Path(\"default\", ...) circle per pip on top of it, kept well inside the square (centres 25, 50 and 75). The Stage shades the faces by itself, so draw no shadows, borders or highlights. To show face n the cube pose [turnX, turnY] is: 1 [0, 0]; 6 [0, 180]; 3 [0, -90]; 4 [0, 90]; 2 [-90, 0]; 5 [90, 0]; for a roll add whole turns to both, such as 720 times the roll count so it tumbles, and glide for 900. Pick the face with math.randomBelow(seed, 6) + 1 and keep the seed in state. A thrown die moving across a table: the same cube Transform with its x, y and z in the pose, inside ui.Stage(\"floor\", 0, 260, [the dice]).'),
+    'pose is [rotateX, rotateY, rotateZ, moveX, moveY, moveZ, scale, opacity]: degrees, points, 1 and 1 for the last two; leave out what you do not need ([0, 40] turns it 40 degrees about the vertical axis). The element is scaled, turned about its own centre, then moved by the three moves (moveZ is towards the viewer). durationMs is how long the glide takes (0 = at once, 600 is a good turn). size is the width and height of the element in points (0 = as big as its content). When state changes the pose, the old pose glides to the new one by itself, so you only keep the numbers in state and change them in a handler. Angles glide by value, so 720 more is two whole extra turns. The first time the screen is drawn there is no glide. A Transform holds content only: no Transform and no World inside it. A flip card: ui.Transform("default", [0, state.turn], 500, 0, [the card]) with state.turn going 0, 180, 360 ... and the card showing the question or the answer by ui.When on the same state. Put it directly around the thing that moves, not around a wide card. For dice, cubes, coins and other solid bodies the request asks for in 3D use ui.World.'),
   new ComponentSpec('Surface', 'surface',
     [style('surface'), new PropSpec('width', 'number'), new PropSpec('height', 'number'),
       new PropSpec('draw', 'string'), new PropSpec('frame', 'string'), new PropSpec('pointer', 'string')],
     'a box the program draws itself every frame with std/gfx shapes, in its own units, and that a finger can touch: a game, a drawing pad, a simulation, an animated scene',
     '',
     'For anything that moves continuously or is drawn freely: a game, a ball that bounces, a drawing or signature pad, a physics toy, a clock face that sweeps. Not for lists, forms or charts of data -- those have components. width and height are the surface\'s own units (say 360 by 640 for a phone-shaped game, 100 by 100 for a square): every position the program draws or receives is in them, and the renderer scales the whole surface to fit, so nothing depends on the size of the phone. draw names function draw(state: AppState): gfx.Shape[] -- it returns the shapes back to front and is called for every frame, so it must only read state. frame names function onFrame(state: AppState, elapsedMs: number): AppState, called before every frame (about 60 a second) with the milliseconds since the last one: move things by speed * elapsedMs / 1000 so the speed does not depend on the phone; pass "" for a surface that only changes when touched. pointer names function onPointer(state: AppState, p: gfx.Pointer): AppState, called when a finger goes down, moves, lifts or is cancelled, with p.x and p.y in surface units; pass "" for none. Style fill makes the surface run from where it starts to the bottom of the screen, for a full-screen game: put the score in the drawing, or a ui.Header above it. Keep what the game needs between frames -- positions, speeds, score, a seed for math.randomBelow -- in AppState, and keep the shapes out of it. A tap is a pointer "down" then "up"; a drag is "down", many "move", then "up". On a home-screen card a Surface is a still picture: its draw function runs once for each state, there is no frame loop (the frame handler must be ""), and a tap on it calls the pointer handler with "down" then "up" at the tapped point -- so a picture that reacts to a touch changes the state in that handler. Style cover is for a home-screen card: the picture is the whole card\'s background, edge to edge (what is past the card\'s shape is cut off), and the rest of the widget lies over its bottom; in the app it is drawn as fill. Up to ' + CARD_MAX_PICTURES.toString() + ' pictures on a card (a ui.Sparkline is one too), side by side or one over another in a ui.Layers, each of at most ' + CARD_MAX_SHAPES.toString() + ' shapes (a gfx.repeat counts its shapes once, whatever the copies).', true),
+  new ComponentSpec('World', 'world',
+    [style('world'), new PropSpec('height', 'number'), new PropSpec('build', 'string'), new PropSpec('event', 'string')],
+    'a real 3D world with light, shadows and physics, built from std/scene things the host moves by itself, for a request ' +
+    'that asks for 3D: dice thrown in 3D, a 3D tower knocked over, a 3D solar system, a 3D cube or ball',
+    '',
+    'Only when the request asks for 3D: bodies that fall, roll, bounce and knock into each other, circle a centre, walk or ' +
+    'drive about by themselves, or are steered by the person. ' +
+    'Not for flat games or drawings (ui.Surface) or a card that flips (ui.Transform). height is the box\'s height in points ' +
+    '(0 = as tall as it is wide); style fill runs it to the bottom of the screen, above what comes after it; style full opens it ' +
+    'over the whole screen, the title of its Header in the corner and the Texts in its column as a caption over its bottom, the Buttons ' +
+    'left for the normal screen (the person goes back and to full screen again from its corner): for a world to look at, a ' +
+    'system in motion or a simulation, worked by touching the world. build names function build(state: AppState): ' +
+    'scene.Thing[] that describes the whole world -- camera, table or floor, bodies -- and is called only when the state changes, ' +
+    'never per frame: there is no frame function, and the program never moves a body itself. A loose body is moved by physics; ' +
+    'an orbit, a spin, a path and a wander by the host; a kick throws a loose body each time its trigger number changes; ' +
+    'the player is steered by the person with a stick the host draws over the world, the camera following it. event names function ' +
+    'onWorld(state: AppState, e: scene.Event): AppState, called on a tap, a swipe, a hit (at most four a second, every body ' +
+    'knocked since the last one in e.bodies), when a body comes into a scene.zone ("enter"), when the player\'s button is ' +
+    'pressed ("action") and when thrown bodies come to rest ' +
+    '("settled": in e.values a die\'s face, any other body 1 when it was knocked from where it was built); pass "" for ' +
+    'none. Every body needs an id of its own, at most ' + MAX_WORLD_BODIES.toString() + ' bodies. A throw: ' +
+    'scene.kick(scene.loose(body, 1), state.throws, vx, vy, vz, spin), a Button, tap or swipe adding 1 to state.throws, the ' +
+    'direction alternating with each throw; on e.kind === "settled" keep what e.values say in the state and show it (say it ' +
+    'is still in the air while state.throws is ahead of the throw last read). Putting things back: state.round in every id, ' +
+    'a Button adding 1. Bodies that stand together touch (a stack of side s is s higher each level); bodies to be told apart ' +
+    'start apart. Bodies circling a centre: no floor, a glowing centre if it shines, each body painted as what it is ' +
+    '(scene.paint, a real body in its real colours) and turning on its tilted axis, scene.orbit(scene.spin(scene.turn(' +
+    'scene.paint(scene.sphere(id, 0, 0, 0, r, colour), pattern, colour2), 0, 0, tilt), dayS), centreId, radius, periodS, ' +
+    'phaseDeg), every body the request implies within 4.5 (smaller rather than left out), neighbouring orbits further apart ' +
+    'than the two bodies reach (radius, rings, what circles them), style full and an orbiting scene.camera high above the ' +
+    'centre. A tap names the body (e.body) in state, scene.mark marks it and a ui.Text shows it. scene.sky(colour, stars) ' +
+    'for what is behind the world, scene.trail on the bodies whose paths should show: the host adds no sky, stars or paths ' +
+    'by itself.'),
   new ComponentSpec('ListItem', 'listitem',
     [style('listitem'), new PropSpec('text', 'string'), new PropSpec('label', 'string'),
       new PropSpec('value', 'string'), new PropSpec('action', 'string'),
@@ -611,8 +640,7 @@ export const CHILD_RULES: ChildRule[] = [
   new ChildRule('Motion', [], ['Motion']),
   new ChildRule('Layers', [], ['Layers']),
   new ChildRule('Tabs', [], ['Tabs']),
-  new ChildRule('Stage', ['Transform'], ['Stage']),
-  new ChildRule('Transform', [], ['Stage']),
+  new ChildRule('Transform', [], ['Transform', 'World']),
   // One look per program.
   new ChildRule('AppTheme', [], ['AppTheme']),
 ]
@@ -769,8 +797,9 @@ export function describeComponents(names: string[]): string {
     if (set.length > 1) { lines.push('    styles: ' + set.join(' ')) }
     if (c.guidance.length > 0) { lines.push('    ' + c.guidance) }
   }
-  // A Surface is written in std/gfx, so asking about it is asking about that too.
+  // A Surface is written in std/gfx, so asking about it is asking about that too; a World in std/scene.
   if (names.indexOf('Surface') >= 0) { lines.push(describeGfxForPrompt()) }
+  if (names.indexOf('World') >= 0) { lines.push(describeSceneForPrompt()) }
   return lines.join('\n')
 }
 
@@ -827,6 +856,10 @@ export function describeCatalogForPrompt(selected: Set<string> | null = null): s
     if (c.name === 'Surface') {
       lines.push('')
       lines.push(describeGfxForPrompt())
+    }
+    if (c.name === 'World') {
+      lines.push('')
+      lines.push(describeSceneForPrompt())
     }
   }
 

@@ -1,0 +1,82 @@
+// The solar system as a ui.World: the first program for std/scene. Nothing in it moves a body itself.
+//
+// The sun glows; eight planets orbit it, each turning on its own axis, with periods in the real proportion
+// (Earth's year is 10 seconds here, so Neptune takes about 27 minutes); the moon orbits the earth, which is an
+// orbit round an orbit. The camera can be turned by dragging empty space, and a tap on a body names it.
+// tools/vera-harness/world-check.js compiles it, builds the world and checks the orbits.
+
+@jsonable
+class Planet {
+  name: string;
+  radius: number;
+  distance: number;
+  years: number;
+  dayS: number;
+  color: string;
+}
+
+@jsonable
+class AppState {
+  picked: string;
+  taps: number;
+}
+
+function init(): AppState {
+  return {picked: "", taps: 0};
+}
+
+// Seconds one Earth year takes on screen.
+function yearS(): number {
+  return 10;
+}
+
+function planets(): Planet[] {
+  let list: Planet[] = [
+    {name: "Mercury", radius: 0.05, distance: 1.0, years: 0.241, dayS: 6, color: "#a8a29e"},
+    {name: "Venus", radius: 0.09, distance: 1.4, years: 0.615, dayS: -8, color: "#e8c27a"},
+    {name: "Earth", radius: 0.1, distance: 1.9, years: 1.0, dayS: 2, color: "#3d7be0"},
+    {name: "Mars", radius: 0.07, distance: 2.4, years: 1.881, dayS: 2.1, color: "#c1440e"},
+    {name: "Jupiter", radius: 0.3, distance: 3.4, years: 11.86, dayS: 1, color: "#d8a66b"},
+    {name: "Saturn", radius: 0.25, distance: 4.4, years: 29.46, dayS: 1.1, color: "#e3cf8f"},
+    {name: "Uranus", radius: 0.16, distance: 5.3, years: 84.01, dayS: -1.4, color: "#9fe0e8"},
+    {name: "Neptune", radius: 0.15, distance: 6.1, years: 164.8, dayS: 1.3, color: "#4466dd"}
+  ];
+  return list;
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 4.5, 8, 0, 0, 0, true));
+  things.push(scene.sky("#060a16", 1400));
+  things.push(scene.glow(scene.spin(scene.sphere("Sun", 0, 0, 0, 0.6, "#ffcc33"), 25)));
+  let phase: number = 0;
+  for (let p: Planet of planets()) {
+    let body: scene.Thing = scene.sphere(p.name, 0, 0, 0, p.radius, p.color);
+    things.push(scene.trail(scene.spin(scene.orbit(body, "Sun", p.distance, p.years * yearS(), phase), p.dayS)));
+    phase = phase + 47;
+  }
+  // 27.3 days is 0.0748 of a year.
+  things.push(scene.orbit(scene.sphere("Moon", 0, 0, 0, 0.03, "#d6d3d1"), "Earth", 0.2, 0.0748 * yearS(), 0));
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind !== "tap") {
+    return state;
+  }
+  return {picked: e.body, taps: state.taps + 1};
+}
+
+function view(state: AppState): ui.View {
+  let caption: string = "Tap a planet to name it; drag to turn the view";
+  if (state.picked !== "") {
+    caption = state.picked;
+  }
+  return ui.AppTheme("expressive", "", [
+    ui.Column("default", [
+      ui.Header("default", "Solar system", "", "", ""),
+      ui.World("default", 0, "build", "onWorld"),
+      ui.Text("title", caption)
+    ])
+  ]);
+}

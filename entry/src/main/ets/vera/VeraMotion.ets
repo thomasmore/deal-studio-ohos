@@ -222,12 +222,12 @@ export function motionPose(preset: string, progress: number): MotionPose {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// A pose written as numbers (ui.Transform) and the 3D scene made of poses (ui.Stage).
+// A pose written as numbers (ui.Transform).
 //
 // pose = [rotateX, rotateY, rotateZ, translateX, translateY, translateZ, scale, opacity]: degrees, points, unitless. Missing
 // entries are the identity, so [0, 30] is a turn of 30 degrees about the vertical axis. A layer is turned about its own centre;
 // +z points at the viewer. Matrices are 4x4, row-major (m[row * 4 + column]), applied to column vectors, so a chain is
-// parent * child and the composed matrix of a face inside a cube inside a stage is stage * cube * face.
+// parent * child.
 // ---------------------------------------------------------------------------------------------------------------------
 
 export const POSE_LENGTH: number = 8
@@ -276,9 +276,7 @@ export function multiplyMatrices(a: number[], b: number[]): number[] {
 
 /**
  * The matrix of one pose: the layer is scaled, turned about its own centre (X, then Y, then Z), then moved by [tx, ty, tz] in
- * its parent's frame. So a body that spins and travels is one pose, [turnX, turnY, turnZ, x, y, z], and a layer inside a turned
- * parent is moved along the parent's turned axes: that is how the faces of a cube are placed, one Transform to turn the face
- * and one inside it to push it out by half the side. The opacity is not part of the matrix.
+ * its parent's frame. So a card that spins and moves is one pose, [turnX, turnY, turnZ, x, y, z]. The opacity is not part of the matrix.
  */
 export function poseMatrix(pose: number[]): number[] {
   let rad = Math.PI / 180
@@ -299,7 +297,7 @@ export function poseToPixels(pose: number[], density: number): number[] {
   return [pose[0], pose[1], pose[2], pose[3] * density, pose[4] * density, pose[5] * density, pose[6], pose[7]]
 }
 
-/** The viewer `distance` pixels in front of the stage as a matrix: w = 1 - z / distance. A distance of 0 or less is no perspective. */
+/** The viewer `distance` pixels in front of the layer as a matrix: w = 1 - z / distance. A distance of 0 or less is no perspective. */
 export function perspectiveMatrix(distance: number): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, distance > 0 ? -1 / distance : 0, 1]
 }
@@ -311,29 +309,6 @@ export function columnMajor(matrix: number[]): number[] {
     for (let row = 0; row < 4; row++) { out.push(matrix[row * 4 + column]) }
   }
   return out
-}
-
-/** Where a point of a layer, given relative to the layer's centre, ends up on screen: [x, y, depth], perspective applied. */
-export function projectPoint(matrix: number[], perspective: number, x: number, y: number, z: number): number[] {
-  let px = matrix[0] * x + matrix[1] * y + matrix[2] * z + matrix[3]
-  let py = matrix[4] * x + matrix[5] * y + matrix[6] * z + matrix[7]
-  let pz = matrix[8] * x + matrix[9] * y + matrix[10] * z + matrix[11]
-  let w = perspective > 0 ? 1 - pz / perspective : 1
-  if (w < 0.05) { w = 0.05 }
-  return [px / w, py / w, pz]
-}
-
-/**
- * Whether a layer, drawn with this composed matrix, shows its front to the viewer. The viewer sits `perspective` in front of
- * the stage (infinitely far when perspective is 0); the layer's front is its +z side. Used by solid layers to hide the far
- * faces of a cube, so a convex solid needs no depth sorting.
- */
-export function facesViewer(matrix: number[], perspective: number): boolean {
-  let nx = matrix[2], ny = matrix[6], nz = matrix[10]
-  let centreX = matrix[3], centreY = matrix[7], centreZ = matrix[11]
-  // An edge-on face is not facing: the epsilon keeps rounding noise (6e-17 where an exact 0 belongs) from showing it.
-  if (perspective <= 0) { return nz > 1e-9 }
-  return nx * (0 - centreX) + ny * (0 - centreY) + nz * (perspective - centreZ) > 1e-9
 }
 
 /** Whether two poses are the same numbers. */
@@ -351,41 +326,5 @@ export function animatedPose(from: number[], to: number[], start: number, durati
   return lerpPose(from, to, easeOutCubic((now - start) / duration))
 }
 
-/** The viewer distance a stage uses, in points: what the program asked for, or a sensible one when it said 0. */
-export function stageDistance(requested: number): number {
-  return requested > 0 ? requested : 900
-}
-
-/**
- * How bright a face of a solid is, 0.55 to 1, from where it points. The light comes from the upper left in front of the stage,
- * and a face looking straight at the viewer at rest is full brightness, so a die at rest is exactly as drawn and one that has
- * turned shows its sides darker: that difference is what makes a flat-coloured cube read as a body. `matrix` is the layer's
- * composed matrix before the perspective (its third column is where the face's front now points).
- */
-export function faceShade(matrix: number[]): number {
-  let nx = matrix[2], ny = matrix[6], nz = matrix[10]
-  let length = Math.sqrt(nx * nx + ny * ny + nz * nz)
-  if (length < 1e-9) { return 1 }
-  let lx = -0.25, ly = -0.5, lz = 0.83
-  let lightLength = Math.sqrt(lx * lx + ly * ly + lz * lz)
-  let dot = (nx * lx + ny * ly + nz * lz) / (length * lightLength)
-  let full = lz / lightLength
-  let lit = dot / full
-  if (lit < 0) { lit = 0 }
-  if (lit > 1) { lit = 1 }
-  return 0.55 + 0.45 * lit
-}
-
-/**
- * Each layer's place in the drawing order from its depth: 0 for the farthest, the highest for the nearest. Ties keep the order of
- * the tree. Bodies that overlap are drawn nearest last, which is what lets two dice pass in front of each other.
- */
-export function depthRanks(depths: number[]): number[] {
-  let order: number[] = []
-  for (let i = 0; i < depths.length; i++) { order.push(i) }
-  order.sort((a: number, b: number): number => depths[a] !== depths[b] ? depths[a] - depths[b] : a - b)
-  let ranks: number[] = []
-  for (let i = 0; i < depths.length; i++) { ranks.push(0) }
-  for (let place = 0; place < order.length; place++) { ranks[order[place]] = place }
-  return ranks
-}
+/** The viewer distance of a Transform, in points. */
+export const TRANSFORM_DISTANCE: number = 900

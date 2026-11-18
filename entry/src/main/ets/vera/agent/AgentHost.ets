@@ -75,6 +75,8 @@ export class AgentHost {
   language: string = ''
   /** How a full-canvas program is written (rawfile vera-surface-skill.txt), for a game; '' sends every request to the agent. */
   surfaceGuide: string = ''
+  /** How a 3D program is written on a ui.World (rawfile vera-world-skill.txt); '' writes every game flat, on a surface. */
+  worldGuide: string = ''
   /** Asks the person a blocking question: an answer's index, their own words, or null for the default (the default host never asks). */
   ask: (question: AgentQuestion) => Promise<PersonAnswer> = async (_question: AgentQuestion): Promise<PersonAnswer> => null
   /**

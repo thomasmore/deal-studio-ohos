@@ -5,12 +5,13 @@
  * never played. Here the model is shown the guide the program was written with (the game guide, or the scene guide),
  * answers with SEARCH/REPLACE edits, and the result is played as a new one is (VeraSurfacePlay.ets: fingers on the surface,
  * and for a scene each button pressed) and repaired by edits against that. A change that cannot be made so leaves the
- * program on the screen as it was.
+ * program on the screen as it was. A 3D program (a ui.World) is changed the same way with the world guide, and played on the
+ * host's physics (VeraWorldPlay.ets).
  */
 
 import { AgentHost, checkAgent, agentCancellation } from './AgentHost'
 import { repairProgram } from './AgentRepair'
-import { checkSurfaceProgram, surfaceLanguage } from './AgentSurface'
+import { checkSurfaceProgram, checkWorldProgram, surfaceLanguage, worldLanguage, WORLD_COMPONENTS } from './AgentSurface'
 import { SCENE_GUIDE } from './AgentScene'
 import { applyRepair } from '../VeraRepair'
 import { compileVeraSource, CompileError } from '../VeraCompiler'
@@ -20,9 +21,14 @@ import { playSurface } from '../VeraSurfacePlay'
 /** Room for the edits of a change: more than a repair's, since a change may add a record class and a few functions. */
 export const CHANGE_TOKENS: number = 8000
 
-/** A program this path edits: it draws on a ui.Surface. */
+/** A program this path edits: it draws on a ui.Surface, or shows a ui.World. */
 export function drawsSurface(source: string): boolean {
-  return source.indexOf('ui.Surface(') >= 0
+  return source.indexOf('ui.Surface(') >= 0 || isWorld(source)
+}
+
+/** A 3D program: it shows a ui.World, changed with the world guide and played on the host's physics. */
+export function isWorld(source: string): boolean {
+  return source.indexOf('ui.World(') >= 0
 }
 
 /** A game written whole: its surface fills the screen. Anything else with a surface is a screen with a scene. */
@@ -47,6 +53,24 @@ const SCENE_IN_PROGRAM: string = '\nThe scene below is already part of a whole p
   'change adds that the scene settles from (a new kind of bet, a choice) is copied into the scene\'s own fields when the ' +
   'motion starts, beside the ones already copied there, and settled from that copy: the form may change while it moves.\n'
 
+/** Whether every component the program builds is one of `kinds`. */
+function usesOnly(source: string, kinds: string[]): boolean {
+  let found = source.match(new RegExp('ui\\.([A-Z][A-Za-z]*)\\(', 'g'))
+  if (found === null) { return true }
+  for (let call of found) {
+    if (kinds.indexOf(call.substring(3, call.length - 1)) < 0) { return false }
+  }
+  return true
+}
+
+/**
+ * The language for changing a 3D program: the world route's (its few components and the guide) for one built of them,
+ * else the whole catalogue with the guide after it, since a screen of lists with a world among them uses more.
+ */
+function worldEditLanguage(source: string, host: AgentHost): string {
+  return usesOnly(source, WORLD_COMPONENTS) ? worldLanguage(host.language, host.worldGuide) : host.language + '\n\n' + host.worldGuide
+}
+
 /** '' when a screen with a scene compiles, runs once, and plays with its buttons pressed; else what is wrong. */
 export function checkSceneProgram(source: string): string {
   try {
@@ -65,6 +89,8 @@ export class SurfaceEdit {
   vbc2: string = ''
   /** True for a game written whole, false for a screen with a scene. */
   game: boolean = false
+  /** True for a 3D program (a ui.World). */
+  world: boolean = false
   /** Changes asked for: a second is asked with thinking on when the first could not be repaired. */
   attempts: number = 0
   /** Repair rounds, over all attempts. */
@@ -84,13 +110,16 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
   checkAgent(host)
   let out = new SurfaceEdit()
   let started = Date.now()
-  out.game = isWholeGame(source)
-  if (host.askCode === null || host.language.length === 0 || (out.game && host.surfaceGuide.length === 0)) {
+  out.world = isWorld(source)
+  out.game = out.world || isWholeGame(source)
+  if (host.askCode === null || host.language.length === 0 || (out.world && host.worldGuide.length === 0) ||
+      (out.game && !out.world && host.surfaceGuide.length === 0)) {
     out.failed = 'no model or guide to make the change with'
     return out
   }
-  let system = out.game ? surfaceLanguage(host.language, host.surfaceGuide) : host.language + SCENE_GUIDE + SCENE_IN_PROGRAM
-  let check = out.game ? checkSurfaceProgram : checkSceneProgram
+  let system = out.world ? worldEditLanguage(source, host) :
+    (out.game ? surfaceLanguage(host.language, host.surfaceGuide) : host.language + SCENE_GUIDE + SCENE_IN_PROGRAM)
+  let check: (source: string) => string = out.world ? checkWorldProgram : (out.game ? checkSurfaceProgram : checkSceneProgram)
   let asked = 'The program:\n' + source + '\n\nIt was made for: ' + prompt + '\n\nThe change asked for now: ' + change +
     '\n\n' + CHANGE_RULES
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
