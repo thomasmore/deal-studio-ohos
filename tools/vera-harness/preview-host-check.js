@@ -153,7 +153,11 @@ const { compileVeraSource } = load(path.join(root, 'vera/VeraCompiler.ets'))
 const { veraStateStamp } = load(path.join(root, 'vera/VeraStateStamp.ets'))
 const { store } = load(path.join(root, 'vera/ProjectStore.ets'))
 store.init('/preview-host-fixture')
-function compile({ initial = 0, bad = false, viewTrapAfter = false, refreshTrap = false, ticker = 0, surface = false, animated = false, effect = false, world = false, worldUnchanged = false, hideWorldAfterEvent = false } = {}) {
+function compile({ initial = 0, bad = false, viewTrapAfter = false, refreshTrap = false, refreshDelta = 0, ticker = 0, surface = false, animated = false, surfaceChange = '', effect = false, world = false, worldUnchanged = false, hideWorldAfterEvent = false } = {}) {
+  const changingSurface = surfaceChange === 'shift'
+    ? ', ui.Column("default", shifted), ui.Surface("default", 100, 100, "drawOld", "", "pointer")'
+    : ', ui.Surface("default", 100, 100, firstDraw, frameAction, "pointer")' +
+      (surfaceChange === 'reorder' ? ', ui.Surface("default", 100, 100, secondDraw, "", "pointer")' : '')
   const source = `
 @jsonable class AppState { n: number; text: string; order: string[]; seen: string[]; }
 function init(): AppState { return {n: ${initial}, text: "initial", order: [], seen: []}; }
@@ -167,20 +171,27 @@ function tick(state: AppState, value: number): AppState {
   state.n = state.n + 1; state.order.push("tick"); state.seen.push(state.text); return state;
 }
 function pointer(state: AppState, value: gfx.Pointer): AppState {
-  state.order.push(value.phase); state.seen.push(state.text); return state;
+  state.order.push(value.phase); state.seen.push(state.text);
+  ${surfaceChange ? 'if (value.phase === "move") { state.n = 2; }' : ''}
+  return state;
 }
 function draw(state: AppState): gfx.Shape[] { return []; }
+${surfaceChange ? 'function drawOld(state: AppState): gfx.Shape[] { return [gfx.rect(0, 0, 100, 100, "#ff0000")]; } function drawNew(state: AppState): gfx.Shape[] { return [gfx.rect(0, 0, 100, 100, "#0000ff")]; }' : ''}
 ${world ? 'function buildWorld(state: AppState): scene.Thing[] { return [scene.box("body", state.n, 2, 3, 1, 2, 3, "accent")]; } function worldEvent(state: AppState, event: scene.Event): AppState { ' + (worldUnchanged ? '' : 'state.n = state.n + 1; ') + 'return state; }' : ''}
 function answered(state: AppState, value: string): AppState { state.order.push("answer"); return state; }
-${effect || refreshTrap ? 'function widgetRefresh(state: AppState): AppState { ' + (refreshTrap ? 'state.n = 1; ' : '') + (effect ? 'sdk.call("Fixture.device.read", [], "answered"); ' : '') + 'return state; }' : ''}
+${effect || refreshTrap || refreshDelta ? 'function widgetRefresh(state: AppState): AppState { ' + (refreshTrap ? 'state.n = 1; ' : '') + (refreshDelta ? 'state.n = state.n + ' + refreshDelta + '; state.order.push("refresh"); ' : '') + (effect ? 'sdk.call("Fixture.device.read", [], "answered"); ' : '') + 'return state; }' : ''}
 function view(state: AppState): ui.View {
   ${bad ? 'let empty: number[] = []; state.n = empty[1];' : ''}
   ${viewTrapAfter ? 'if (state.n > 0) { let empty: number[] = []; state.n = empty[1]; }' : ''}
   ${hideWorldAfterEvent ? 'if (state.n > 0) { return ui.Column("default", [ui.TextField("default", "Text", state.text, "edit"), ui.Text("body", ui.numberToString(state.n))]); }' : ''}
+  ${surfaceChange === 'shift' ? 'let shifted: ui.View[] = []; if (state.n >= 2) { shifted.push(ui.Text("body", "shift")); }' : surfaceChange ? `let firstDraw: string = "drawOld";
+  let secondDraw: string = "drawNew";
+  let frameAction: string = "${animated ? 'tick' : ''}";
+  if (state.n >= 2) { firstDraw = "drawNew"; secondDraw = "drawOld"; frameAction = ""; }` : ''}
   return ui.Column("default", [ui.TextField("default", "Text", state.text, "edit"),
     ui.Text("body", ui.numberToString(state.n))
     ${ticker ? ', ui.Ticker("default", "clock", ' + ticker + ', true, "tick")' : ''}
-    ${surface ? ', ui.Surface("default", 100, 100, "draw", "' + (animated ? 'tick' : '') + '", "pointer")' : ''}
+    ${surfaceChange ? changingSurface : surface ? ', ui.Surface("default", 100, 100, "draw", "' + (animated ? 'tick' : '') + '", "pointer")' : ''}
     ${world ? ', ui.World("default", 100, "buildWorld", "worldEvent")' : ''}]);
 }`
   try {
@@ -264,7 +275,7 @@ function fixture(program = programs.basic, config = {}) {
     return accept.call(this, frame)
   }
   const calls = []
-  for (const name of ['acquire', 'replaceProgram', 'promote', 'release', 'postInput', 'postTick', 'requestSnapshot', 'requestView']) {
+  for (const name of ['acquire', 'replaceProgram', 'promote', 'release', 'postInput', 'postTick', 'requestDraw', 'requestSnapshot', 'requestView']) {
     if (h[name].observed) continue
     const original = h[name]
     h[name] = function(...args) {
@@ -365,6 +376,78 @@ test('rapid program changes and promotion serialize lifecycle operations', async
   assert(f.calls.some(call => call.name === 'promote'))
   assert.equal(f.p.handle.appId, 'rapid/version')
   assert.equal(f.p.frameAppId, 'rapid/version')
+
+  const program = compile({ refreshDelta: 10, effect: true })
+  for (const persistKey of ['', 'preview-promote/version']) {
+    const promoted = fixture(program, { previewOnly: true, persistKey })
+    const before = adapterCalls.length
+    await promoted.mount()
+    await pump()
+    assert.equal(promoted.p.activeOptions.mode, 'PREVIEW')
+    assert.equal(text(promoted.p), '0')
+    assert.equal(adapterCalls.length, before)
+    assert.equal(promoted.events.filter(event => event.type === 'onEffectRequest').length, 0)
+    const handle = promoted.p.handle
+    const record = promoted.h.registry.get(handle.appId)
+    const actor = record.actor
+    const vm = actor.vm
+    const lease = promoted.h.leases.get(handle.leaseId)
+    promoted.p.previewOnly = false
+    promoted.p.onPreviewOnlyChanged()
+    await finish(promoted.p.operations)
+    await pump()
+    assert.equal(promoted.p.activeProgram, program.vbc2)
+    assert.equal(promoted.p.activeOptions.mode, persistKey ? 'LIVE_PERSISTENT' : 'LIVE_EPHEMERAL')
+    if (persistKey) assert.equal(promoted.p.handle.appId, persistKey)
+    assert.equal(promoted.h.registry.get(promoted.p.handle.appId), record)
+    assert.equal(record.actor, actor)
+    assert.equal(actor.vm, vm)
+    assert.equal(promoted.p.handle.vmGeneration, handle.vmGeneration)
+    assert.equal(promoted.p.handle.leaseId, handle.leaseId)
+    assert.equal(promoted.h.leases.get(handle.leaseId), lease)
+    assert.equal(promoted.h.leases.size, 1)
+    assert.equal(promoted.p.frameAppId, promoted.p.handle.appId)
+    assert.equal(promoted.p.frameVmGeneration, handle.vmGeneration)
+    assert.deepEqual(await promoted.state(), { n: 10, text: 'initial', order: ['refresh', 'answer'], seen: [] })
+    assert.equal(text(promoted.p), '10')
+    assert.equal(adapterCalls.length, before + 1)
+    assert.equal(adapterCalls[before][0], 'Fixture.device.read')
+    assert.equal(promoted.events.filter(event => event.type === 'onEffectRequest').length, 1)
+    assert.equal(promoted.calls.filter(call => call.name === 'promote').length, 1)
+
+    draft(promoted.p, 'promotion seed')
+    promoted.p.handleAction('add', 7)
+    await pump()
+    const seed = await finish(promoted.p.controller.flushAndSnapshot())
+    await finish(promoted.p.operations)
+    promoted.p.seedState = seed
+    const seededState = decode(seed)
+    assert.deepEqual(seededState, { n: 17, text: 'promotion seed', order: ['refresh', 'answer', 'field', 'add'], seen: ['promotion seed'] })
+    for (const key of ['preview-promote-live/version', 'preview-promote-live/next', '']) {
+      promoted.p.persistKey = key
+      promoted.p.load()
+      await finish(promoted.p.operations)
+      await pump()
+      assert.equal(promoted.p.activeOptions.mode, key ? 'LIVE_PERSISTENT' : 'LIVE_EPHEMERAL')
+      assert.equal(promoted.p.activeOptions.persistKey, key)
+      if (key) assert.equal(promoted.p.handle.appId, key)
+      assert.equal(promoted.h.registry.get(promoted.p.handle.appId), record)
+      assert.equal(record.actor, actor)
+      assert.equal(actor.vm, vm)
+      assert.equal(promoted.p.handle.vmGeneration, handle.vmGeneration)
+      assert.equal(promoted.p.handle.leaseId, handle.leaseId)
+      assert.equal(promoted.h.leases.get(handle.leaseId), lease)
+      assert.equal(promoted.h.leases.size, 1)
+      assert.deepEqual(await promoted.state(), seededState)
+      assert.equal(promoted.p.seedState, seed)
+      assert.equal(text(promoted.p), '17')
+      assert.equal(adapterCalls.length, before + 1)
+      assert.equal(promoted.events.filter(event => event.type === 'onEffectRequest').length, 1)
+    }
+    assert.equal(promoted.calls.filter(call => call.name === 'promote').length, 4)
+    assert.equal(promoted.calls.filter(call => call.name === 'acquire').length, 1)
+    assert.equal(promoted.calls.filter(call => call.name === 'replaceProgram' || call.name === 'release').length, 0)
+  }
 })
 
 test('disappear during pending acquire releases the late real lease', async () => {
@@ -388,6 +471,93 @@ test('disappear during pending acquire releases the late real lease', async () =
   assert.equal(f.p.handle, null)
   assert.equal(f.p.draining, false)
   assert(f.calls.some(call => call.name === 'release' && call.args[0] === acquired))
+})
+
+for (const refreshDelta of [0, 10]) test('idle cached persistent actor reloads same-stamp external widget state before first delivery' + (refreshDelta ? ' and refreshes exactly once on reopen' : ''), async () => {
+  const program = refreshDelta ? compile({ refreshDelta }) : programs.basic
+  const projectId = refreshDelta ? 'idle-widget-refresh' : 'idle-widget'
+  const persistKey = projectId + '/version'
+  const f = fixture(program, { persistKey })
+  await f.mount()
+  f.p.handleAction('add', 2 - refreshDelta)
+  await pump()
+  const encoded = await finish(f.p.controller.flushAndSnapshot())
+  await finish(f.p.operations)
+  assert.equal(decode(encoded).n, 2)
+  assert.equal(text(f.p), '2')
+  assert.equal(decode(store.loadState(projectId, 'version', program.stamp)).n, 2)
+  const handle = f.p.handle
+  const record = f.h.registry.get(handle.appId)
+  const actor = record.actor
+  assert.equal(record.options.mode, 'LIVE_PERSISTENT')
+  f.p.aboutToDisappear()
+  await finish(f.p.operations)
+  assert.equal(f.p.handle, null)
+  assert.equal(f.h.leases.size, 0)
+  assert.equal(record.leases.size, 0)
+  assert.equal(record.subscriber, null)
+  assert.equal(f.h.registry.get(persistKey), record)
+  assert.equal(decode(actor.snapshot()).n, 2)
+  const idleTimer = record.idleTimer
+  assert(timers.has(idleTimer))
+  assert(timers.get(idleTimer).at > now)
+  const oldDeliveries = { events: f.events.length, frames: f.frames.length, snapshots: f.snapshots.length, revision: f.p.revision }
+  const external = JSON.parse(encoded)
+  const n = external[2].find(([key]) => key === 'n')
+  assert(n)
+  n[1][1] = 99
+  const externalEncoded = JSON.stringify(external)
+  const externalState = decode(externalEncoded)
+  assert.equal(externalState.n, 99)
+  store.saveState(projectId, 'version', program.stamp, externalEncoded)
+  assert.equal(store.loadState(projectId, 'version', program.stamp), externalEncoded)
+  assert.equal(decode(actor.snapshot()).n, 2)
+  const reopened = fixture(program, { host: f.h, persistKey })
+  const rendered = []
+  const render = reopened.p.renderView
+  reopened.p.renderView = function(...args) {
+    const result = render.apply(this, args)
+    rendered.push(text(this))
+    return result
+  }
+  await reopened.mount()
+  await pump()
+  assert(now - record.idleSince < 5000)
+  assert.equal(f.h.registry.get(persistKey), record)
+  assert.equal(record.actor, actor)
+  assert.equal(reopened.p.handle.appId, handle.appId)
+  assert.equal(reopened.p.handle.vmGeneration, handle.vmGeneration)
+  assert.notEqual(reopened.p.handle.leaseId, handle.leaseId)
+  assert.equal(timers.has(idleTimer), false)
+  assert.equal(record.idleTimer, -1)
+  assert.equal(f.h.leases.size, 1)
+  assert.equal(record.leases.size, 1)
+  assert.equal(record.subscriber, reopened.p.subscriber)
+  assert.equal(rendered[0], '99')
+  assert.deepEqual(decode(reopened.snapshots[0]), externalState)
+  assert.deepEqual(rendered, refreshDelta ? ['99', '109'] : ['99'])
+  assert.deepEqual(reopened.snapshots.map(value => decode(value).n), refreshDelta ? [99, 109] : [99])
+  const refreshedState = { ...externalState, n: 99 + refreshDelta,
+    order: refreshDelta ? [...externalState.order, 'refresh'] : externalState.order }
+  assert.deepEqual(await reopened.state(), refreshedState)
+  assert.equal(text(reopened.p), String(refreshedState.n))
+  assert.equal(reopened.events.filter(event => event.type === 'onStateSaved').length, refreshDelta ? 1 : 0)
+  assert.deepEqual(decode(store.loadState(projectId, 'version', program.stamp)), refreshedState)
+  reopened.p.handleAction('add', 1)
+  await pump()
+  const addedState = { ...refreshedState, n: 100 + refreshDelta,
+    order: [...refreshedState.order, 'add'], seen: [...refreshedState.seen, refreshedState.text] }
+  assert.deepEqual(await reopened.state(), addedState)
+  assert.equal(text(reopened.p), String(addedState.n))
+  assert.deepEqual(decode(store.loadState(projectId, 'version', program.stamp)), addedState)
+  assert.equal(reopened.events.filter(event => event.type === 'onStateSaved').length, refreshDelta ? 2 : 1)
+  reopened.p.aboutToDisappear()
+  await finish(reopened.p.operations)
+  assert.equal(reopened.p.handle, null)
+  assert.equal(f.h.leases.size, 0)
+  assert.equal(record.leases.size, 0)
+  assert.equal(record.subscriber, null)
+  assert.deepEqual({ events: f.events.length, frames: f.frames.length, snapshots: f.snapshots.length, revision: f.p.revision }, oldDeliveries)
 })
 
 test('failed replacement retains the old VM, identity and usable input', async () => {
@@ -1200,6 +1370,45 @@ test('animated surface start and destination restart reset the real actor save d
   f.p.surfaceFrame()
   await pump()
   assert.equal(saves(), before + 2)
+
+  for (const surfaceChange of ['replace', 'reorder']) {
+    const g = fixture(compile({ surfaceChange, animated: true }))
+    await g.mount()
+    const nodes = g.p.liveSurfaces.slice()
+    for (const node of nodes) g.p.surfaces.set(node, { width: 100, height: 100, ready: true, visible: true })
+    const painted = []
+    g.p.paintSurfaceFrame = (node, ops) => painted.push([node.label, ops.map(op => op.color)])
+    const revision = g.p.surfaceRevision
+    assert.equal(typeof revision, 'number')
+    const draws = g.calls.filter(call => call.name === 'requestDraw').length
+    now += 100
+    g.p.surfaceFrame()
+    await pump()
+    assert.equal(g.p.surfaceRevision, revision)
+    assert.equal(g.calls.filter(call => call.name === 'requestDraw').length, draws)
+    assert.deepEqual(painted, surfaceChange === 'reorder'
+      ? [['drawOld', ['#ff0000']], ['drawNew', ['#0000ff']]] : [['drawOld', ['#ff0000']]])
+    const unchanged = g.frames.at(-1)
+    assert(unchanged.view)
+    assert(unchanged.gfx.every(gfx => gfx.surfaceRevision === revision))
+    painted.length = 0
+    now += 100
+    g.p.surfaceFrame()
+    await pump()
+    assert(g.p.surfaceRevision > revision)
+    assert.equal(g.p.surfaceTimer, -1)
+    assert(g.p.liveSurfaces.every((node, index) => node === nodes[index]))
+    assert.deepEqual(painted, surfaceChange === 'reorder'
+      ? [['drawNew', ['#0000ff']], ['drawOld', ['#ff0000']]] : [['drawNew', ['#0000ff']]])
+    const changed = g.frames.find(frame => frame.frameSeq > unchanged.frameSeq && frame.view !== null)
+    assert(changed)
+    assert(changed.gfx.length > 0)
+    assert(changed.gfx.every(gfx => gfx.surfaceRevision === revision))
+    const fresh = g.calls.filter(call => call.name === 'requestDraw').slice(draws)
+    assert.equal(fresh.length, 1)
+    assert(fresh[0].args[1].every(draw => draw.surfaceRevision === g.p.surfaceRevision))
+    assert(g.frames.at(-1).gfx.every(gfx => gfx.surfaceRevision === g.p.surfaceRevision))
+  }
 })
 
 test('composition delays first surface frame without postponing the loop-start deadline', async () => {
@@ -1256,6 +1465,55 @@ for (const restart of [false, true]) test('backpressured preview coalescing pres
   f.p.surfaceFrame()
   await pump()
   assert.equal(f.events.filter(event => event.type === 'onStateSaved').length, before + 1)
+
+  if (!restart) {
+    const g = fixture(compile({ surfaceChange: 'reorder' }))
+    await g.mount()
+    const [first, second] = g.p.liveSurfaces
+    for (const node of [first, second]) g.p.surfaces.set(node, { width: 100, height: 100, ready: true, visible: true })
+    const painted = []
+    g.p.paintSurfaceFrame = (node, ops) => painted.push([node.label, ops.map(op => op.color)])
+    const record = g.h.registry.get(g.p.handle.appId)
+    const revision = g.p.surfaceRevision
+    const oldDraws = g.p.surfaceDraws()
+    const unpause = pause(g.h)
+    let paused = true
+    g.p.renderingDepth++
+    try {
+      assert.equal(g.h.requestDraw(g.p.handle, oldDraws).status, 'ACCEPTED')
+      g.p.paintSurface(first)
+      g.p.paintSurface(second)
+      g.p.paintSurface(first)
+      assert.equal(g.p.posts.length, 1)
+      assert.deepEqual(g.p.posts[0].draws.map(draw => draw.nodeId).sort(), [0, 1])
+      assert(g.p.posts[0].draws.every(draw => draw.surfaceRevision === revision))
+      g.p.surfaces.get(second).ready = false
+      record.actor.frameHandlers(['tick', 'tick'], 16)
+      g.h.render(record, false)
+      assert(g.p.surfaceRevision > revision)
+      assert.equal(g.p.posts.length, 1)
+      assert.deepEqual(g.p.posts[0].draws.map(draw => [draw.nodeId, draw.entry, draw.surfaceRevision]),
+        [[0, 'drawNew', g.p.surfaceRevision]])
+      assert.deepEqual(oldDraws.map(draw => [draw.nodeId, draw.entry, draw.surfaceRevision]),
+        [[0, 'drawOld', revision], [1, 'drawNew', revision]])
+      paused = false
+      unpause()
+      await pump()
+      assert.deepEqual(painted, [])
+      assert(g.frames.at(-1).gfx.every(gfx => gfx.surfaceRevision === revision))
+    } finally {
+      g.p.renderingDepth--
+      if (paused) unpause()
+    }
+    g.p.resumePosts()
+    await pump()
+    assert.deepEqual(painted, [['drawNew', ['#0000ff']]])
+    assert.equal(g.p.posts.length, 0)
+    g.p.surfaces.get(second).ready = true
+    g.p.paintSurface(second)
+    await pump()
+    assert.deepEqual(painted.at(-1), ['drawOld', ['#ff0000']])
+  }
 })
 
 test('replacement drops pending loop markers and starts a fresh deadline', async () => {
@@ -1305,6 +1563,77 @@ test('surface down and move flush fields without stopping ticker timers', async 
   assert(timers.has(ticker))
   assert.equal(f.p.surfaceInputs.size, 0)
   assert.equal(f.p.error, '')
+
+  for (const change of ['before-move', 'move-view', 'structural-view']) {
+    const g = fixture(compile({ surfaceChange: change === 'structural-view' ? 'shift' : 'replace' }))
+    await g.mount()
+    const node = g.p.liveSurfaces[0]
+    g.p.surfaces.set(node, { width: 100, height: 100, ready: true, visible: true, touchedAt: 0 })
+    const painted = []
+    g.p.paintSurfaceFrame = (node, ops) => painted.push([node.label, ops.map(op => op.color)])
+    const touch = type => g.p.surfaceTouch(node, { type, changedTouches: [{ id: 1, x: 10, y: 20 }] })
+    touch(platform.TouchType.Down)
+    await pump()
+    painted.length = 0
+    const revision = g.p.surfaceRevision
+    const nodeId = g.p.nodeIds.get(node)
+    const frames = g.frames.length
+    const draws = g.calls.filter(call => call.name === 'requestDraw').length
+    const unpause = pause(g.h)
+    try {
+      touch(platform.TouchType.Move)
+      const move = g.calls.filter(call => call.name === 'postInput' && call.args[1].kind === 'SURFACE_MOVE').at(-1)
+      assert.equal(move.result.status, 'ACCEPTED')
+      assert.equal(move.args[1].draws[0].surfaceRevision, revision)
+      assert.equal(move.args[1].draws[0].entry, 'drawOld')
+      if (change === 'before-move') {
+        const record = g.h.registry.get(g.p.handle.appId)
+        record.actor.frameHandlers(['tick', 'tick'], 16)
+        g.h.render(record, false)
+        assert(g.p.surfaceRevision > revision)
+      } else now += 100
+    } finally {
+      unpause()
+    }
+    await pump()
+    const old = g.frames.slice(frames).find(frame => frame.gfx.some(gfx => gfx.surfaceRevision === revision))
+    assert(old)
+    assert.equal(old.view !== null, change !== 'before-move')
+    assert.equal(old.gfx[0].ops[0].color, '#ff0000')
+    assert(g.p.surfaceRevision > revision)
+    assert.equal(g.p.liveSurfaces[0], node)
+    if (change === 'structural-view') {
+      assert.equal(g.p.nodeIds.get(node), nodeId + 1)
+      assert.deepEqual([node.label, node.action, node.value, node.style, node.minimum, node.maximum],
+        ['drawOld', '', 'pointer', 'default', 100, 100])
+    }
+    assert.deepEqual(painted, [[change === 'structural-view' ? 'drawOld' : 'drawNew',
+      [change === 'structural-view' ? '#ff0000' : '#0000ff']]])
+    const fresh = g.calls.filter(call => call.name === 'requestDraw').slice(draws)
+    assert.equal(fresh.length, 1)
+    assert(fresh[0].args[1].every(draw => draw.surfaceRevision === g.p.surfaceRevision))
+    assert.deepEqual((await g.state()).order, change === 'before-move' ? ['down', 'tick', 'tick', 'move'] : ['down', 'move'])
+    if (change === 'structural-view') {
+      const { cloneLiveTree } = load(path.join(root, 'components/VeraLiveTree.ets'))
+      const retired = node
+      const signature = g.p.surfaceSignature
+      const currentRevision = g.p.surfaceRevision
+      g.p.liveRoot = cloneLiveTree(g.p.liveRoot)
+      g.p.liveGeneration++
+      g.p.markLiveNodeGeneration(g.p.liveRoot)
+      g.p.reconcileSurfaces(false)
+      assert.equal(g.p.surfaceSignature, signature)
+      assert(g.p.surfaceRevision > currentRevision)
+      assert.notEqual(g.p.liveSurfaces[0], retired)
+      assert.equal(g.p.isLiveNode(retired), false)
+      g.p.surfaces.set(retired, { width: 100, height: 100, ready: true, visible: true })
+      assert.deepEqual(g.p.surfaceDraws(retired), [])
+      const before = painted.length
+      touch(platform.TouchType.Move)
+      assert.equal(painted.length, before)
+      assert.equal(g.calls.filter(call => call.name === 'postInput' && call.args[1].kind === 'SURFACE_MOVE').length, 1)
+    }
+  }
 })
 
 async function cleanup() {

@@ -126,6 +126,7 @@ class PreviewEffectResultHost implements EffectResultHost {
 
 interface PreviewGfx {
   nodeId: number
+  surfaceRevision: number
   ops: GfxOp[]
 }
 
@@ -696,6 +697,8 @@ export struct VeraPreview {
   /** How the timer is set, as of now: counting up from the moment, or (checked) down to it. */
   private textTimerFace(node: LiveNode): TimerFace { return timerFace(node.numberValue, node.checked, Date.now()) }
   private liveSurfaces: LiveNode[] = []
+  private surfaceRevision: number = 0
+  private surfaceSignature: string = ''
   private surfaceSync: displaySync.DisplaySync | null = null
   private surfaceTimer: number = -1
   // Repaints the surfaces while a moving part plays on one with no frame loop of its own (a picture that only answers a touch).
@@ -735,6 +738,8 @@ export struct VeraPreview {
       })
       return
     }
+    this.surfaceSignature = ''
+    this.surfaceRevision++
     this.frameAppId = ''
     this.frameVmGeneration = 0
     this.lastFrameSeq = 0
@@ -1575,8 +1580,9 @@ export struct VeraPreview {
     if (!this.disposed) {
       for (let value of frame.gfx) {
         let gfx = value as PreviewGfx
+        if (gfx.surfaceRevision !== this.surfaceRevision) { continue }
         let node = this.liveSurfaces[gfx.nodeId]
-        if (node !== undefined) { this.paintSurfaceFrame(node, gfx.ops) }
+        if (node !== undefined && this.isLiveNode(node)) { this.paintSurfaceFrame(node, gfx.ops) }
       }
       this.frameSplit[0] += frame.timing[0] || 0
       this.frameSplit[1] += frame.timing[1] || 0
@@ -1677,6 +1683,22 @@ export struct VeraPreview {
     for (let node of Array.from(this.textTimers.keys())) {
       if (timers.indexOf(node) < 0) { this.textTimers.delete(node) }
     }
+    let descriptors: string[] = found.map((node: LiveNode): string => JSON.stringify([
+      this.nodeIds.get(node), node.label, node.action, node.value, node.style, node.minimum, node.maximum
+    ]))
+    let signature = JSON.stringify([this.frameAppId, this.frameVmGeneration, descriptors])
+    let changed = signature !== this.surfaceSignature || found.length !== this.liveSurfaces.length ||
+      found.some((node: LiveNode, index: number): boolean => node !== this.liveSurfaces[index])
+    if (changed) {
+      this.surfaceSignature = signature
+      this.surfaceRevision++
+      for (let post of this.posts) {
+        if (post.kind === 'DRAW') {
+          post.draws = post.draws.filter((draw: DrawRequest): boolean => draw.surfaceRevision === this.surfaceRevision)
+        }
+      }
+      this.posts = this.posts.filter((post: PreviewPost): boolean => post.kind !== 'DRAW' || post.draws.length > 0)
+    }
     this.liveSurfaces = found
     let animated = false
     for (let node of found) { if (node.action.length > 0) { animated = true } }
@@ -1684,7 +1706,7 @@ export struct VeraPreview {
     if (animated && !this.previewOnly && !this.pageHidden &&
         (this.error.length === 0 || this.error === this.viewError ||
           (this.worlds.size > 0 && this.error === this.worldTransitionError))) { this.startSurfaceLoop() } else { this.stopSurfaceLoop() }
-    if (paint) { this.paintSurfaces() }
+    if (paint || changed) { this.paintSurfaces() }
   }
 
   /**
@@ -2038,7 +2060,7 @@ export struct VeraPreview {
       let box = this.surfaces.get(node)
       if ((only === null || node === only) && box !== undefined && box.ready && box.visible &&
           box.width > 0 && box.height > 0 && node.label.length > 0) {
-        draws.push({ nodeId: i, entry: node.label })
+        draws.push({ nodeId: i, entry: node.label, surfaceRevision: this.surfaceRevision })
       }
     }
     return draws
@@ -2936,7 +2958,8 @@ export struct VeraPreview {
       }
       if (post.kind === 'DRAW') {
         for (let draw of last.draws) {
-          if (!post.draws.some((next: DrawRequest): boolean => next.nodeId === draw.nodeId)) { post.draws.push(draw) }
+          if (!post.draws.some((next: DrawRequest): boolean =>
+            next.nodeId === draw.nodeId && next.surfaceRevision === draw.surfaceRevision)) { post.draws.push(draw) }
         }
       }
       if (post.kind !== 'REFRESH') { post.order = last.order; this.posts.pop() }

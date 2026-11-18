@@ -551,6 +551,7 @@ async function main() {
   await test('real surface gates, frame execution and draw keep effects fenced', async () => {
     const records = capture(), f = probe(), {p, calls, surface} = f
     await loaded(p); p.liveSurfaces = [surface]
+    surface.liveGeneration = p.liveGeneration
     p.surfaces.set(surface, {ready: true, visible: true, width: 100, height: 100, ctx: {}})
     records.length = 0; calls.length = 0
     p.pageHidden = true; p.surfaceFrame()

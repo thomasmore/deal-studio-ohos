@@ -96,7 +96,7 @@ export class AppActor {
     this.callbacks.render(true, false)
   }
 
-  resume(): void {
+  reconcileState(): void {
     if (!this.ready() || this.mode === 'PREVIEW') { return }
     let keys = this.stateKeys()
     let changed = keys.length > 0 && store.loadState(keys[0], keys[1], this.stamp()) !== this.diskState
@@ -105,6 +105,11 @@ export class AppActor {
       let restored = this.restoreState()
       if (restored !== null) { this.currentState = restored }
     }
+  }
+
+  resume(): void {
+    if (!this.ready() || this.mode === 'PREVIEW') { return }
+    this.reconcileState()
     this.callbacks.render(true, false)
     if (!this.ready()) { return }
     this.runWidgetRefresh()

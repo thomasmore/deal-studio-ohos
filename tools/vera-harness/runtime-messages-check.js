@@ -13,7 +13,7 @@ const interfaces = {
   ProgramRef: ['vbc2:string', 'stamp:string'],
   AcquireOptions: ['mode:RuntimeMode', 'persistKey:string', 'seedState:string'],
   ActorHandle: ['appId:string', 'vmGeneration:number', 'leaseId:string'],
-  DrawRequest: ['nodeId:number', 'entry:string'],
+  DrawRequest: ['nodeId:number', 'entry:string', 'surfaceRevision:number'],
   SurfaceFrameEvent: ['elapsed:number', 'actions:string[]', 'draws:DrawRequest[]', 'loopStartedAt?:number', 'worldOnly?:boolean', 'worldStopping?:boolean'],
   SceneEventPayload: ['kind:string', 'body:string', 'other:string', 'x:number', 'y:number', 'z:number', 'speed:number', 'bodies:string[]', 'values:number[]'],
   InputPayload: ['kind:string', 'num:number', 'str:string', 'bool:boolean', 'phase:string', 'id:number', 'x:number', 'y:number', 'scene?:SceneEventPayload'],
@@ -59,7 +59,7 @@ const program: M.ProgramRef = { vbc2: 'encoded', stamp: 'sha256' }
 const modes: M.RuntimeMode[] = ['PREVIEW', 'LIVE_EPHEMERAL', 'LIVE_PERSISTENT']
 const options: M.AcquireOptions = { mode: modes[0], persistKey: '', seedState: '' }
 const handle: M.ActorHandle = { appId: 'app', vmGeneration: 1, leaseId: 'opaque' }
-const draw: M.DrawRequest = { nodeId: 7, entry: 'draw' }
+const draw: M.DrawRequest = { nodeId: 7, entry: 'draw', surfaceRevision: 3 }
 const surface: M.SurfaceFrameEvent = { elapsed: 16, actions: ['animate'], draws: [draw] }
 const startedSurface: M.SurfaceFrameEvent = { ...surface, loopStartedAt: 1000 }
 const numeric: M.InputPayload = { kind: 'NUMBER', num: 42, str: '', bool: false, phase: '', id: 0, x: 0, y: 0 }
@@ -163,6 +163,8 @@ const invalid = [
   ['tick is not input', `const bad: M.InputEvent = tick`],
   ['string tick elapsed', `const bad: M.TickEvent = { ...tick, elapsed: '16' }`],
   ['string draw node', `const bad: M.DrawRequest = { ...draw, nodeId: '7' }`],
+  ['missing draw revision', `const bad: M.DrawRequest = { nodeId: 7, entry: 'draw' }`],
+  ['string draw revision', `const bad: M.DrawRequest = { ...draw, surfaceRevision: '3' }`],
   ['string surface loop start', `const bad: M.SurfaceFrameEvent = { ...surface, loopStartedAt: '1000' }`],
   ['string timing', `const bad: M.FrameEnvelope = { ...frame, timing: ['1'] }`],
   ['string scene coordinate', `const bad: M.SceneEventPayload = { ...sceneEvent, z: '3' }`],

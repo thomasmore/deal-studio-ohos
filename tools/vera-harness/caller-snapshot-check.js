@@ -44,11 +44,11 @@ function deferred() {
 }
 
 class Data {}
-const Generate = load('GeneratePage', ['doRefine', 'refineWithModel', 'setFullscreen', 'openWhole', 'send',
+const Generate = load('GeneratePage', ['doRefine', 'refineWithModel', 'setFullscreen', 'openWhole', 'showAgent', 'send',
   'hasResult', 'stopGeneration', 'aboutToDisappear'], {
   WIDGET_ASK: 'Widget: ', MODE_DEEPSEEK: 'cloud', MODE_SERVER: 'server', MAX_RETRIES: 3, TAB_PREVIEW: 'preview',
   templateSelectEnabled: () => false, surfaceRouteEnabled: () => false, drawsSurface: () => false,
-  settings: {}, SourceDelta: Data, setTimeout: () => 1, clearTimeout() {}
+  settings: {}, SourceDelta: Data, READY_NOTE_MS: 3000, trace() {}, setTimeout: () => 1, clearTimeout() {}
 })
 
 function generate() {
@@ -62,7 +62,8 @@ function generate() {
     runOnOpen: false, fullscreen: false, readyNote: false, readyNoteTimer: -1, status: 'Ready',
     activeOperation: {cancel() {}, isCancelled: () => false}, keyboardWindow: null,
     prepareRequest() {}, beginOperation() { return this.activeOperation }, resetRunMetrics() {}, startRun() {},
-    startAttemptOne() { calls.model++; calls.compile++ }, finishMetrics() {}, settleQuestion() {}, scrollDown() {}
+    startAttemptOne() { calls.model++; calls.compile++ }, finishMetrics() {}, settleQuestion() {}, scrollDown() {},
+    genStartTime: Date.now(), acceptRequest() {}, closeRun() {}
   })
   return {page, gate, calls}
 }
@@ -171,12 +172,40 @@ async function check(name, work) {
       })
     }
   }
-  await check('Fullscreen transfer waits for the barrier and blocks a second transfer', async () => {
-    const {page, gate, calls} = generate(), pending = page.setFullscreen(true)
+  await check('First result opens directly; fullscreen transfers wait for the barrier and block duplicates', async () => {
+    const result = {source: 'built-source', vbc2: 'built-program', record: null,
+      composed: {dropped: []}, waitedMs: () => 0}
+    const first = generate()
+    first.page.compiledVbc2 = ''; first.page.compiledSource = ''
+    first.page.cornerHidden = true; first.page.composerHidden = true
+    first.page.previewController.flushAndSnapshot = () => {
+      first.calls.capture++
+      return Promise.reject(Error('Preview is not attached'))
+    }
+    first.page.showAgent(result)
+    assert.equal(first.calls.capture, 0); assert.equal(first.page.fullscreen, true)
+    assert.equal(first.page.readyNote, true); assert.equal(first.page.readyNoteTimer, 1)
+    assert.equal(first.page.cornerHidden, false); assert.equal(first.page.composerHidden, false)
+    assert.equal(first.page.tab, 'preview'); assert.match(first.page.status, /^Ready in /)
+    assert.equal(first.page.compiledVbc2, result.vbc2); assert.equal(first.page.compiledSource, result.source)
+    assert.equal(first.page.carriedState, 'old'); assert.equal(first.page.liveState, 'callback-state')
+    assert.equal(first.page.snapshotting, false)
+    first.page.fullscreen = false
+    first.page.showAgent(result)
+    assert.equal(first.page.fullscreen, false); assert.equal(first.calls.capture, 0)
+    for (const blocked of ['disposed', 'snapshotting']) {
+      const fresh = generate()
+      fresh.page[blocked] = true
+      await fresh.page.openWhole(true)
+      assert.equal(fresh.page.fullscreen, false); assert.equal(fresh.page.readyNote, false)
+      assert.equal(fresh.calls.capture, 0)
+    }
+    const {page, gate, calls} = generate(), pending = page.openWhole()
     assert.equal(page.fullscreen, false); assert.equal(await page.setFullscreen(false), false)
     assert.equal(calls.capture, 1); noWork(calls)
-    gate.resolve('fullscreen-state'); assert.equal(await pending, true)
+    gate.resolve('fullscreen-state'); await pending
     assert.equal(page.fullscreen, true); assert.equal(page.carriedState, 'fullscreen-state'); assert.equal(page.snapshotting, false)
+    assert.equal(page.readyNote, true); assert.equal(page.readyNoteTimer, 1)
   })
   await check('Fullscreen rejection preserves view and state, resets busy, and reports error', async () => {
     const {page, gate, calls} = generate(), pending = page.openWhole()

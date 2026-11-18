@@ -1368,7 +1368,7 @@ export struct GeneratePage {
     // true outcome instead of the mid-run 'Composing...' state.
     this.acceptRequest()
     this.closeRun(true, 0)
-    if (!hadProgram) { this.openWhole() }
+    if (!hadProgram) { this.openWhole(true) }
   }
 
   /**
@@ -1770,7 +1770,7 @@ export struct GeneratePage {
       this.modelWrote = true
       this.compositionJson = ''
       this.status = 'Compiled successfully on attempt ' + this.attempt
-      if (!hadProgram) { this.openWhole() }
+      if (!hadProgram) { this.openWhole(true) }
       logMark('gen-compiled', 'attempt=' + this.attempt.toString())
       let endFields: Record<string, Object> = {}
       endFields['ok'] = true
@@ -3337,11 +3337,18 @@ host.worldGuide = this.worldGuide
    * a slot (the Try one of these demos). Only a new one: a change keeps whichever view the person was in. The run's line stays
    * over it for a few seconds; the collapse button and Back return to the pane, where the line, Code and Metrics are.
    */
-  private async openWhole(): Promise<void> {
-    if (this.fullscreen) { return }
-    let pending = this.setFullscreen(true)
-    let request = this.snapshotRequestId
-    if (!await pending || this.disposed || request !== this.snapshotRequestId || !this.fullscreen) { return }
+  private async openWhole(firstPresentation: boolean = false): Promise<void> {
+    if (this.disposed || this.snapshotting || this.fullscreen) { return }
+    if (firstPresentation) {
+      this.cornerHidden = false
+      this.tab = TAB_PREVIEW
+      this.composerHidden = false
+      this.fullscreen = true
+    } else {
+      let pending = this.setFullscreen(true)
+      let request = this.snapshotRequestId
+      if (!await pending || this.disposed || request !== this.snapshotRequestId || !this.fullscreen) { return }
+    }
     this.readyNote = true
     // The line of an earlier run goes with its own timer, not this run's line with it.
     if (this.readyNoteTimer >= 0) { clearTimeout(this.readyNoteTimer) }

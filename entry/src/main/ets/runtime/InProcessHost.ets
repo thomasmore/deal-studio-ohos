@@ -25,6 +25,7 @@ interface ReleaseOptions {
 
 interface SurfaceGfx {
   nodeId: number
+  surfaceRevision: number
   ops: GfxOp[]
 }
 
@@ -68,6 +69,7 @@ class MailboxEntry {
   program: ProgramRef | null = null
   options: AcquireOptions | null = null
   saveState: boolean = false
+  reopen: boolean = false
   resolveHandle: ((handle: ActorHandle) => void) | null = null
   resolveSnapshot: ((encoded: string) => void) | null = null
   resolveVoid: (() => void) | null = null
@@ -183,8 +185,10 @@ export class InProcessHost implements EffectResultHost {
     let target = record
     if (target.idleTimer !== -1) { clearTimeout(target.idleTimer); target.idleTimer = -1 }
     target.subscriber = subscriber
+    let reopen = !initialize && target.initialized && target.leases.size === 0
     let lease = this.createLease(target)
     let entry = new MailboxEntry(initialize ? 'INITIALIZE' : 'ACQUIRE', lease)
+    entry.reopen = reopen
     let promise = new Promise<ActorHandle>((resolve, reject) => {
       entry.resolveHandle = resolve
       entry.reject = reject
@@ -325,25 +329,25 @@ export class InProcessHost implements EffectResultHost {
     }
     let record = lease.record!
     if (draws.length === 0) { return { status: 'ACCEPTED' } }
-    let unique: Map<number, DrawRequest> = new Map<number, DrawRequest>()
-    for (let draw of this.copyDraws(draws)) { unique.set(draw.nodeId, draw) }
-    let index: Map<number, MailboxEntry> = new Map<number, MailboxEntry>()
+    let unique: Map<string, DrawRequest> = new Map<string, DrawRequest>()
+    for (let draw of this.copyDraws(draws)) { unique.set(this.drawKey(draw), draw) }
+    let index: Map<string, MailboxEntry> = new Map<string, MailboxEntry>()
     for (let candidate of record.mailbox) {
       if (candidate.kind === 'DRAW' && candidate.lease === lease && candidate.segment === record.segment) {
-        for (let prior of candidate.draws) { index.set(prior.nodeId, candidate) }
+        for (let prior of candidate.draws) { index.set(this.drawKey(prior), candidate) }
       }
     }
     let missing: DrawRequest[] = []
     let touched: Set<MailboxEntry> = new Set<MailboxEntry>()
     unique.forEach((draw: DrawRequest) => {
-      let match = index.get(draw.nodeId)
+      let match = index.get(this.drawKey(draw))
       if (match === undefined) { missing.push(draw) }
       else { touched.add(match) }
     })
     if (!this.capacity(record, false, missing.length > 0 ? 1 : 0)) { return { status: 'BACKPRESSURE' } }
     touched.forEach((entry: MailboxEntry) => {
       for (let index = 0; index < entry.draws.length; index++) {
-        let replacement = unique.get(entry.draws[index].nodeId)
+        let replacement = unique.get(this.drawKey(entry.draws[index]))
         if (replacement !== undefined) { entry.draws[index] = replacement }
       }
       entry.admissions++
@@ -419,8 +423,13 @@ export class InProcessHost implements EffectResultHost {
       seedState: options.mode === 'PREVIEW' ? '' : options.seedState }
   }
 
+  private drawKey(draw: DrawRequest): string {
+    return draw.surfaceRevision.toString() + ':' + draw.nodeId.toString()
+  }
+
   private copyDraws(draws: DrawRequest[]): DrawRequest[] {
-    return draws.map((draw: DrawRequest): DrawRequest => ({ nodeId: draw.nodeId, entry: draw.entry }))
+    return draws.map((draw: DrawRequest): DrawRequest => ({ nodeId: draw.nodeId, entry: draw.entry,
+      surfaceRevision: draw.surfaceRevision }))
   }
 
   private identity(options: AcquireOptions, current: ActorRecord | null): string {
@@ -779,6 +788,11 @@ export class InProcessHost implements EffectResultHost {
         record.actor!.initialize(record.program, record.options, false)
         record.initialized = true
       } else if (record.actor!.ready()) {
+        if (entry.reopen) {
+          record.firstFrameFailed = false
+          record.requiringFirstFrame = true
+          record.actor!.reconcileState()
+        }
         record.actor!.notifyStateSnapshot()
         this.render(record, false)
       }
@@ -788,7 +802,7 @@ export class InProcessHost implements EffectResultHost {
       }
       record.requiringFirstFrame = false
       entry.lease.state = 'ACTIVE'
-      if (entry.kind === 'INITIALIZE') { record.actor!.runWidgetRefresh() }
+      if (entry.kind === 'INITIALIZE' || entry.reopen) { record.actor!.runWidgetRefresh() }
       if (this.disposed || !record.actor!.ready()) {
         throw new HostOperationFailure('ACTOR_NOT_READY')
       }
@@ -873,7 +887,10 @@ export class InProcessHost implements EffectResultHost {
         this.safe(delivery)
       }
       if (this.disposed || !record.actor!.ready()) { throw new HostOperationFailure('ACTOR_NOT_READY') }
-      if (entry.kind === 'REPLACE') { record.actor!.runWidgetRefresh() }
+      if (entry.kind === 'REPLACE' ||
+          (entry.kind === 'PROMOTE' && oldOptions.mode === 'PREVIEW' && options.mode !== 'PREVIEW')) {
+        record.actor!.runWidgetRefresh()
+      }
       if (this.disposed || !record.actor!.ready()) { throw new HostOperationFailure('ACTOR_NOT_READY') }
       entry.resolveHandle!(handle)
     } catch (_) {
@@ -1004,7 +1021,8 @@ export class InProcessHost implements EffectResultHost {
     try {
       for (let draw of draws) {
         current = draw
-        let item: SurfaceGfx = { nodeId: draw.nodeId, ops: record.actor!.draw(draw.entry) }
+        let item: SurfaceGfx = { nodeId: draw.nodeId, surfaceRevision: draw.surfaceRevision,
+          ops: record.actor!.draw(draw.entry) }
         gfx.push(item)
         StageTrace.emit(record, 'DRAW', { nodeId: draw.nodeId, result: 'OK' })
       }

@@ -404,7 +404,7 @@ function input(handle, action = 'add', value = 0, extra = {}) {
 }
 const post = (h, handle, action = 'add', value = 0, extra = {}) => h.postInput(handle, input(handle, action, value, extra))
 const tick = (tickerId, elapsed, action = 'add') => ({ tickerId, action, elapsed })
-const draw = (nodeId = 1, entry = 'draw') => ({ nodeId, entry })
+const draw = (nodeId = 1, entry = 'draw', surfaceRevision = 1) => ({ nodeId, entry, surfaceRevision })
 const surface = (elapsed = 16, actions = ['frameA'], draws = [draw()]) => ({ elapsed, actions, draws })
 const markedSurface = (loopStartedAt, ...args) => ({ ...surface(...args), loopStartedAt })
 const sceneEvent = (extra = {}) => ({ kind: 'hit', body: 'body', other: 'other',
@@ -573,25 +573,61 @@ test('promote and replace require exclusive lease, including execution-time rech
   accepted(post(h, c))
 })
 
-test('promote preserves VM state and generation, invalidates old handle and never refreshes/reloads', async () => {
-  const h = host(), p = probe()
-  const old = await acquire(h, p, programs.refreshed, options('PREVIEW'))
-  external(programs.refreshed, encoded(90))
+test('promote preserves VM and generation, refreshes only preview activation and never reloads', async () => {
+  for (const mode of ['LIVE_PERSISTENT', 'LIVE_EPHEMERAL']) {
+    const h = host(), p = probe()
+    const old = await acquire(h, p, programs.refreshed, options('PREVIEW'))
+    const actor = h.registry.get(old.appId).actor
+    external(programs.refreshed, encoded(90))
+    p.reset()
+    const a = await finish(h.promote(old, mode, mode === 'LIVE_PERSISTENT' ? 'project/version' : ''))
+    assert.equal(a.vmGeneration, old.vmGeneration)
+    assert.equal(a.leaseId, old.leaseId)
+    assert.equal(h.registry.get(a.appId).actor, actor)
+    if (mode === 'LIVE_PERSISTENT') assert.equal(a.appId, 'project/version')
+    assert.notStrictEqual(a, old)
+    assert.equal((await snapshot(h, a)).n, 11)
+    assert.equal((await snapshot(h, a)).refreshes, 1)
+    assert.equal(count('load-attempt'), 0)
+    assert.equal(count('save-attempt'), mode === 'LIVE_PERSISTENT' ? 1 : 0)
+    assert.deepEqual(sequence(), mode === 'LIVE_PERSISTENT' ?
+      ['snapshot', 'frame', 'snapshot', 'frame', 'save', 'saved', 'effect'] :
+      ['snapshot', 'frame', 'snapshot', 'frame', 'effect'])
+    assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=1', 'n=11'])
+    assert.equal(p.effects.length, 1)
+    assert.equal(p.effects[0].appId, a.appId)
+    assert.equal(p.effects[0].vmGeneration, a.vmGeneration)
+    rejected(post(h, old))
+    await rejects(h.requestSnapshot(old), 'INVALID_HANDLE')
+    const frames = p.frames.length
+    let same = await finish(h.promote(a, mode, mode === 'LIVE_PERSISTENT' ? 'project/version' : ''))
+    assert.equal(p.frames.length, frames)
+    for (const key of ['promoted/other', '']) {
+      p.reset()
+      same = await finish(h.promote(same, key ? 'LIVE_PERSISTENT' : 'LIVE_EPHEMERAL', key))
+      assert.equal((await snapshot(h, same)).refreshes, 1)
+      assert.equal((await snapshot(h, same)).n, 11)
+      assert.equal(ioCount(), 0)
+      assert.equal(p.effects.length, 0)
+    }
+    accepted(post(h, same, 'add', 2))
+    assert.equal((await snapshot(h, same)).n, 13)
+  }
+  const h = host(), p = probe(), old = await acquire(h, p, programs.refreshed, options('PREVIEW'))
+  const actor = h.registry.get(old.appId).actor, view = actor.view
+  actor.view = () => null
   p.reset()
-  const a = await finish(h.promote(old, 'LIVE_PERSISTENT', 'project/version'))
-  assert.equal(a.vmGeneration, old.vmGeneration)
-  assert.equal(a.appId, 'project/version')
-  assert.notStrictEqual(a, old)
-  assert.equal((await snapshot(h, a)).n, 1)
-  assert.equal((await snapshot(h, a)).refreshes, 0)
+  await rejects(h.promote(old, 'LIVE_PERSISTENT', 'failed-promotion/version'), 'ACTOR_NOT_READY')
   assert.equal(ioCount(), 0)
-  assert.deepEqual(sequence(), ['snapshot', 'frame'])
-  rejected(post(h, old))
-  await rejects(h.requestSnapshot(old), 'INVALID_HANDLE')
-  const frames = p.frames.length
-  const same = await finish(h.promote(a, 'LIVE_PERSISTENT', 'project/version'))
-  assert.equal(p.frames.length, frames)
-  accepted(post(h, same, 'add', 2))
+  assert.equal(p.effects.length, 0)
+  assert.equal(p.frames.length, 0)
+  assert.equal(actor.mode, 'PREVIEW')
+  actor.view = view
+  p.reset()
+  const retried = await finish(h.promote(old, 'LIVE_PERSISTENT', 'failed-promotion/version'))
+  assert.equal((await snapshot(h, retried)).refreshes, 1)
+  assert.equal(p.effects.length, 1)
+  assert.equal(count('save-attempt'), 1)
 })
 
 test('replace changes generation, installs target config before init and fences old inputs/effects', async () => {
@@ -792,6 +828,140 @@ test('last lease idle reuse retains unsaved state, changes subscriber, cancels d
   assert.equal(p.frames.length, before)
   assert.equal((await snapshot(h, b)).n, 10)
 })
+
+test('idle persistent reopen adopts same-stamp external state before its first snapshot and frame', async () => {
+  const h = host(), p = probe(), q = probe(), a = await acquire(h, p, programs.basic, persistent())
+  accepted(post(h, a, 'add', 1, { persist: true }))
+  await finish(h.release(a))
+  external(programs.basic, encoded(99))
+  const oldFrames = p.frames.length
+  q.reset()
+  const b = await acquire(h, q, programs.basic, persistent(), a.appId)
+  assert.equal(b.vmGeneration, a.vmGeneration)
+  assert.deepEqual(q.snapshots.map(value => stateOf(value).n), [99])
+  assert.deepEqual(q.frames.map(frame => frame.view.text), ['n=99'])
+  assert.deepEqual(sequence(), ['snapshot', 'frame'])
+  accepted(post(h, b, 'add', 1, { persist: true }))
+  assert.equal((await snapshot(h, b)).n, 100)
+  assert.equal(stateOf(store.loadState('project', 'version', programs.basic.stamp)).n, 100)
+  assert.equal(p.frames.length, oldFrames)
+})
+
+test('idle reopen keeps unsaved memory when a nonempty saved baseline is unchanged', async () => {
+  external(programs.basic, encoded(1))
+  const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+  accepted(post(h, a, 'add', 8))
+  await finish(h.release(a))
+  const saved = disk.get(stateFile())
+  p.reset()
+  const b = await acquire(h, p, programs.basic, persistent(), a.appId)
+  assert.deepEqual(p.snapshots.map(value => stateOf(value).n), [9])
+  assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=9'])
+  assert.equal(count('save'), 0)
+  assert.equal(disk.get(stateFile()), saved)
+  assert.equal((await snapshot(h, b)).n, 9)
+})
+
+for (const changed of [false, true]) {
+  test('idle reopen refreshes exactly once after first frame, changed disk=' + changed, async () => {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.refreshed, persistent())
+    accepted(post(h, a, 'add', 5))
+    await finish(h.release(a))
+    if (changed) external(programs.refreshed, encoded(100))
+    p.reset()
+    let resolved = false
+    const pending = h.acquire(a.appId, programs.refreshed, persistent(), p.subscriber)
+    pending.then(() => { resolved = true })
+    assert.equal(resolved, false)
+    const before = changed ? 100 : 16
+    assert.deepEqual(p.snapshots.map(value => stateOf(value).n), [before, before + 10])
+    assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=' + before, 'n=' + (before + 10)])
+    assert.deepEqual(sequence(), ['snapshot', 'frame', 'snapshot', 'frame', 'save', 'saved', 'effect'])
+    const b = await finish(pending)
+    assert.equal((await snapshot(h, b)).refreshes, changed ? 1 : 2)
+    assert.equal(stateOf(store.loadState('project', 'version', programs.refreshed.stamp)).n, before + 10)
+  })
+}
+
+test('active and pending additional leases do not reload disk or duplicate reopen refresh', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.refreshed, persistent())
+  external(programs.refreshed, encoded(100))
+  p.reset()
+  const b = await acquire(h, p, programs.refreshed, persistent(), a.appId)
+  assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=11'])
+  assert.equal(ioCount(), 0)
+  assert.equal(p.effects.length, 0)
+  await finish(h.release(a))
+  await finish(h.release(b))
+  p.reset()
+  let first, second
+  const trigger = await acquire(h, p, programs.basic, options())
+  p.reset()
+  queued(h, trigger, p, () => {
+    first = watch(h.acquire(a.appId, programs.refreshed, persistent(), p.subscriber))
+    second = watch(h.acquire(a.appId, programs.refreshed, persistent(), p.subscriber))
+  })
+  const c = await finish(first), d = await finish(second)
+  assert.deepEqual(p.frames.slice(1).map(frame => frame.view.text), ['n=100', 'n=110', 'n=110'])
+  assert.equal(count('save'), 1)
+  assert.equal(p.effects.length, 1)
+  assert.equal((await snapshot(h, c)).n, 110)
+  assert.equal((await snapshot(h, d)).refreshes, 1)
+})
+
+for (const invalid of ['missing', 'malformed', 'wrong-stamp', 'invalid-tuple']) {
+  test('idle reopen retains unsaved memory without overwriting ' + invalid + ' disk state', async () => {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.basic, persistent())
+    accepted(post(h, a, 'add', 1, { persist: true }))
+    accepted(post(h, a, 'add', 3))
+    await finish(h.release(a))
+    if (invalid === 'missing') disk.delete(stateFile())
+    else if (invalid === 'malformed') disk.set(stateFile(), '{broken')
+    else if (invalid === 'wrong-stamp') external(programs.newer, encoded(99))
+    else disk.set(stateFile(), JSON.stringify({ stamp: programs.basic.stamp, value: ['unknown'] }))
+    const saved = disk.get(stateFile())
+    p.reset()
+    const b = await acquire(h, p, programs.basic, persistent(), a.appId)
+    assert.deepEqual(p.snapshots.map(value => stateOf(value).n), [5])
+    assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=5'])
+    assert.equal(count('save'), 0)
+    assert.equal(disk.get(stateFile()), saved)
+    assert.equal((await snapshot(h, b)).n, 5)
+  })
+}
+
+test('failed idle reopen first frame does not refresh, save or emit effects and can retry', async () => {
+  const h = host(), p = probe(), a = await acquire(h, p, programs.refreshed, persistent())
+  await finish(h.release(a))
+  external(programs.refreshed, encoded(-1))
+  p.reset()
+  await rejects(h.acquire(a.appId, programs.refreshed, persistent(), p.subscriber), 'ACTOR_NOT_READY')
+  assert.equal(p.frames.length + p.effects.length + p.saved.length + count('save'), 0)
+  external(programs.refreshed, encoded(100))
+  p.reset()
+  const b = await acquire(h, p, programs.refreshed, persistent(), a.appId)
+  assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=100', 'n=110'])
+  assert.equal((await snapshot(h, b)).n, 110)
+})
+
+for (const mode of ['PREVIEW', 'LIVE_EPHEMERAL']) {
+  test('idle ' + mode + ' reopen never accesses disk', async () => {
+    const h = host(), p = probe(), config = options(mode)
+    const a = await acquire(h, p, programs.refreshed, config)
+    await finish(h.release(a))
+    p.reset()
+    const b = await acquire(h, p, programs.refreshed, config, a.appId)
+    assert.equal(ioCount(), 0)
+    if (mode === 'PREVIEW') {
+      assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=1'])
+      assert.equal(p.snapshots.length + p.effects.length, 0)
+    } else {
+      assert.deepEqual(p.frames.map(frame => frame.view.text), ['n=11', 'n=21'])
+      assert.equal((await snapshot(h, b)).refreshes, 2)
+      assert.equal(p.effects.length, 1)
+    }
+  })
+}
 
 for (const runExpiryTimer of [true, false]) {
   test('5-second idle expiry destroys unsaved state, timer executed=' + runExpiryTimer, async () => {
@@ -1049,13 +1219,18 @@ test('surface coalescing caps elapsed at 100 and uses latest ordered actions and
   const h = host(), p = probe(), a = await acquire(h, p)
   queued(h, a, p, () => {
     accepted(h.postSurfaceFrame(a, surface(60, ['frameA'], [draw(1)])))
-    coalesced(h.postSurfaceFrame(a, surface(70, ['frameB', 'frameA'], [draw(2, 'drawOther')])))
+    const frame = surface(70, ['frameB', 'frameA'], [draw(2, 'drawOther', 8)])
+    coalesced(h.postSurfaceFrame(a, frame))
+    frame.draws[0].surfaceRevision = 99
+    frame.draws[0].nodeId = 99
+    frame.draws[0].entry = 'drawTrap'
+    frame.draws.length = 0
   })
   const state = await snapshot(h, a)
   assert.deepEqual(state.marks, [-100, 100])
   assert.equal(state.n, 301)
   const frame = latest(p)
-  assert.deepEqual(frame.gfx.map(item => item.nodeId), [2])
+  assert.deepEqual(frame.gfx.map(item => [item.nodeId, item.surfaceRevision]), [[2, 8]])
   assert.equal(frame.gfx[0].ops[0].x, 1301)
   assert.equal(frame.view, null)
   assert.equal(frame.timing.length, 3)
@@ -1068,31 +1243,43 @@ test('pointer move keeps latest payload/draws; down/up ordered barriers prevent 
   })
   queued(h, a, p, () => {
     accepted(h.postInput(a, move(3)))
-    coalesced(h.postInput(a, move(7, [draw(2, 'drawOther')])))
+    const event = move(7, [draw(2, 'drawOther', 9)])
+    coalesced(h.postInput(a, event))
+    event.draws[0].surfaceRevision = 99
+    event.draws[0].nodeId = 99
+    event.draws[0].entry = 'drawTrap'
+    event.draws.length = 0
     accepted(post(h, a, 'pointer', 0, { kind: 'SURFACE_UP', payload: payload('POINTER', 0, { id: 2, x: 10, y: 1 }) }))
     accepted(h.postInput(a, move(11, [])))
   })
   assert.deepEqual((await snapshot(h, a)).marks, [7, 10, 11])
   const gfx = p.frames.flatMap(frame => frame.gfx)
-  assert.deepEqual(gfx.map(item => item.nodeId), [2])
+  assert.deepEqual(gfx.map(item => [item.nodeId, item.surfaceRevision]), [[2, 9]])
   assert.equal(gfx[0].ops[0].x, 1011)
   assert.equal(count('save'), 0)
 })
 
-test('requestDraw coalesces per node, last entry wins, partial overlapping batches complete once', async () => {
+test('requestDraw coalesces per revision and node, last entry wins, partial overlapping batches complete once', async () => {
   const h = host(), p = probe(), a = await acquire(h, p)
   let closing
   p.reset()
   queued(h, a, p, () => {
-    accepted(h.requestDraw(a, [draw(1), draw(1, 'drawOther')]))
-    accepted(h.requestDraw(a, [draw(2), draw(3)]))
-    coalesced(h.requestDraw(a, [draw(1), draw(2, 'drawOther')]))
+    accepted(h.requestDraw(a, [draw(1), draw(1, 'drawOther'), draw(1, 'draw', 2)]))
+    accepted(h.requestDraw(a, [draw(2), draw(3), draw(1, 'draw', 3)]))
+    coalesced(h.requestDraw(a, [draw(1), draw(1, 'drawOther', 2), draw(2, 'drawOther')]))
     accepted(h.requestDraw(a, [draw(3, 'drawOther'), draw(4)]))
+    const draws = [draw(1, 'drawOther', 3)]
+    coalesced(h.requestDraw(a, draws))
+    draws[0].surfaceRevision = 99
+    draws[0].nodeId = 99
+    draws[0].entry = 'drawTrap'
+    draws.length = 0
     closing = watch(h.release(a))
   })
   await finish(closing)
   const gfx = p.frames.flatMap(frame => frame.gfx)
-  assert.deepEqual(gfx.map(item => [item.nodeId, item.ops[0].x]), [[1, 1], [2, 1001], [3, 1001], [4, 1]])
+  assert.deepEqual(gfx.map(item => [item.nodeId, item.surfaceRevision, item.ops[0].x]),
+    [[1, 1, 1], [1, 2, 1001], [2, 1, 1001], [3, 1, 1001], [1, 3, 1001], [4, 1, 1]])
   assert(p.frames.slice(1).every(frame => frame.view === null))
 })
 
@@ -2025,6 +2212,8 @@ test('requestDraw backpressure leaves overlapping queued nodes unchanged and adm
     accepted(h.requestDraw(a, [draw(1)]))
     for (let i = 0; i < 239; i++) accepted(h.postTick(a, tick('fast-' + i, 1), false))
     pressure(h.requestDraw(a, [draw(1, 'drawOther'), draw(2)]))
+    pressure(h.requestDraw(a, [draw(1, 'drawOther'), draw(1, 'draw', 2)]))
+    coalesced(h.requestDraw(a, [draw(1)]))
     barrier = watch(h.requestSnapshot(a))
   })
   assert.equal(stateOf(await finish(barrier)).n, 240)
@@ -2042,8 +2231,13 @@ test('every world view carries detached preorder scenes through acquire, promoti
   let a = await acquire(h, p, programs.worldRefreshed, options('PREVIEW'))
   assertScenes(latest(p), 1)
   assert.equal(p.snapshots.length, 0)
+  const generation = a.vmGeneration
+  p.reset()
   a = await finish(h.promote(a, 'LIVE_PERSISTENT', 'world/version'))
-  assertScenes(latest(p), 1)
+  assert.equal(a.vmGeneration, generation)
+  assert.equal(p.frames.length, 2)
+  assertScenes(p.frames[0], 1)
+  assertScenes(latest(p), 2)
   external(programs.worldRefreshed, encoded(7), 'world/version')
   p.reset()
   accepted(h.postRefresh(a, 'APP'))

@@ -22,6 +22,7 @@ export interface ActorHandle {
 export interface DrawRequest {
   nodeId: number
   entry: string
+  surfaceRevision: number
 }
 
 export interface SurfaceFrameEvent {
