@@ -512,6 +512,15 @@ export struct GeneratePage {
   private acceptedOrigin: string = ''
   private acceptedMetrics: VersionMetrics | null = null
   private metricTotals: VersionMetrics = new VersionMetrics()
+  /**
+   * This run alone. `metricTotals` is cumulative across every request a page
+   * session makes, because the Metrics tab and the saved version show the whole
+   * session; the run log wants one run, or summing its lines double-counts every
+   * token, attempt and second.
+   */
+  private runMetrics: VersionMetrics = new VersionMetrics()
+  /** Model requests this run sent: attempts and repairs, auxiliary agent calls, selector calls, server requests. */
+  private runModelCalls: number = 0
   private metricRunId: number = -1
   private metricMode: string = ''
   private metricModel: string = ''
@@ -547,6 +556,14 @@ export struct GeneratePage {
       settings.getBaseUrl().replace(/\/+$/, '') === 'https://api.deepseek.com'
     this.metricRates = [this.ratePerMillion('cache'), this.ratePerMillion('fresh'), this.ratePerMillion('output')]
     this.metricSeenSideCalls = new Set<SideCall>()
+    // A new run starts its own figures here; the cumulative ones above go on
+    // accumulating for the Metrics tab and the saved version.
+    this.runMetrics = new VersionMetrics()
+    this.runMetrics.provider = this.modeLabel()
+    this.runMetrics.model = this.metricModel
+    this.runMetrics.runs = 1
+    this.runMetrics.partial = !this.metricPriced
+    this.runModelCalls = 0
     let totals = this.metricTotals
     if (totals.runs === 0) {
       totals.provider = this.modeLabel()
@@ -565,17 +582,22 @@ export struct GeneratePage {
 
   private addMetricUsage(input: number, cached: number, output: number, priced: boolean): void {
     let totals = this.metricTotals
+    let run = this.runMetrics
     totals.inputTokens = this.measuredTotal(totals.inputTokens, input)
     totals.cacheHitTokens = this.measuredTotal(totals.cacheHitTokens, cached)
     totals.outputTokens = this.measuredTotal(totals.outputTokens, output)
+    run.inputTokens = this.measuredTotal(run.inputTokens, input)
+    run.cacheHitTokens = this.measuredTotal(run.cacheHitTokens, cached)
+    run.outputTokens = this.measuredTotal(run.outputTokens, output)
     if (priced && input >= 0 && cached >= 0 && output >= 0) {
       let usd = (cached * this.metricRates[0] + Math.max(0, input - cached) * this.metricRates[1] +
         output * this.metricRates[2]) / 1000000
       totals.estimatedUsd = this.measuredTotal(totals.estimatedUsd, usd)
+      run.estimatedUsd = this.measuredTotal(run.estimatedUsd, usd)
     } else {
-      totals.partial = true
+      this.markMetricsPartial()
     }
-    if (input < 0 || cached < 0 || output < 0) { totals.partial = true }
+    if (input < 0 || cached < 0 || output < 0) { this.markMetricsPartial() }
   }
 
   private async metricWork<T>(run: number, work: () => Promise<T>): Promise<T> {
@@ -594,8 +616,10 @@ export struct GeneratePage {
     for (let call of deepseek.getSideCalls(this.activeOperation)) {
       if (this.metricSeenSideCalls.has(call)) { continue }
       this.metricSeenSideCalls.add(call)
+      // Every side call is one model request this run sent, answered or not.
+      this.runModelCalls++
       if (!call.ok || (call.inputTokens === 0 && call.outputTokens === 0)) {
-        this.metricTotals.partial = true
+        this.markMetricsPartial()
         continue
       }
       this.addMetricUsage(call.inputTokens, call.cachedTokens, call.outputTokens, this.metricPriced)
@@ -603,7 +627,9 @@ export struct GeneratePage {
   }
 
   private beginMetricAttempt(run: number): void {
-    if (this.metricRunId === run) { this.metricTotals.attempts++ }
+    if (this.metricRunId !== run) { return }
+    this.metricTotals.attempts++
+    this.runMetrics.attempts++
   }
 
   private recordMetricResult(run: number, result: GenerateResult): void {
@@ -613,15 +639,32 @@ export struct GeneratePage {
     let cached = completeCache && known ? result.cacheHitTokens : -1
     this.addMetricUsage(known ? result.inputTokens : -1, cached,
       known ? result.outputTokens : -1, this.metricPriced && completeCache)
+    // The request itself was counted where it was sent; each tool round trip
+    // the model needed inside it is one more model request.
+    this.runModelCalls += result.toolRounds
     this.collectMetricSideCalls(run)
   }
 
   private finishMetrics(run: number): void {
     if (this.metricRunId !== run) { return }
     this.collectMetricSideCalls(run)
-    this.metricTotals.elapsedMs += Math.max(0, Date.now() - this.genStartTime)
+    let elapsed = Math.max(0, Date.now() - this.genStartTime)
+    this.metricTotals.elapsedMs += elapsed
+    // Not accumulated: the record is this run's wall clock, not the session's.
+    this.runMetrics.elapsedMs = elapsed
     this.writeRunLog()
     this.metricRunId = -1
+  }
+
+  /** The figures are approximate: say so on the version totals and in the run log alike. */
+  private markMetricsPartial(): void {
+    this.metricTotals.partial = true
+    this.runMetrics.partial = true
+  }
+
+  /** Count one model request this run sent; ignored once the run is over. */
+  private countModelCall(run: number): void {
+    if (this.metricRunId === run) { this.runModelCalls++ }
   }
 
   /**
@@ -631,25 +674,28 @@ export struct GeneratePage {
    */
   private writeRunLog(): void {
     try {
-      let totals = this.metricTotals
+      // The run's own figures, not the page session's cumulative ones: two
+      // requests of 100 input tokens each must log 100 then 100, not 100 then
+      // 200, or summing the file double-counts every token, attempt and cost.
+      let run = this.runMetrics
       let rec = new RunLogRecord()
       rec.ts = Date.now()
       rec.prompt = this.pendingRequest
       rec.mode = this.metricMode
-      rec.provider = totals.provider
-      rec.model = totals.model
+      rec.provider = run.provider
+      rec.model = run.model
       rec.path = !this.compiled ? 'not-built' :
         (this.modelWrote ? 'generate' : (this.compositionJson.length > 0 ? 'compose' : 'generate'))
       rec.compiled = this.compiled
       rec.verdict = this.status
-      rec.elapsedMs = totals.elapsedMs
-      rec.attempts = totals.attempts
-      rec.modelCalls = totals.runs
-      rec.inputTokens = totals.inputTokens
-      rec.cacheHitTokens = totals.cacheHitTokens
-      rec.outputTokens = totals.outputTokens
-      rec.estimatedUsd = totals.estimatedUsd
-      rec.partial = totals.partial
+      rec.elapsedMs = run.elapsedMs
+      rec.attempts = run.attempts
+      rec.modelCalls = this.runModelCalls
+      rec.inputTokens = run.inputTokens
+      rec.cacheHitTokens = run.cacheHitTokens
+      rec.outputTokens = run.outputTokens
+      rec.estimatedUsd = run.estimatedUsd
+      rec.partial = run.partial
       appendRunLog(this.hostContext().filesDir, rec)
     } catch (e) {
       console.warn('VERA-RUNLOG write failed: ' + (e as Error).message)
@@ -1205,13 +1251,20 @@ export struct GeneratePage {
   private async tryRoute(userPrompt: string, route: RouteRequest, operation: OperationController): Promise<void> {
     if (this.disposed || operation.isCancelled()) { return }
     let run = this.runId
-    this.metricTotals.partial = true
+    this.markMetricsPartial()
     let host = appAgentHost((s: string): void => { if (run === this.runId) { this.status = s } }, (vbc2: string): void => {
       if (run !== this.runId || this.cancelRequested) { return }
       this.previewVbc2 = vbc2
       this.previewNote = 'Sketching the screen...'
     }, (): boolean => run !== this.runId || this.cancelRequested, this.promptTemplate, this.surfaceGuide, operation)
     host.ask = (question: AgentQuestion): Promise<PersonAnswer> => this.askPerson(question, run, operation)
+    // Every selector call the agent makes goes through host.askJev; count each
+    // as one model request of this run.
+    let askJevForRun = host.askJev
+    host.askJev = async (body: string): Promise<string> => {
+      this.countModelCall(run)
+      return askJevForRun(body)
+    }
     let outcome: RouteOutcome
     try {
       outcome = await this.metricWork(run, (): Promise<RouteOutcome> => buildScreen(route, host))
@@ -1221,7 +1274,7 @@ export struct GeneratePage {
     }
     if (run !== this.runId || operation.isCancelled()) { return }
     if (outcome.kind === OUTCOME_CANCELLED) {
-      this.metricTotals.partial = true
+      this.markMetricsPartial()
       this.finishMetrics(run)
       return
     }
@@ -1395,6 +1448,9 @@ export struct GeneratePage {
         requestBody = JSON.stringify(refine)
         contentType = 'application/json'
       }
+      // One model request for the app: the server may call its model more than
+      // once inside it, but this is the one round trip the phone made.
+      this.countModelCall(run)
       let resp = await client.request(serverUrl() + '/compile', {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': contentType },
@@ -1431,7 +1487,6 @@ export struct GeneratePage {
         this.compiledSource = decoded.source
         this.compositionJson = ''
         this.modelWrote = true
-        this.acceptRequest()
         this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseInOut }, () => { this.composerOpen = false })
         this.tab = this.makeWidget ? TAB_WIDGET : TAB_PREVIEW
         this.compiled = true
@@ -1439,6 +1494,10 @@ export struct GeneratePage {
         if (this.makeWidget) { this.widgetFresh = false }
         metrics.success = true
         this.status = 'Server compiled successfully'
+        // Accept once compiled and status are final: the finishMetrics inside
+        // acceptRequest then logs the run's true outcome, not the mid-run
+        // 'Server generating...' line.
+        this.acceptRequest()
       } else {
         let body = resp.result as string
         try {
@@ -1488,6 +1547,9 @@ export struct GeneratePage {
   private async callModel(request: GenerateRequest, onToken: (token: string) => void, run: number,
       operation: OperationController): Promise<GenerateResult> {
     throwIfCancelled(operation)
+    // One model request, whether it is the first attempt, a repair after a
+    // compile error, or the local engine's write.
+    this.countModelCall(run)
     if (this.mode === MODE_DEEPSEEK) {
       // Initial generation, refinement, and retries share reasoning and output settings.
       await ensureCapabilities(this.hostContext())
@@ -1555,7 +1617,7 @@ export struct GeneratePage {
       }
     } catch (e) {
       if (run !== this.runId || operation.isCancelled()) { return }
-      this.metricTotals.partial = true
+      this.markMetricsPartial()
       metrics.genMs = Date.now() - genStart
       metrics.failLayer = 'request'
       this.attempts = [...this.attempts, metrics]
@@ -1574,7 +1636,7 @@ export struct GeneratePage {
       this.totalMs = Date.now() - this.genStartTime
       this.status = 'Stopped'
       this.generating = false
-      this.metricTotals.partial = true
+      this.markMetricsPartial()
       this.finishMetrics(run)
       return
     }
@@ -2031,13 +2093,15 @@ export struct GeneratePage {
     this.cancelRequested = false
     let run = ++this.runId
     this.genStartTime = Date.now()
-    this.metricTotals.partial = true
+    this.markMetricsPartial()
     this.status = 'Checking whether this changes the structure...'
     let result: EditResult
     try {
       result = await this.metricWork(run, (): Promise<EditResult> => editComposition(ask, record!, this.mode,
         async (request: string, c: Composition): Promise<CompositionEdit> => {
           throwIfCancelled(operation)
+          // Each structural decision is one selector (model) request.
+          this.countModelCall(run)
           let edit = await selectEdit(request, c, settings.getSelectorKey(), operation)
           throwIfCancelled(operation)
           return edit
@@ -2046,6 +2110,7 @@ export struct GeneratePage {
       if (run !== this.runId || operation.isCancelled()) { return }
       this.status = 'Could not change the structure: ' + (e as Error).message
       this.generating = false
+      this.finishMetrics(run)
       return
     }
     // Stop bumps runId too, and has already said Stopped.
@@ -2063,13 +2128,15 @@ export struct GeneratePage {
     this.compiledVbc2 = result.vbc2
     this.compositionJson = compositionToJson(result.composition!)
     this.templateKinds = result.composition!.kinds()
-    this.acceptRequest()
     this.compiled = true
     this.compileErrors = ''
     this.generating = false
     this.refinePrompt = ''
     this.totalMs = Date.now() - this.genStartTime
     this.status = 'Changed the structure: ' + result.note
+    // Accept after compiled and status are final, so the run log records the
+    // structural change's true outcome instead of the mid-run 'Checking...'.
+    this.acceptRequest()
   }
 
   private refineWithModel(ask: string, continuingOperation?: OperationController): void {
@@ -2124,10 +2191,16 @@ export struct GeneratePage {
     this.cancelRequested = false
     let run = continuing ? this.runId : ++this.runId
     if (!continuing) { this.genStartTime = Date.now() }
-    this.metricTotals.partial = true
+    this.markMetricsPartial()
     let host = appAgentHost((text: string): void => { if (run === this.runId) { this.status = text } },
       (_vbc2: string): void => {}, (): boolean => run !== this.runId || this.cancelRequested,
       this.promptTemplate, this.surfaceGuide, operation)
+    // The edit agent's selector calls are model requests of this run too.
+    let askJevForRun = host.askJev
+    host.askJev = async (body: string): Promise<string> => {
+      this.countModelCall(run)
+      return askJevForRun(body)
+    }
     let base = this.compiledSource
     let made: SurfaceEdit
     try {
@@ -2152,9 +2225,9 @@ export struct GeneratePage {
     this.generating = false
     this.totalMs = Date.now() - this.genStartTime
     if (made.source.length === 0) {
-      this.metricTotals.partial = true
-      this.finishMetrics(run)
+      this.markMetricsPartial()
       this.status = 'Could not make this change, the app is as it was: ' + made.failed
+      this.finishMetrics(run)
       return
     }
     this.startRun(ask)
@@ -2166,13 +2239,15 @@ export struct GeneratePage {
     // The program is no longer what the record rebuilds.
     this.compositionJson = ''
     this.modelWrote = true
-    this.acceptRequest()
     this.compiled = true
     this.compileErrors = ''
     this.refinePrompt = ''
     this.status = 'Changed in ' + (this.totalMs / 1000).toFixed(1) + ' s' +
       (made.edits > 0 ? ' by ' + made.edits.toString() + ' edit(s)' : ', written again') +
       (made.rounds > 0 ? ', ' + made.rounds.toString() + ' repair round(s)' : '') + ', played before serving'
+    // Accept after compiled and status are final: the run log records the
+    // surface change's true outcome instead of the mid-run status.
+    this.acceptRequest()
   }
 
   /**
@@ -2185,9 +2260,15 @@ export struct GeneratePage {
     this.cancelRequested = false
     let run = ++this.runId
     this.genStartTime = Date.now()
-    this.metricTotals.partial = true
+    this.markMetricsPartial()
     let host = appAgentHost((text: string): void => { if (run === this.runId) { this.status = text } },
       (_vbc2: string): void => {}, (): boolean => run !== this.runId || this.cancelRequested, this.promptTemplate)
+    // The widget agent's selector calls are model requests of this run too.
+    let askJevForRun = host.askJev
+    host.askJev = async (body: string): Promise<string> => {
+      this.countModelCall(run)
+      return askJevForRun(body)
+    }
     // Redo: neither the old widget nor what it was asked to show goes to the model, or it makes the same one again.
     let base = this.widgetFresh ? withoutWidget(this.compiledSource) : this.compiledSource
     let madeFor = this.modelRequestHistory()
@@ -2207,10 +2288,10 @@ export struct GeneratePage {
     this.generating = false
     this.totalMs = Date.now() - this.genStartTime
     if (made.source.length === 0) {
-      this.metricTotals.partial = true
-      this.finishMetrics(run)
+      this.markMetricsPartial()
       this.status = 'Could not make this widget, the app is as it was'
       this.widgetFailure = made.failed.length > 0 ? made.failed : 'No answer passed the checks.'
+      this.finishMetrics(run)
       return
     }
     this.startRun(ask)
@@ -2222,7 +2303,6 @@ export struct GeneratePage {
     this.widgetPassed = made.vbc2 + '\u0000' + this.carriedState
     this.compositionJson = ''
     this.modelWrote = true
-    this.acceptRequest()
     this.compiled = true
     this.compileErrors = ''
     this.refinePrompt = ''
@@ -2231,6 +2311,9 @@ export struct GeneratePage {
     this.tab = TAB_WIDGET
     this.status = 'Widget written in ' + (this.totalMs / 1000).toFixed(1) + ' s' +
       (made.attempts > 1 ? ', on answer ' + made.attempts.toString() : '')
+    // Accept after compiled and status are final: the run log records the
+    // widget run's true outcome instead of the mid-run status.
+    this.acceptRequest()
   }
 
   /** The open question goes with its default: stopping or starting again must not leave the agent waiting. */
@@ -2258,9 +2341,8 @@ export struct GeneratePage {
 
   private stopGeneration(): void {
     if (!this.generating) { return }
-    this.metricTotals.partial = true
-    this.finishMetrics(this.runId)
-    if (this.metricPendingRuns.has(this.runId)) { this.metricStaleRuns.add(this.runId) }
+    let run = this.runId
+    this.markMetricsPartial()
     this.settleQuestion(null)
     this.cancelRequested = true
     this.runId++
@@ -2278,6 +2360,12 @@ export struct GeneratePage {
     this.generating = false
     this.totalMs = Date.now() - this.genStartTime
     this.status = 'Stopped'
+    // Finish after the terminal status is set, so the run log says 'Stopped'
+    // rather than the last mid-run line. The record is already marked partial
+    // above; the aborted operation's late result only reaches the session
+    // totals (metricStaleRuns).
+    if (this.metricPendingRuns.has(run)) { this.metricStaleRuns.add(run) }
+    this.finishMetrics(run)
   }
 
   /** Save: a new app is named first, an app that already exists takes the result as its next version. */

@@ -19,9 +19,9 @@ export class RunLogRecord {
   prompt: string = ''
   /** deepseek | server | local (SettingsStore.MODE_*). */
   mode: string = ''
-  /** Human label for the provider, as the Metrics screen shows it. */
+  /** Human label for the provider this run used (the session totals say "Mixed" instead). */
   provider: string = ''
-  /** The model the run used, as the Metrics screen shows it. */
+  /** The model this run used. */
   model: string = ''
   /** compose | generate | not-built: compose = a template screen the model did not rewrite;
    *  generate = the model wrote or rewrote the program; not-built = nothing compiled. */
@@ -32,9 +32,13 @@ export class RunLogRecord {
   verdict: string = ''
   /** Wall-clock milliseconds the run charged to itself (excludes time waiting for a person's answer). */
   elapsedMs: number = 0
-  /** How many compile attempts the run made (1 on a clean first try). */
+  /** How many compile attempts the run made (1 on a clean first try; 0 when
+   *  the agent composed the screen without one). */
   attempts: number = 0
-  /** How many model request-response rounds the run made. */
+  /** How many model requests the run sent: program attempts and compile
+   *  repairs, tool round trips inside them, the agent's auxiliary calls, selector
+   *  calls, and one for a server run's /compile request. Not the number of user
+   *  requests -- each record is already one of those. */
   modelCalls: number = 0
   /** Prompt tokens (-1 when the provider did not report usage). */
   inputTokens: number = -1
