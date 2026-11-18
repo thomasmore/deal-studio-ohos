@@ -172,8 +172,8 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'second straight away from its centre. The parent may be left out of the same build (a thing that breaks: the pieces ' +
     'come from where it was). Read only when the thing is made: changing it later moves nothing. Becomes loose (mass 1)'),
   new GfxFunction('shoot', [thing(), num('speed'), new GfxParam('arc', 'boolean')], 'thing',
-    'the thing is a shot: it starts at speed metres a second along its own +x (turn it, aim it, or from it out of what ' +
-    'shoots), arc false flies straight until it touches something and then falls, arc true falls all the way (a thrown ball, ' +
+    'the thing is a shot: it starts at speed metres a second the way what shoots it faces (from), or at the aim point (aim); ' +
+    'its own turn only lays it the way it flies (alone, with neither, it goes along its own +x). arc false flies straight until it touches something and then falls, arc true falls all the way (a thrown ball, ' +
     'a shell). It never holds up "settled", stops where it is if it leaves the world, and what it hits hard is told as ' +
     '"struck". The host keeps only the last ' + MAX_SHOTS.toString() + ' shots built: give each a new id from a count in state. ' +
     'Not on the player'),

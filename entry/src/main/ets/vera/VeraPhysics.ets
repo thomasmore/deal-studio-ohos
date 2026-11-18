@@ -1025,7 +1025,8 @@ export function lookQuat(dx: number, dy: number, dz: number): number[] {
  * the program built them. The frame is the parent's (p, q); with an aim point [x, y, z] it is the parent's place turned
  * so its +x points at the aim, and the body itself is then turned to point its +x from where it is at the aim. pos =
  * p + frame . local, rotation = turn . rot; velocity v + w x r + burst * r / |r| (r = frame . local, the way out of the
- * parent's centre; straight up when it is at the centre), plus shotSpeed along the body's own +x; spin w.
+ * parent's centre; straight up when it is at the centre), plus shotSpeed along the frame's +x (turn's: the parent's facing
+ * or the aim; the body's own +x only when it has neither); spin w.
  */
 export function resolveFrom(parent: number[] | null, local: number[], rot: number[], aim: number[], burst: number,
     shotSpeed: number): number[][] {
@@ -1052,7 +1053,9 @@ export function resolveFrom(parent: number[] | null, local: number[], rot: numbe
     }
   }
   if (shotSpeed !== 0) {
-    let ahead = turnPoint(qf, 1, 0, 0)
+    // A shot made from a body, or aimed, goes the way its frame faces (the shooter's +x, or at the point): its own turn is
+    // only how it looks (a rod laid along the way it flies). Alone and unaimed, its own turn is the only way it has.
+    let ahead = turnPoint(parent !== null || aimed ? turn : qf, 1, 0, 0)
     for (let k = 0; k < 3; k++) { v[k] += shotSpeed * ahead[k] }
   }
   return [[pos[0], pos[1], pos[2], qf[0], qf[1], qf[2], qf[3]], v, w]

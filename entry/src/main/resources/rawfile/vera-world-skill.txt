@@ -122,7 +122,7 @@ What a world can do, combined as the request needs:
 - Steered by the person: scene.player(body, speed, action), one per world. The host draws the stick and the camera
   follows the player (leave scene.camera out); action names a button beside the stick, "" for none, heard as
   e.kind === "action"; scene.player(body, speed, action, fire) adds a second button, and e.other says which was
-  pressed. A jump is the player's own kick, its trigger a count the action adds 1 to:
+  pressed. These buttons are the controls: never repeat them as ui.Buttons under the world. A jump is the player's own kick, its trigger a count the action adds 1 to:
   scene.player(scene.kick(body, state.jumps, 0, 4, 0, 0), speed, "Jump"). The player starts on the floor, clear of
   everything, and does not climb onto bodies: what is in its way is gone round or jumped. Use a floor, not a table
   (it can go 100 m each way), and the World's style "fill" or "full", so the stick has room.

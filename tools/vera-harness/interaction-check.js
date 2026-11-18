@@ -42,6 +42,13 @@ const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
   ;[pose, v] = P.resolveFrom(parent, [0.5, 0, 0], [0, 0, 0], [], 0, 10)
   // r = (0, 0, -0.5): v + w x r = (1 - 1, 0, 0), and 10 along the parent's +x, the world's -z.
   nearAll(v, [0, 0, -10], 1e-9, 'a shot goes at its speed along its own +x, carried by the parent')
+  // A rod laid along the way it flies (turned 90 about z, so its own +x is up) still goes the way the shooter faces: the
+  // shot's own turn is only how it looks. Found on the phone: a generated robot fired its bolts straight up.
+  ;[pose, v] = P.resolveFrom([0, 0.5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0], [0.3, 0, 0], [0, 0, 90], [], 0, 14)
+  nearAll(v, [14, 0, 0], 1e-9, 'a turned shot from a body goes the way the body faces')
+  nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 1, 0], 1e-9, 'and keeps its own turn for how it looks')
+  ;[pose, v] = P.resolveFrom(null, [0, 0, 0], [0, 90, 0], [], 0, 5)
+  nearAll(v, [0, 0, -5], 1e-9, 'alone and unaimed, a shot goes along its own +x')
   ;[pose] = P.resolveFrom(parent, [0, 0, 0], [0, 0, 90], [], 0, 0)
   // The parent's turn, then its own: its +x (turned 90 about z, so up) stays up; its +y (turned to -x) is the parent's -x, +z.
   nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 1, 0], 1e-9, 'its own turn is taken in the parent\'s frame (q . localRot)')
