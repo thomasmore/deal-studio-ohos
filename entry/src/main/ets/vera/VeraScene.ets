@@ -983,10 +983,13 @@ export function splitThing(t: SceneThing, n: number, burst: number): SceneThing[
   for (let k = 0; k < pieces.length; k++) {
     let p = pieces[k]
     p.id = t.id + '-' + (k + 1).toString()
-    p.color = t.color
+    // A group has no colour of its own: its pieces are its parts, which keep theirs.
+    if (t.kind !== 'group') {
+      p.color = t.color
+      p.glow = t.glow
+    }
     p.restitution = t.restitution
     p.friction = t.friction
-    p.glow = t.glow
     p.motion = 'loose'
     p.mass = total > 0 ? mass * thingVolume(p) / total : mass / pieces.length
     let f = new SceneFrom()

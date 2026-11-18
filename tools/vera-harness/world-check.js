@@ -1377,7 +1377,11 @@ assert.ok(/stopped when the program starts/.test(smoke) && /two bodies have the 
       for (const p of ps) {
         assert.ok(p.from && p.from.parent === t.id && p.from.burst === 1.5, kind + ': each piece comes from it')
         assert.deepEqual(p.from.base, [t.x, t.y, t.z, t.rx, t.ry, t.rz], kind + ': and knows where it was built')
-        assert.equal(p.motion, 'loose'); assert.equal(p.color, t.color); assert.equal(p.restitution, t.restitution); assert.equal(p.friction, t.friction)
+        assert.equal(p.motion, 'loose'); assert.equal(p.restitution, t.restitution)
+        // A group has no colour of its own: a piece that is one of its parts keeps that part's colour.
+        if (kind !== 'group') assert.equal(p.color, t.color)
+        else if (p.kind !== 'group') assert.equal(p.color, t.parts.find(q => q.x === p.x && q.y === p.y && q.z === p.z).color, 'a part keeps its colour')
+        assert.equal(p.friction, t.friction)
         near(p.mass / parentMass, volume(p) / total, 1e-9, kind + ': mass by volume')
         if (p.kind === 'hull') assert.equal(Sh.hullCheck(p.points), '', kind + ': a piece is a hull')
         if (p.kind === 'shape') assert.equal(Sh.outlineCheck(p.points), '', kind + ': a piece is an outline')
