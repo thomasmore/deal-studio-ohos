@@ -78,6 +78,17 @@ async function main() {
   assert.deepEqual(refine.removedAppScreens(built.agent.source, flat), ['notes', 'editor'])
   assert.match(refine.smokeRefinement(flat, built.agent.source), /Missing planned screen function/); checks++
   assert.equal(refine.smokeRefinement(flat, built.agent.source, ['notes', 'editor']), ''); assert.match(refine.appRefinementNote(built.agent.source), /c_view_editor/); checks++
+  for (const separator of [' ', ' // declaration separator\n']) {
+    const sameLine = built.agent.source.replace(/}\s*function /g, '}' + separator + 'function ')
+    assert.deepEqual(refine.sourceScreenIds(sameLine), ['home', 'notes', 'editor'])
+    assert.deepEqual(refine.removedAppScreens(sameLine, flat), ['notes', 'editor'])
+    assert.match(refine.smokeRefinement(flat, sameLine), /Missing planned screen function/); checks++
+  }
+  const fakeDeclarations = built.agent.source + '\n// function c_view_fake(s: AppState): ui.View {}\n'
+  assert.deepEqual(refine.sourceScreenIds(fakeDeclarations), ['home', 'notes', 'editor']); checks++
+  const iconCode = good.replace('ui.Button("primary", "Notes", "c_list", 0, true)', 'ui.IconButton("default", "plus", "Notes", "c_list", 0, true)')
+  const iconHost = hostFor(plan(), iconCode); const iconBuilt = await run(iconHost.host)
+  assert.equal(iconBuilt.kind, 'agent', iconBuilt.reason); assert.equal(iconHost.seen.code.length, 1); checks++
   const unbound = good.replace('    children.push(ui.Button("secondary", "Remove", "c_remove", note.id, true));', '')
   assert.notEqual(unbound, good)
   const dead = await run(hostFor(plan(), unbound).host); assert.equal(dead.kind, 'not-built'); assert.match(dead.reason, /c_remove has no control or caller reference/); checks++
@@ -98,6 +109,11 @@ async function main() {
   const flatPlan = {title:'Books', needs:[{type:'entries',id:'books',label:'Books',fields:[]},{type:'content',id:'details',what:'Tapping a book opens its detail screen where the borrower is edited',from:'open a book'}]}
   assert.match(np.navigationPlanProblem(parse(flatPlan)), /no multi-view metadata/)
   assert.equal(np.navigationPlanProblem(parse({title:'Inline',needs:[{type:'entries',label:'Books',fields:[]},{type:'content',what:'Edit the borrower inline'}]})), ''); checks++
+  const external = {title:'Settings', needs:[{id:'settings', type:'action', when:'Tap Settings', what:"Open the phone's settings screen", on:'button', asked:true, from:'Open settings'}]}
+  assert.equal(np.navigationPlanProblem(parse(external)), '')
+  let externalPlans = 0
+  const externalResult = await loadVera('NeedsChoose').composeNeeds('Open settings', async () => { externalPlans++; return JSON.stringify(external) }, async () => '')
+  assert.equal(externalPlans, 1); assert.equal(externalResult.appPlanFailed, false); assert.equal(externalResult.appPlan, null); checks++
   const plannedAgain = hostFor(n => n === 1 ? flatPlan : plan())
   const afterPlanRepair = await run(plannedAgain.host, 'open a book')
   assert.equal(afterPlanRepair.kind, 'agent', afterPlanRepair.reason); assert.equal(plannedAgain.seen.plans.length, 2)

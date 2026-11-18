@@ -92,6 +92,13 @@ wait_for() {
   return 1
 }
 
+# Quote for the REMOTE POSIX shell too: local double quotes alone do not protect
+# dollars, backticks, embedded quotes or command substitutions on the phone.
+prompt_command() {
+  local quoted=${1//\'/\'\\\'\'}
+  printf "uitest uiInput inputText %s '%s'" "$PROMPT_FIELD" "$quoted"
+}
+
 # Taps through to the Generate screen and starts a generation, checking each
 # screen before tapping on it. Succeeds once the trace shows gen-start.
 start_generation() {
@@ -106,9 +113,8 @@ start_generation() {
   tap "$GENERATE_BTN" 1
   wait_for 'Metrics' || { echo "  Generate screen did not appear" >&2; return 1; }
   tap "$PROMPT_FIELD" 2
-  # uitest takes the text as one quoted argument; the prompts use apostrophes
-  # but no double quotes. The keyboard stays up: Generate sits above it.
-  hdc shell "uitest uiInput inputText ${PROMPT_FIELD} \"$prompt\"" >/dev/null; sleep 2
+  # The keyboard stays up: Generate sits above it.
+  hdc shell "$(prompt_command "$prompt")" >/dev/null; sleep 2
   tap "$RUN_BTN" 0
   for _ in $(seq 1 8); do
     sleep 5

@@ -11,6 +11,8 @@ python3 tools/vera-bench/report.py /private/bench
 
 **The runner force-stops the app and replaces the first project's program.** Use a disposable project; it is not suitable when that project's contents or the app's USB VPN must remain active. Do not change provider settings during a run. Keep raw traces private: they contain prompts, generated sources and tool results. Existing trace files are skipped on resume.
 
+`python3 tools/vera-bench/bench-transport-check.py` checks exact prompt quoting on the host, without a phone or model calls.
+
 `report.py` reads both the original `OUT/<label>-<run>/trace.jsonl` layout and archived `OUT/runs/<id>/trace.jsonl` evidence. It writes `report.md`, `results.csv`, `turns.csv` and `summary.json`, including domain/phrasing cohorts when `prompts.json` is present. It makes no model calls.
 
 - Active time is device `gen-start` to `gen-end`, minus reported clarification wait; missing end times remain unknown.
