@@ -1,0 +1,67 @@
+@jsonable
+class AppState {
+  first: boolean;
+  warm: boolean;
+}
+
+function init(): AppState {
+  return {first: true, warm: false};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 10, 13, 0, 0.8, 0, false));
+  things.push(scene.sky("#c5dfed", 0));
+  things.push(scene.floor("surface"));
+  let color: string = "accent";
+  if (state.warm) {
+    color = "warning";
+  }
+  things.push(scene.box("swatch", -6, 0.15, 5, 1, 0.3, 1, color));
+  let row: number = 0;
+  while (row < 5) {
+    let col: number = 0;
+    while (col < 6) {
+      let index: number = row * 6 + col;
+      if (index !== 0 || state.first) {
+        let name: string = "treeSmall";
+        if (index % 2 === 1) {
+          name = "treeLarge";
+        }
+        things.push(scene.model("tree" + ui.numberToString(index), name, -5 + col * 2, 0, -4 + row * 2, 1.8));
+      }
+      col = col + 1;
+    }
+    row = row + 1;
+  }
+  return things;
+}
+
+function onFirst(state: AppState, value: number): AppState {
+  return {first: !state.first, warm: state.warm};
+}
+
+function onColor(state: AppState, value: number): AppState {
+  return {first: state.first, warm: !state.warm};
+}
+
+function view(state: AppState): ui.View {
+  let count: string = "30 trees: 15 small, 15 large";
+  let label: string = "Remove first";
+  if (!state.first) {
+    count = "29 trees: first small tree removed";
+    label = "Readd first";
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 3: model forest", "", "Fixed camera; two model names repeated across a 6 by 5 grid", ""),
+      ui.World("fill", 0, "build", ""),
+      ui.Text("body", count),
+      ui.Text("caption", "Recolor changes only the front-left primitive swatch; trees keep imported colors."),
+      ui.ActionBar("spread", [
+        ui.Button("primary", label, "onFirst", 0, true),
+        ui.Button("secondary", "Recolor swatch", "onColor", 0, true)
+      ])
+    ])
+  ]);
+}

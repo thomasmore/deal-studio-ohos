@@ -4,7 +4,10 @@ import { iconPath, iconNames } from './VeraIcons'
 import { isValidSdkTarget } from './VeraSdkIndex'
 import { GFX_FUNCTIONS, GFX_POINTER_FIELDS, GFX_ROLES, GFX_BLEND_MODES, DRIFT_DIRECTIONS, DRIFT_SPEEDS, isGfxColor, gfxFunction } from './VeraGfx'
 import { MOTION_PRESETS } from './VeraMotion'
-import { SCENE_FUNCTIONS, SCENE_EVENT_FIELDS, SCENE_THING, SCENE_EVENT, sceneFunction } from './VeraScene'
+import { SCENE_FUNCTIONS, SCENE_EVENT_FIELDS, SCENE_THING, SCENE_EVENT, PAINT_PATTERNS, sceneFunction } from './VeraScene'
+import { TEXTURE_PATTERNS, texturePattern } from './VeraTextures'
+import { PARTICLE_KINDS, particleKind } from './VeraParticles'
+import { modelSpec, modelNames } from './VeraModels'
 
 // ===== AST Nodes =====
 
@@ -2202,15 +2205,29 @@ class Analyzer {
     }
   }
 
-  /**
-   * Literal colours of std/scene calls, as checkGfxArguments holds std/gfx's: a colour the scene does not know is
-   * drawn grey, which on a table of grey is a body that vanished.
-   */
+  private sceneThingKind(expr: Expression): string {
+    if (!(expr instanceof CallExpression)) { return '' }
+    let call = expr as CallExpression
+    let callee = this.model.expressionTypes.get(call.callee)
+    if (!(callee instanceof VeraFunctionType) || !callee.identity.startsWith('external:std/scene:')) { return '' }
+    let f = sceneFunction(callee.identity.substring('external:std/scene:'.length))
+    if (f === null || f.result !== 'thing') { return '' }
+    if (f.params.length > 0 && f.params[0].kind === 'thing') {
+      return call.argumentsList.length > 0 ? this.sceneThingKind(call.argumentsList[0]) : ''
+    }
+    return f.name
+  }
+
   private checkSceneArguments(expr: CallExpression, callee: VeraFunctionType): void {
     const prefix = 'external:std/scene:'
     if (!callee.identity.startsWith(prefix)) return
     let f = sceneFunction(callee.identity.substring(prefix.length))
     if (f === null) return
+    if (expr.argumentsList.length > 0 && ['split', 'paint', 'glow'].indexOf(f.name) >= 0 &&
+        this.sceneThingKind(expr.argumentsList[0]) === 'model') {
+      this.addError('E2112', 'scene.' + f.name + ' does not support models: ' +
+        (f.name === 'split' ? 'use primitive bodies for things that break' : 'models keep their imported colours'), expr.argumentsList[0].span)
+    }
     for (let i = 0; i < f.params.length && i < expr.argumentsList.length; i++) {
       let arg = expr.argumentsList[i]
       if (!(arg instanceof StringExpression)) continue
@@ -2220,6 +2237,25 @@ class Analyzer {
           ', or "#rrggbb" / "#rrggbbaa", or gfx.rgb(red, green, blue)', arg.span)
       } else if (f.params[i].name === 'id' && value.length === 0) {
         this.addError('E2112', 'scene.' + f.name + ' needs an id: a name no other body in the world has', arg.span)
+      } else if (f.name === 'model' && f.params[i].name === 'name' && modelSpec(value) === null) {
+        this.addError('E2112', 'scene.model has no model "' + value + '": use one of ' +
+          modelNames().map((n: string): string => '"' + n + '"').join(', '), arg.span)
+      } else if (f.name === 'burst' && f.params[i].name === 'kind' && !particleKind(value)) {
+        this.addError('E2112', 'scene.burst has no kind "' + value + '": use one of ' +
+          PARTICLE_KINDS.map((p: string[]): string => '"' + p[0] + '"').join(', '), arg.span)
+      } else if (f.name === 'paint' && f.params[i].name === 'pattern') {
+        if (!PAINT_PATTERNS.some((p: string[]): boolean => p[0] === value)) {
+          this.addError('E2112', 'scene.paint has no pattern "' + value + '": use one of ' +
+            PAINT_PATTERNS.map((p: string[]): string => '"' + p[0] + '"').join(', '), arg.span)
+          continue
+        }
+        let kind = this.sceneThingKind(expr.argumentsList[0])
+        if (kind.length > 0 && ['camera', 'sky', 'zone', 'blast', 'burst'].indexOf(kind) >= 0) {
+          this.addError('E2112', 'scene.paint takes a body, group, table or floor, not the ' + kind, arg.span)
+        } else if (kind.length > 0 && kind !== 'sphere' && !texturePattern(value)) {
+          this.addError('E2112', 'scene.paint pattern "' + value + '" paints a sphere only, not a ' + kind + '; use ' +
+            TEXTURE_PATTERNS.map((p: string[]): string => '"' + p[0] + '"').join(', '), arg.span)
+        }
       }
     }
   }

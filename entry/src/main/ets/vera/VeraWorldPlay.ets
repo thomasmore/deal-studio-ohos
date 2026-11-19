@@ -20,7 +20,11 @@ import { WorldSpec, BodySpec, TableSpec, CameraSpec, WorldDiff, ZoneSpec, SceneP
   sceneEventValue, MotionCarry, SceneOrbit, SceneFrom, SceneShot } from './VeraScene'
 import { ZoneWatch } from './VeraLocomotion'
 import { FakePhys, WorldSim, SimEvent, specBounds, enterEvent } from './VeraPhysics'
-import { worldCamera, projectPoint, metresPerVp, floorDirection, CameraPose } from './VeraLook3D'
+import { worldCamera, projectPoint, metresPerVp, floorDirection, screenRay, CameraPose, tableParts, TABLE_TOP_THICKNESS } from './VeraLook3D'
+import { quatXYZ, turnPoint, partBounds, hullMesh, prismMesh, texturedBoxMesh, texturedCylinderMesh,
+  texturedSphereMesh } from './VeraShapes'
+import { SurfaceMesh } from './VeraSurfaces'
+import { TEXTURE_TILE_M, texturePattern } from './VeraTextures'
 import { functionLine, worldBudgetProblem, predictWorkMs } from './VeraBudget'
 
 /** Frames played: ten seconds at 60 a second, enough for a throw to settle (FakePhys settles within 8 s). */
@@ -62,6 +66,8 @@ export const CODE_ID_SHOWN: string = 'P0017'
 export const CODE_BUTTON_TWICE: string = 'P0018'
 /** A shot that flies straight starts above every target, so it passes over all of them. */
 export const CODE_SHOT_OVER: string = 'P0019'
+export const CODE_TEXTURE_TOO_SMALL: string = 'P0020'
+export const CODE_MODEL_GROUND: string = 'P0021'
 /** The stick is held this many frames ahead, then this many to the right, from STICK_FROM; the player must go this share of its speed's reach. */
 const STICK_FROM: number = 30
 const STICK_AHEAD: number = 120
@@ -154,6 +160,79 @@ function orbitReach(b: BodySpec, byCentre: Map<string, BodySpec[]>, depth: numbe
     for (let m of around) { r = Math.max(r, (m.orbit as SceneOrbit).radius + orbitReach(m, byCentre, depth + 1)) }
   }
   return r
+}
+
+function supportMesh(b: BodySpec): SurfaceMesh {
+  if (b.shape === 'hull') { return hullMesh(b.points) }
+  if (b.shape === 'shape') { return prismMesh(b.points, b.dims[1]) }
+  if (b.shape === 'sphere') { return texturedSphereMesh(b.dims[0] / 2) }
+  if (b.shape === 'cylinder') { return texturedCylinderMesh(b.dims[0] / 2, b.dims[1]) }
+  if (b.parts.length === 0) { return texturedBoxMesh(b.dims[0], b.dims[1], b.dims[2]) }
+  let mesh = new SurfaceMesh()
+  for (let p of b.parts) {
+    let part = supportMesh(p)
+    let base = mesh.positions.length / 3
+    let q = quatXYZ(p.rotation[0], p.rotation[1], p.rotation[2])
+    for (let i = 0; i < part.positions.length; i += 3) {
+      let v = turnPoint(q, part.positions[i], part.positions[i + 1], part.positions[i + 2])
+      mesh.positions.push(v[0] + p.position[0], v[1] + p.position[1], v[2] + p.position[2])
+    }
+    for (let index of part.indices) { mesh.indices.push(base + index) }
+  }
+  return mesh
+}
+
+function contactPatches(mesh: SurfaceMesh, position: number[], rotation: number[], height: number, up: boolean): number[][][] {
+  let vertices: number[][] = []
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    let v = turnPoint(rotation, mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2])
+    vertices.push([v[0] + position[0], v[1] + position[1], v[2] + position[2]])
+  }
+  let patches: number[][][] = []
+  for (let i = 0; i < mesh.indices.length; i += 3) {
+    let polygon = mesh.indices.slice(i, i + 3).map((index: number): number[] => vertices[index])
+    let a = polygon[0], b = polygon[1], c = polygon[2]
+    let ny = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])
+    if (up && ny <= 1e-12) { continue }
+    for (let side of [-1, 1]) {
+      let clipped: number[][] = []
+      for (let j = 0; j < polygon.length; j++) {
+        let p = polygon[j], q = polygon[(j + 1) % polygon.length]
+        let dp = side * (p[1] - height) - 0.02
+        let dq = side * (q[1] - height) - 0.02
+        if (dp <= 0) { clipped.push(p) }
+        if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) {
+          let t = dp / (dp - dq)
+          clipped.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[2] + t * (q[2] - p[2])])
+        }
+      }
+      polygon = clipped
+    }
+    if (polygon.length > 0) { patches.push(polygon.map((p: number[]): number[] => [p[0], p[2]])) }
+  }
+  return patches
+}
+
+function patchesMeet(feet: number[][][], supports: number[][][]): boolean {
+  for (let a of feet) {
+    for (let b of supports) {
+      let axes: number[][] = [[1, 0], [0, 1]]
+      for (let polygon of [a, b]) {
+        for (let i = 0; i < polygon.length; i++) {
+          let p = polygon[i], q = polygon[(i + 1) % polygon.length]
+          let length = Math.hypot(q[0] - p[0], q[1] - p[1])
+          if (length > 1e-12) { axes.push([(p[1] - q[1]) / length, (q[0] - p[0]) / length]) }
+        }
+      }
+      let separated = axes.some((axis: number[]): boolean => {
+        let one = a.map((p: number[]): number => p[0] * axis[0] + p[1] * axis[1])
+        let two = b.map((p: number[]): number => p[0] * axis[0] + p[1] * axis[1])
+        return Math.max(...one) < Math.min(...two) - 1e-7 || Math.max(...two) < Math.min(...one) - 1e-7
+      })
+      if (!separated) { return true }
+    }
+  }
+  return false
 }
 
 /** One of the scripted inputs: a tap on a body (or on empty space), a swipe of a loose body, or a button pressed. */
@@ -344,6 +423,7 @@ class WorldPlay {
     }
     this.carry.apply(next, this.time)
     let diff = diffWorld(this.spec, next)
+    this.checkModelGround(next)
     this.checkCreated(next, diff)
     this.checkOrbits(next)
     for (let b of next.bodies) {
@@ -437,6 +517,39 @@ class WorldPlay {
       (parent.length > 0 ? ': its y is taken about the centre of "' + parent + '", not from the ground -- lower it' : ': lower it') +
       ' to the height of the middle of what it is meant to hit (y of about ' +
       (Math.round((highest / 2 - (pose[1] - b.position[1])) * 100) / 100).toString() + ' here), or give it arc true')
+  }
+
+  checkModelGround(next: WorldSpec): void {
+    if (next.floor === null && next.table === null) { return }
+    let fixed = next.bodies.filter((b: BodySpec): boolean => b.motion === 'static' && b.from === null && b.shot === null &&
+      b.aim.length === 0 && b.orbit === null && b.path === null && b.wander === null)
+    for (let b of fixed) {
+      if (b.model.length === 0) { continue }
+      let box = partBounds(b.shape, b.dims, b.points, b.position, b.rotation)
+      let bottom = box[1]
+      if (next.floor !== null && Math.abs(bottom - (next.table !== null ? -TABLE_TOP_THICKNESS : 0)) <= 0.02) { continue }
+      let feet = contactPatches(hullMesh(b.points), b.position, quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2]), bottom, false)
+      let supported = false
+      if (next.table !== null) {
+        for (let p of tableParts(next.table as TableSpec)) {
+          let patches = contactPatches(texturedBoxMesh(p[3], p[4], p[5]), p.slice(0, 3), [0, 0, 0, 1], bottom, true)
+          if (patchesMeet(feet, patches)) { supported = true; break }
+        }
+      }
+      for (let o of next.bodies) {
+        if (supported) { break }
+        if (o.id === b.id || o.from !== null || o.shot !== null || o.orbit !== null || o.path !== null || o.wander !== null) { continue }
+        let live = o.motion === 'loose' ? this.sim.poseOf(o.id) : null
+        let position = live !== null ? live.slice(0, 3) : o.position
+        let rotation = live !== null ? live.slice(3, 7) : quatXYZ(o.rotation[0], o.rotation[1], o.rotation[2])
+        if (patchesMeet(feet, contactPatches(supportMesh(o), position, rotation, bottom, true))) { supported = true }
+      }
+      if (supported) { continue }
+      throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_MODEL_GROUND + ' The program plays, but static model "' +
+        b.id + '" does not rest on the floor, table or a supporting body: scene.model y is the SUPPORT BOTTOM, not its centre. ' +
+        'Use y = 0 on the ground or the support\'s top; turn rotates about the body centre without regrounding, so a tilted ' +
+        'model needs its rotated bottom placed on its support. Use loose for a model that should fall')
+    }
   }
 
   /** New loose bodies: not inside another body, not under the ground, not outside the world they are in. */
@@ -615,6 +728,88 @@ class WorldPlay {
       'of the view')
   }
 
+  checkTextureReadable(): void {
+    let spec = this.spec as WorldSpec
+    let pose = worldCamera(spec, this.width / this.height)
+    let orbits = orbitPositions(spec, 0)
+    let totalArea = 0
+    let paintedArea = 0
+    let readableArea = 0
+    let largest = 0
+    let largestId = ''
+    let measure = (b: BodySpec, origin: number[], rotations: number[][]): void => {
+      let q = quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2])
+      let turn = (p: number[]): number[] => {
+        let v = turnPoint(q, p[0], p[1], p[2])
+        for (let r of rotations) { v = turnPoint(r, v[0], v[1], v[2]) }
+        return v
+      }
+      let offset = b.position.slice()
+      for (let r of rotations) { offset = turnPoint(r, offset[0], offset[1], offset[2]) }
+      let centre = [origin[0] + offset[0], origin[1] + offset[1], origin[2] + offset[2]]
+      if (b.parts.length > 0) {
+        for (let p of b.parts) { measure(p, centre, [q].concat(rotations)) }
+        return
+      }
+      let at = projectPoint(pose, this.width, this.height, centre)
+      if (at === null) { return }
+      let xs: number[] = []
+      let ys: number[] = []
+      for (let x of [-0.5, 0.5]) {
+        for (let y of [-0.5, 0.5]) {
+          for (let z of [-0.5, 0.5]) {
+            let v = turn([x * b.dims[0], y * b.dims[1], z * b.dims[2]])
+            let p = projectPoint(pose, this.width, this.height, [centre[0] + v[0], centre[1] + v[1], centre[2] + v[2]])
+            if (p === null) { return }
+            xs.push(p[0]); ys.push(p[1])
+          }
+        }
+      }
+      let w = Math.max(0, Math.min(this.width, Math.max(...xs)) - Math.max(0, Math.min(...xs)))
+      let h = Math.max(0, Math.min(this.height, Math.max(...ys)) - Math.max(0, Math.min(...ys)))
+      let area = w * h
+      totalArea += area
+      if (!texturePattern(b.pattern)) { return }
+      paintedArea += area
+      let tile = TEXTURE_TILE_M / Math.max(1e-6, metresPerVp(pose, this.height, at[2]))
+      if (Math.min(w, h) >= 24 && tile >= 4) { readableArea += area }
+      if (area > largest) { largest = area; largestId = b.id }
+    }
+    for (let b of spec.bodies) {
+      let p = orbits.get(b.id)
+      let origin = p !== undefined ? [p[0] - b.position[0], p[1] - b.position[1], p[2] - b.position[2]] : [0, 0, 0]
+      measure(b, origin, [])
+    }
+    let ground = spec.table !== null ? spec.table : spec.floor
+    if (ground !== null && texturePattern(ground.pattern)) {
+      let cell = this.width * this.height / 144
+      for (let y = 0; y < 12; y++) {
+        for (let x = 0; x < 12; x++) {
+          let ray = screenRay(pose, this.width, this.height, (x + 0.5) * this.width / 12, (y + 0.5) * this.height / 12)
+          if (Math.abs(ray[1][1]) < 1e-6) { continue }
+          let distance = -ray[0][1] / ray[1][1]
+          if (distance <= 0) { continue }
+          let px = ray[0][0] + distance * ray[1][0]
+          let pz = ray[0][2] + distance * ray[1][2]
+          if (spec.table !== null && (Math.abs(px) > spec.table.width / 2 || Math.abs(pz) > spec.table.depth / 2)) { continue }
+          let a = projectPoint(pose, this.width, this.height, [px, 0, pz])
+          let b = projectPoint(pose, this.width, this.height, [px + TEXTURE_TILE_M, 0, pz])
+          let c = projectPoint(pose, this.width, this.height, [px, 0, pz + TEXTURE_TILE_M])
+          if (a === null || b === null || c === null) { continue }
+          let tileArea = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+          paintedArea += cell
+          totalArea += cell
+          if (tileArea >= 16) { readableArea += cell }
+          if (cell > largest) { largest = cell; largestId = spec.table !== null ? 'table' : 'floor' }
+        }
+      }
+    }
+    if (paintedArea < 256 || paintedArea < totalArea * 0.5 || readableArea >= paintedArea * 0.25) { return }
+    throw new PlayStop(this.line(this.build).toString() + ':1 ' + CODE_TEXTURE_TOO_SMALL + ' The program plays, but its material ' +
+      'patterns are too small to see on the phone (painted surface "' + largestId + '"). Make the painted surfaces larger or ' +
+      'bring the camera closer so the pattern, which repeats in metres, covers visible screen space')
+  }
+
   /** Where a body is now, for a tap on it. */
   where(id: string): number[] {
     let live = this.sim.poseOf(id)
@@ -686,6 +881,7 @@ class WorldPlay {
     this.rebuild('when the program starts')
     this.checkSeen()
     this.checkReadable()
+    this.checkTextureReadable()
     this.checkTravel()
     this.checkWalks()
     this.checkZones()

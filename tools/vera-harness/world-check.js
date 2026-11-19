@@ -12,6 +12,7 @@ const {compileVeraSource} = loadVera('VeraCompiler')
 const {VirtualMachine, deserializeVbc2, VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraArrayValue} = loadVera('VeraInterpreter')
 const {UiHostEnvironment, decodeVeraUi} = loadVera('VeraUi')
 const S = loadVera('VeraScene')
+const M = loadVera('VeraModels')
 const {smokeRun} = loadVera('VeraSmoke')
 const {describeCatalogForPrompt, describeComponents, catalogKinds, CATALOG} = loadVera('VeraUiCatalog')
 
@@ -27,6 +28,7 @@ const calls = S.SCENE_FUNCTIONS.map((f, i) => {
   const args = f.params.filter(p => !p.optional).map(p => p.kind === 'number' ? '1' : p.kind === 'color' ? '"accent"'
     : p.kind === 'boolean' ? 'true' : p.kind === 'thing' ? thingArg : p.kind === 'thing[]' ? '[' + thingArg + ']'
     : p.kind === 'number[]' ? '[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]'
+    : p.name === 'pattern' ? '"wood"' : p.name === 'kind' ? '"sparks"' : p.name === 'name' && f.name === 'model' ? JSON.stringify(M.modelNames()[0])
     : p.name === 'id' ? '"b' + i + '"' : '"t"')
   return `let v${i}: ${f.result === 'thing[]' ? 'scene.Thing[]' : 'scene.Thing'} = scene.${f.name}(${args.join(', ')});`
 })
@@ -216,6 +218,124 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
   const plain = box('p'); call('glow', plain); assert.equal(plain.thing.glow, false)
   // Not a thing in the list: left out, as gfx leaves out what is not a shape.
   assert.equal(world([box('x'), new VeraNumberValue(1)]).bodies.length, 1)
+}
+
+{
+  const T = loadVera('VeraTextures')
+  const nums = a => new VeraArrayValue(a.map(v => new VeraNumberValue(v)))
+  const primitives = () => [box('box'), call('sphere', 'ball', 0, 1, 0, 1, 'accent'),
+    call('cylinder', 'can', 0, 1, 0, 1, 2, 'warning'), call('die', 'die', 0, 1, 0, 1, 'white'),
+    call('shape', 'sheet', 0, 0, 0, nums([-1, -1, 1, -1, 1, 1, -1, 1]), 'ink'),
+    call('hull', 'gem', 0, 0, 0, nums([-1, 0, -1, 1, 0, -1, 0, 0, 1, 0, 2, 0]), 'accent')]
+  assert.equal(T.TEXTURE_PATTERNS.length, 11)
+  for (const [pattern] of T.TEXTURE_PATTERNS) {
+    assert.ok(S.PAINT_PATTERNS.some(p => p[0] === pattern))
+    assert.ok(S.describeSceneForPrompt().includes('"' + pattern + '"'))
+    for (const original of primitives()) {
+      const before = JSON.stringify(original.thing)
+      const painted = call('paint', original, pattern, '#aabbcc')
+      const b = world([painted]).bodies[0]
+      assert.equal(b.pattern, pattern, pattern + ' on ' + original.thing.kind)
+      assert.equal(b.color2, '#aabbcc')
+      assert.equal(b.color, original.thing.color)
+      assert.equal(JSON.stringify(original.thing), before, 'paint never mutates its primitive')
+      assert.notEqual(painted.thing, original.thing)
+      assert.notEqual(painted.thing.points, original.thing.points)
+    }
+    for (const setup of [call('floor', 'surface'), call('table', 3, 2, 'ink')]) {
+      const spec = world([call('paint', setup, pattern, 'accent')])
+      const decoded = spec[setup.thing.kind]
+      assert.equal(decoded.pattern, pattern)
+      assert.equal(decoded.color2, 'accent')
+      assert.equal(decoded.color, setup.thing.color)
+      assert.equal(setup.thing.pattern, '')
+      for (const wrapper of ['loose', 'glow', 'spin']) {
+        traps(() => call(wrapper, call('paint', setup, pattern, 'accent'), 1), 'R0029', /takes a body/)
+      }
+    }
+  }
+  for (const [pattern] of loadVera('VeraSurfaces').SURFACE_PATTERNS) {
+    assert.deepEqual(codes(program('things.push(scene.paint(scene.sphere("s", 0, 0, 0, 1, "ink"), "' + pattern + '", "accent"));')), [])
+    assert.equal(world([call('paint', call('sphere', 's', 0, 0, 0, 1, 'ink'), pattern, 'accent')]).bodies[0].pattern, pattern)
+  }
+  const leaf = call('paint', box('leaf'), 'brick', 'warning')
+  const sheet = primitives()[4]
+  const group = call('group', 'g', 0, 0, 0, new VeraArrayValue([leaf, sheet]))
+  const before = JSON.stringify(group.thing)
+  const painted = call('paint', group, 'wood', 'accent')
+  assert.equal(JSON.stringify(group.thing), before)
+  assert.equal(leaf.thing.pattern, 'brick')
+  assert.notEqual(painted.thing.parts, group.thing.parts)
+  for (let i = 0; i < group.thing.parts.length; i++) {
+    const p = painted.thing.parts[i], old = group.thing.parts[i]
+    assert.notEqual(p, old)
+    assert.notEqual(p.points, old.points)
+    assert.equal(p.pattern, 'wood', 'whole-group paint overrides leaf paint')
+    assert.equal(p.color2, 'accent')
+    assert.equal(p.color, old.color)
+  }
+  const decoded = world([painted]).bodies[0]
+  assert.ok(decoded.parts.every(p => p.pattern === 'wood' && p.color2 === 'accent'))
+  assert.deepEqual(S.diffWorld(world([group]), world([painted])).recreate.map(b => b.id), ['g'])
+  assert.ok(S.diffWorld(world([painted]), world([call('paint', group, 'wood', 'accent')])).empty())
+  for (const original of primitives()) {
+    const a = world([call('paint', original, 'wood', 'accent')])
+    const b = world([call('paint', original, 'stone', 'accent')])
+    const c = world([call('paint', original, 'wood', 'warning')])
+    assert.deepEqual(S.diffWorld(a, b).recreate.map(p => p.id), [original.thing.id])
+    assert.deepEqual(S.diffWorld(a, c).recreate.map(p => p.id), [original.thing.id])
+    const recoloured = new S.SceneThingValue(original.thing.copy())
+    recoloured.thing.color = 'danger'
+    assert.deepEqual(S.diffWorld(a, world([call('paint', recoloured, 'wood', 'accent')])).recreate.map(p => p.id), [original.thing.id])
+    const split = call('split', call('paint', original, 'marble', 'warning'), 4, 2)
+    assert.ok(split.elements.length >= 2)
+    assert.ok(world(split.elements).bodies.every(p => p.pattern === 'marble' && p.color2 === 'warning' && p.color === original.thing.color),
+      original.thing.kind + ' shards retain material paint')
+  }
+  const shards = call('split', call('paint', call('sphere', 's', 0, 0, 0, 1, 'accent'), 'bands', 'warning'), 4, 1)
+  assert.ok(world(shards.elements).bodies.every(p => p.shape === 'hull' && p.pattern === '' && p.color2 === ''),
+    'sphere-only paint does not reach hull shards')
+  assert.ok(world(call('split', painted, 2, 1).elements).bodies.every(p => p.pattern === 'wood' && p.color2 === 'accent'),
+    'group shards retain their leaf paint')
+  for (const kind of ['floor', 'table']) {
+    const setup = color => kind === 'floor' ? call('floor', color) : call('table', 3, 2, color)
+    const plain = world([setup('ink')])
+    assert.equal(plain[kind].pattern, '')
+    assert.equal(plain[kind].color2, '')
+    const a = world([call('paint', setup('ink'), 'tiles', 'accent')])
+    for (const b of [plain, world([call('paint', setup('ink'), 'wood', 'accent')]),
+      world([call('paint', setup('ink'), 'tiles', 'warning')]), world([call('paint', setup('white'), 'tiles', 'accent')])]) {
+      assert.ok(S.diffWorld(a, b)[kind + 'Changed'], kind + ' detects every paint field')
+    }
+    assert.ok(S.diffWorld(a, world([call('paint', setup('ink'), 'tiles', 'accent')])).empty())
+  }
+  for (const setup of [call('camera', 0, 1, 2, 0, 0, 0, false), call('sky', 'ink', 1), call('zone', 'z', 0, 0, 1, 'ink'),
+    call('blast', 'boom', 0, 0, 0, 0, 1, 1)]) {
+    traps(() => call('paint', setup, 'wood', 'accent'), 'R0029', /body, group, table or floor/)
+  }
+  for (const original of [...primitives().filter(p => p.thing.kind !== 'sphere'), group, call('floor', 'ink'), call('table', 2, 2, 'ink')]) {
+    for (const [pattern] of loadVera('VeraSurfaces').SURFACE_PATTERNS) {
+      traps(() => call('paint', original, pattern, 'accent'), 'R0029', /sphere only.*wood/)
+    }
+  }
+  traps(() => call('paint', new VeraNumberValue(1), 'wood', 'accent'), 'R0020', /scene.Thing/)
+  traps(() => call('paint', box('bad'), 'invalidpattern', 'ink'), 'R0029', /no pattern.*wood.*patches/)
+  const literal = 'scene.paint(' + thingArg + ', "invalidpattern", "ink")'
+  assert.ok(codes(program('things.push(' + literal + ');')).some(c => /^E2112 .*no pattern.*invalidpattern.*wood.*patches/.test(c)))
+  for (const target of [thingArg, 'scene.turn(' + thingArg + ', 0, 0, 10)', 'scene.floor("ink")',
+    'scene.table(2, 2, "ink")', 'scene.group("g", 0, 0, 0, [' + thingArg + '])']) {
+    assert.ok(codes(program('things.push(scene.paint(' + target + ', "bands", "accent"));')).some(c => /^E2112 .*sphere only/.test(c)))
+    assert.deepEqual(codes(program('things.push(scene.paint(' + target + ', "marble", "accent"));')), [])
+  }
+  assert.ok(codes(program('things.push(scene.paint(scene.sky("ink", 0), "wood", "accent"));')).some(c => /^E2112 .*not the sky/.test(c)))
+  const dynamic = program('let p: string = "invalidpattern"; things.push(scene.paint(' + thingArg + ', p, "ink"));')
+  assert.deepEqual(codes(dynamic), [])
+  const vm = new VirtualMachine(deserializeVbc2(compileVeraSource(dynamic).vbc2), new UiHostEnvironment())
+  traps(() => vm.execute('build', [vm.execute('init')]), 'R0029', /no pattern.*invalidpattern.*wood/)
+  const opaque = program('let b: scene.Thing = ' + thingArg + '; things.push(scene.paint(b, "bands", "ink"));')
+  assert.deepEqual(codes(opaque), [])
+  const opaqueVm = new VirtualMachine(deserializeVbc2(compileVeraSource(opaque).vbc2), new UiHostEnvironment())
+  traps(() => opaqueVm.execute('build', [opaqueVm.execute('init')]), 'R0029', /sphere only.*wood/)
 }
 
 // ---- diff
@@ -480,7 +600,7 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     const earth = (pattern, extra = x => x) => world([extra(call('paint', call('sphere', 'e', 0, 0, 0, 0.2, '#1f5fa8'), pattern, '#3f8a3a'))])
     const e = earth('patches').bodies[0]
     assert.deepEqual([e.pattern, e.color2, e.rings, e.mark], ['patches', '#3f8a3a', [], ''])
-    traps(() => earth('marble'), 'R0029', /no pattern "marble".*"patches"/, 'an unknown pattern names the ones there are')
+    traps(() => earth('invalidpattern'), 'R0029', /no pattern "invalidpattern".*"wood".*"patches"/, 'an unknown pattern names the ones there are')
     traps(() => world([call('paint', call('box', 'b', 0, 0, 0, 1, 1, 1, 'ink'), 'bands', 'ink')]), 'R0029', /paints a sphere/)
     const saturn = world([call('rings', call('sphere', 's', 0, 0, 0, 0.2, '#f0e0b0'), 0.26, 0.46, '#d8c8a0')]).bodies[0]
     assert.deepEqual([saturn.rings, saturn.ringColor], [[0.26, 0.46], '#d8c8a0'])
@@ -1022,6 +1142,29 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
       const w2 = S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', snow('accent'), 2)]))
       assert.deepEqual(S.diffWorld(w, w2).recreate.map(b => b.id), [], 'a part\'s new colour does not make the group again')
       assert.deepEqual(S.diffWorld(w, w2).material.map(b => b.id), ['man'], 'it is a material update: the body stays where it is')
+      for (const pattern of ['', 'wood', 'bands']) {
+        const withGlow = (groupGlow, partGlow) => {
+          const next = world([snow()])
+          next.bodies[0].glow = groupGlow
+          next.bodies[0].parts[0].glow = partGlow
+          next.bodies[0].parts[0].pattern = pattern
+          next.bodies[0].parts[0].color2 = pattern ? 'accent' : ''
+          return next
+        }
+        for (const oldGroup of [false, true]) for (const nextGroup of [false, true]) {
+          for (const oldPart of [false, true]) for (const nextPart of [false, true]) {
+            const before = withGlow(oldGroup, oldPart)
+            const after = withGlow(nextGroup, nextPart)
+            const diff = S.diffWorld(before, after)
+            const changed = oldGroup !== nextGroup || (oldGroup || oldPart) !== (nextGroup || nextPart)
+            assert.deepEqual(diff.material.map(b => b.id), changed ? ['man'] : [],
+              'part glow compares previous and next inherited masks for ' + (pattern || 'plain'))
+            assert.equal(diff.recreate.length + diff.create.length + diff.remove.length + diff.setPose.length, 0,
+              'part-only glow never recreates or moves the group')
+            assert.equal(diff.empty(), !changed)
+          }
+        }
+      }
       assert.deepEqual(S.diffWorld(w, S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', snow(), 2)]))).recreate, [],
         'the same group is left alone')
       const part = call('box', 'p', 0, 0, 0, 0.1, 0.1, 0.1, 'ink')
@@ -1457,6 +1600,220 @@ assert.ok(/stopped when the program starts/.test(smoke) && /two bodies have the 
     d = S.diffWorld(a, scene1('p', 5, false, 1))
     assert.deepEqual(d.blast.map(x => x.id), ['bang']); assert.ok(!d.empty())
     assert.equal(S.diffWorld(scene1('p', 5, false, 1), scene1('p', 5, false, 1)).blast.length, 0, 'the same trigger: no blast')
+  }
+}
+
+{
+  const Particles = loadVera('VeraParticles')
+  const burst = (trigger = 1, kind = 'confetti', color = 'accent', id = 'effect', at = [1, 2, 3]) =>
+    call('burst', id, trigger, ...at, kind, color)
+  const src = 'scene.burst("effect", state.n, 1, 2, 3, "confetti", "accent")'
+  for (const [kind, description] of Particles.PARTICLE_KINDS) {
+    assert.deepEqual(codes(program(`things.push(scene.burst("effect", state.n, 1, 2, 3, "${kind}", "accent"));`)), [])
+    assert.ok(S.describeSceneForPrompt().includes(description))
+    assert.equal(world([burst(1, kind)]).bursts[0].kind, kind)
+  }
+  for (const kind of ['unknown', '', 'Smoke']) {
+    assert.ok(codes(program(`things.push(scene.burst("effect", 1, 0, 0, 0, "${kind}", "accent"));`))
+      .some(c => /^E2112 .*no kind.*sparks.*confetti/.test(c)))
+    traps(() => burst(1, kind), 'R0029', /no kind.*sparks.*confetti/)
+  }
+  assert.ok(codes(program('things.push(scene.burst("", 1, 0, 0, 0, "dust", "accent"));'))
+    .some(c => /^E2112 .*needs an id/.test(c)))
+  assert.ok(codes(program('things.push(scene.burst("e", 1, 0, 0, 0, "dust", "invalid"));'))
+    .some(c => /^E2112 .*unknown colour/.test(c)))
+  assert.ok(codes(program(`things.push(scene.paint(${src}, "wood", "ink"));`))
+    .some(c => /^E2112 .*not the burst/.test(c)))
+  traps(() => call('paint', burst(), 'wood', 'ink'), 'R0029', /not the burst/)
+  traps(() => call('loose', burst(), 1), 'R0029', /not the burst/)
+  traps(() => call('burst', '', 1, 0, 0, 0, 'dust', 'accent'), 'R0029', /needs an id/)
+  traps(() => burst(1, 'dust', 'invalid'), 'R0029', /colour.*theme role/)
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    for (const i of [1, 2, 3, 4]) {
+      const args = ['effect', 1, 1, 2, 3, 'dust', 'accent']
+      args[i] = bad
+      traps(() => call('burst', ...args), 'R0020', /burst.*finite/)
+    }
+  }
+  const original = burst()
+  const copied = original.thing.copy()
+  assert.equal(copied.kind, 'burst')
+  assert.equal(copied.burstKind, 'confetti')
+  assert.deepEqual(copied, original.thing)
+  const decoded = world([original])
+  assert.deepEqual({...decoded.bursts[0]}, {id: 'effect', trigger: 1, x: 1, y: 2, z: 3, kind: 'confetti', color: 'accent'})
+  original.thing.color = 'danger'
+  original.thing.x = 9
+  assert.equal(decoded.bursts[0].color, 'accent')
+  assert.equal(decoded.bursts[0].x, 1)
+  assert.deepEqual(decoded.bodies, [])
+  assert.deepEqual(decoded.blasts, [])
+  assert.deepEqual(decoded.zones, [])
+  const makers = [id => box(id), id => call('zone', id, 0, 0, 1, 'ink'),
+    id => call('blast', id, 1, 0, 0, 0, 1, 1), id => burst(1, 'dust', 'ink', id)]
+  for (const a of makers) for (const b of makers) {
+    traps(() => world([a('same'), b('same')]), 'R0029', /id.*same.*id of its own/)
+    assert.doesNotThrow(() => world([a('first'), b('second')]))
+  }
+  const full = world([...Array.from({length: S.MAX_WORLD_BODIES}, (_, k) => box('b' + k)), burst()])
+  assert.equal(full.bodies.length, S.MAX_WORLD_BODIES)
+  assert.equal(full.bursts.length, 1)
+  const shot = call('shoot', call('sphere', 'effect', 0, 1, 0, 0.1, 'ink'), 2, false)
+  const shots = Array.from({length: S.MAX_SHOTS}, (_, k) => call('shoot', call('sphere', 's' + k, 0, 1, 0, 0.1, 'ink'), 2, false))
+  traps(() => world([shot, ...shots, burst()]), 'R0029', /id.*effect/)
+  const scene = (trigger, kind = 'dust', color = 'ink', at = [1, 2, 3]) => world([burst(trigger, kind, color, 'effect', at)])
+  const zero = scene(0)
+  const one = scene(1)
+  assert.deepEqual(S.diffWorld(null, zero).burst, [])
+  let d = S.diffWorld(null, one)
+  assert.equal(d.burst.length, 1)
+  assert.ok(!d.empty())
+  assert.equal(d.create.length + d.remove.length + d.recreate.length + d.kick.length + d.blast.length, 0)
+  assert.equal(S.diffWorld(zero, one).burst.length, 1)
+  assert.equal(S.diffWorld(one, zero).burst.length, 1)
+  assert.ok(S.diffWorld(one, scene(1, 'smoke', 'danger', [4, 5, 6])).empty())
+  assert.ok(S.diffWorld(one, world([])).empty())
+  d = S.diffWorld(one, scene(2, 'smoke', 'warning', [4, 5, 6]))
+  assert.deepEqual({...d.burst[0]}, {id: 'effect', trigger: 2, x: 4, y: 5, z: 6, kind: 'smoke', color: 'warning'})
+  const compiled = compileVeraSource(program(`things.push(${src});`))
+  const vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), new UiHostEnvironment())
+  const state = vm.execute('init')
+  assert.equal(S.decodeScene(vm.execute('build', [state])).bursts[0].trigger, 0)
+  assert.equal(smokeRun(compiled), '')
+  assert.ok(describeComponents(['World']).includes('scene.burst'))
+  const dynamic = compileVeraSource(program('let kind: string = "wrong"; things.push(scene.burst("e", 1, 0, 0, 0, kind, "ink"));'))
+  const dynamicVm = new VirtualMachine(deserializeVbc2(dynamic.vbc2), new UiHostEnvironment())
+  traps(() => dynamicVm.execute('build', [dynamicVm.execute('init')]), 'R0029', /no kind/)
+}
+
+{
+  const names = M.modelNames()
+  assert.ok(names.length > 1)
+  const name = names[0]
+  const model = (id = 'model', size = 2, at = [3, 0, -4], selected = name) => call('model', id, selected, ...at, size)
+  const source = `scene.model("m", ${JSON.stringify(name)}, 3, 0, -4, 2)`
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-8, `${a} vs ${b}`)
+  const plain = model()
+  const shape = M.modelShape(name, 2)
+  const raw = M.modelSpec(name)
+  const scale = 2 / Math.max(...raw.max.map((v, i) => v - raw.min[i]))
+  const centre = raw.min.map((v, i) => (v + raw.max[i]) / 2)
+  assert.deepEqual(shape.dims, [(raw.max[2] - raw.min[2]) * scale, (raw.max[1] - raw.min[1]) * scale, (raw.max[0] - raw.min[0]) * scale])
+  assert.equal(shape.yawDeg, 90)
+  near(shape.scale, scale)
+  shape.offset.forEach((v, i) => near(v, [-centre[2] * scale, -centre[1] * scale, centre[0] * scale][i]))
+  for (let i = 0; i < raw.points.length; i += 3) {
+    near(shape.points[i], (raw.points[i + 2] - centre[2]) * scale)
+    near(shape.points[i + 1], (raw.points[i + 1] - centre[1]) * scale)
+    near(shape.points[i + 2], -(raw.points[i] - centre[0]) * scale)
+  }
+  assert.equal(plain.thing.kind, 'model')
+  assert.equal(plain.thing.model, name)
+  assert.deepEqual(plain.thing.copy(), plain.thing)
+  let b = world([plain]).bodies[0]
+  assert.equal(b.model, name)
+  assert.equal(b.shape, 'hull')
+  assert.deepEqual(b.points, shape.points)
+  assert.deepEqual(b.dims, shape.dims)
+  assert.deepEqual(b.position, [3, shape.dims[1] / 2, -4])
+  assert.deepEqual(b.rotation, [0, 0, 0])
+  near(Math.max(...b.dims), 2)
+  const Sh = loadVera('VeraShapes')
+  const bounds = Sh.partBounds(b.shape, b.dims, b.points, b.position, b.rotation)
+  near(bounds[1], 0)
+  near((bounds[0] + bounds[3]) / 2, 3)
+  near((bounds[2] + bounds[5]) / 2, -4)
+  const bigger = world([model('model', 4, [3, 5, -4])]).bodies[0]
+  bigger.dims.forEach((v, i) => near(v, b.dims[i] * 2))
+  bigger.points.forEach((v, i) => near(v, b.points[i] * 2))
+  near(bigger.position[1] - bigger.dims[1] / 2, 5)
+  const turned = world([call('turn', plain, 20, 90, 30)]).bodies[0]
+  assert.deepEqual(turned.position, b.position)
+  assert.deepEqual(turned.rotation, [20, 90, 30])
+  assert.deepEqual(turned.points, b.points)
+  assert.deepEqual(plain.thing.copy(), plain.thing)
+  assert.equal(plain.thing.ry, 0)
+  const wrappers = [
+    t => call('loose', t, 2), t => call('kick', t, 0, 1, 2, 3, 1), t => call('turn', t, 0, 45, 0),
+    t => call('mark', t, 'accent'), t => call('rings', t, 2, 3, 'accent'), t => call('bounce', t, 0.4, 0.7),
+    t => call('target', t), t => call('from', t, 'parent', 0), t => call('shoot', t, 3, false),
+    t => call('aim', t, 4, 5, 6), t => call('follow', t, 4, 2), t => call('player', t, 3, ''),
+    t => call('spin', t, 3), t => call('orbit', t, 'parent', 4, 5, 0), t => call('trail', t),
+    t => call('wander', t, 2, 1),
+    t => call('path', t, new VeraArrayValue([0, 0, 0, -4].map(v => new VeraNumberValue(v))), 1, true),
+  ]
+  for (const wrapper of wrappers) {
+    const wrapped = wrapper(plain)
+    assert.equal(wrapped.thing.model, name)
+    assert.equal(wrapped.thing.kind, 'model')
+    assert.deepEqual(wrapped.thing.points, shape.points)
+    assert.notEqual(wrapped.thing, plain.thing)
+  }
+  const route = world([wrappers[wrappers.length - 1](plain)])
+  const pose = S.orbitPositions(route, 1).get('model')
+  near(pose[0], 0); near(pose[1], shape.dims[1] / 2); near(pose[2], -1); near(pose[4], 90)
+  const offsetRoute = world([wrappers[wrappers.length - 1](call('turn', plain, 0, 15, 0))])
+  near(S.orbitPositions(offsetRoute, 1).get('model')[4], 105)
+  assert.ok(S.diffWorld(world([plain]), world([model()])).empty())
+  assert.equal(S.diffWorld(world([plain]), world([model('model', 4)])).recreate.length, 1)
+  assert.equal(S.diffWorld(world([plain]), world([model('model', 2, [4, 0, -4])])).setPose.length, 1)
+  assert.equal(S.diffWorld(world([plain]), world([call('turn', plain, 0, 90, 0)])).setPose.length, 1)
+  const differentIdentity = world([model()])
+  differentIdentity.bodies[0].model = names[1]
+  assert.equal(S.diffWorld(world([plain]), differentIdentity).recreate.length, 1, 'identity changes recreate even with identical hulls')
+  assert.equal(S.diffWorld(world([plain]), world([call('mark', plain, 'accent')])).recreate.length, 1)
+  assert.equal(S.diffWorld(world([plain]), world([])).remove[0], 'model')
+  for (const good of names) assert.deepEqual(codes(program(`things.push(scene.model("m", ${JSON.stringify(good)}, 0, 0, 0, 1));`)), [])
+  for (const bad of ['', 'not-a-model', name.toUpperCase()]) {
+    assert.ok(codes(program(`things.push(scene.model("m", ${JSON.stringify(bad)}, 0, 0, 0, 1));`)).some(c => /^E2112 .*no model/.test(c)))
+    traps(() => model('model', 2, [0, 0, 0], bad), 'R0029', /no model/)
+  }
+  for (const size of [0, -1]) traps(() => model('model', size), 'R0029', /more than 0/)
+  for (const size of [NaN, Infinity]) traps(() => model('model', size), 'R0020', /finite/)
+  for (let i = 0; i < 3; i++) {
+    const at = [0, 0, 0]; at[i] = NaN
+    traps(() => model('model', 1, at), 'R0020', /finite/)
+  }
+  traps(() => model(''), 'R0029', /needs an id/)
+  traps(() => world([model('same'), box('same')]), 'R0029', /two bodies/)
+  for (const wrapped of [source, `scene.turn(scene.mark(${source}, "accent"), 0, 45, 0)`]) {
+    for (const [fn, suffix] of [['split', ', 4, 1'], ['paint', ', "wood", "ink"'], ['glow', '']]) {
+      const statement = fn === 'split' ? `let pieces: scene.Thing[] = scene.split(${wrapped}${suffix});` : `things.push(scene.${fn}(${wrapped}${suffix}));`
+      assert.ok(codes(program(statement)).some(c => new RegExp('^E2112 scene\\.' + fn + ' does not support models').test(c)))
+    }
+  }
+  for (const wrapped of [plain, call('target', call('turn', plain, 0, 30, 0))]) {
+    traps(() => call('split', wrapped, 4, 1), 'R0029', /split does not support models/)
+    traps(() => call('paint', wrapped, 'wood', 'ink'), 'R0029', /paint does not support models/)
+    traps(() => call('glow', wrapped), 'R0029', /glow does not support models/)
+    traps(() => call('group', 'g', 0, 0, 0, new VeraArrayValue([wrapped])), 'R0029', /models cannot be group parts/)
+  }
+  traps(() => S.splitThing(plain.thing, 4, 1), 'R0029', /split does not support models/)
+  const execute = body => {
+    const compiled = compileVeraSource(program(body))
+    const vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), new UiHostEnvironment())
+    return vm.execute('build', [vm.execute('init')])
+  }
+  assert.equal(S.decodeScene(execute(`let name: string = ${JSON.stringify(name)}; things.push(scene.model("m", name, 0, 0, 0, 2));`)).bodies[0].model, name)
+  traps(() => execute('let name: string = "not-a-model"; things.push(scene.model("m", name, 0, 0, 0, 2));'), 'R0029', /no model/)
+  for (const [fn, suffix] of [['split', ', state.n + 4, 1'], ['paint', ', "wood", "ink"'], ['glow', '']]) {
+    const body = `let model: scene.Thing = ${source}; ` +
+      (fn === 'split' ? `let pieces: scene.Thing[] = scene.split(model${suffix});` : `things.push(scene.${fn}(model${suffix}));`)
+    traps(() => execute(body), 'R0029', new RegExp(fn + ' does not support models'))
+  }
+  traps(() => execute(`let model: scene.Thing = ${source}; things.push(scene.group("g", 0, 0, 0, [model]));`), 'R0029', /models cannot be group parts/)
+  const guide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-world-skill.txt'), 'utf8')
+  const prompt = S.describeSceneForPrompt()
+  for (const spec of M.MODEL_CATALOG) {
+    assert.ok(prompt.includes('"' + spec.name + '"'))
+    assert.ok(prompt.includes(spec.description))
+  }
+  for (const text of [prompt, guide, describeComponents(['World'])]) {
+    assert.match(text, /scene\.model/)
+    assert.match(text, /SUPPORT BOTTOM/)
+    assert.match(text, /group parts/)
+    assert.match(text, /paint, glow (?:and|or) split/)
+    assert.match(text, /converted centre/)
   }
 }
 

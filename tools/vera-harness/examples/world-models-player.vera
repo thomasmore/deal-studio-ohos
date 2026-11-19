@@ -1,0 +1,75 @@
+@jsonable
+class AppState {
+  alternate: boolean;
+  jumps: number;
+  blasts: number;
+  round: number;
+  status: string;
+}
+
+function init(): AppState {
+  return {alternate: false, jumps: 0, blasts: 0, round: 0, status: "Drive into the tree or cone; Swap changes car and size"};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let name: string = "raceCarRed";
+  let size: number = 1.6;
+  if (state.alternate) {
+    name = "raceCarGreen";
+    size = 2.2;
+  }
+  let things: scene.Thing[] = [];
+  things.push(scene.sky("#b9d9ec", 0));
+  things.push(scene.floor("surface"));
+  let car: scene.Thing = scene.kick(scene.model(r + "car", name, -3, 0, 0, size), state.jumps, 0, 4, 0, 0);
+  things.push(scene.follow(scene.player(car, 3, "Swap"), 5, 2.5));
+  things.push(scene.model(r + "tree", "treeLarge", 1, 0, 0, 2.5));
+  things.push(scene.loose(scene.model(r + "cone", "pylon", 0, 0, 2, 0.7), 1));
+  things.push(scene.blast(r + "blast", state.blasts, 0, 0.1, 1.5, 5, 6));
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "action") {
+    return {alternate: !state.alternate, jumps: state.jumps, blasts: state.blasts, round: state.round, status: "Car and size swapped; steer again"};
+  }
+  if (e.kind === "hit") {
+    return {alternate: state.alternate, jumps: state.jumps, blasts: state.blasts, round: state.round, status: "Collision heard"};
+  }
+  if (e.kind === "settled") {
+    return {alternate: state.alternate, jumps: state.jumps, blasts: state.blasts, round: state.round, status: "Loose model settled after the blast"};
+  }
+  return state;
+}
+
+function onJump(state: AppState, value: number): AppState {
+  return {alternate: state.alternate, jumps: state.jumps + 1, blasts: state.blasts, round: state.round, status: "Jump: the model should land on the ground"};
+}
+
+function onBlast(state: AppState, value: number): AppState {
+  return {alternate: state.alternate, jumps: state.jumps, blasts: state.blasts + 1, round: state.round, status: "Blast at the cone; the tree stays fixed"};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {alternate: false, jumps: 0, blasts: 0, round: state.round + 1, status: "Reset: red car, tree and cone at their starting positions"};
+}
+
+function view(state: AppState): ui.View {
+  let car: string = "Red car / 1.6 m";
+  if (state.alternate) {
+    car = "Green car / 2.2 m";
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 3: model player", "", "Stick to drive; Swap beside the stick changes name and size", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", car + " - " + state.status),
+      ui.ActionBar("spread", [
+        ui.Button("primary", "Jump", "onJump", 0, true),
+        ui.Button("secondary", "Blast", "onBlast", 0, true),
+        ui.Button("secondary", "Reset", "onReset", 0, true)
+      ])
+    ])
+  ]);
+}

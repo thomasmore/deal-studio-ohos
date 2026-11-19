@@ -1,0 +1,52 @@
+@jsonable
+class AppState {
+  first: string;
+  second: string;
+  picked: string;
+}
+
+function init(): AppState {
+  return {first: "#235a9f", second: "#f2bc62", picked: "Tap a sample; drag empty space to inspect"};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 5.5, 7, 0, 0.35, 0, true));
+  things.push(scene.paint(scene.floor(state.first), "tiles", state.second));
+  things.push(scene.paint(scene.box("woodBox", -0.95, 0.7, -0.85, 1.35, 1.4, 1.35, state.first), "wood", state.second));
+  things.push(scene.paint(scene.cylinder("plankCylinder", 0.95, 0.7, -0.85, 0.68, 1.4, state.first), "planks", state.second));
+  things.push(scene.paint(scene.thick(scene.shape("brickL", 0, 0.2, 1.05,
+    [-0.85, -0.65, 0.85, -0.65, 0.85, -0.15, -0.25, -0.15, -0.25, 0.65, -0.85, 0.65], state.first), 0.4), "brick", state.second));
+  return things;
+}
+
+function onSwap(state: AppState, value: number): AppState {
+  return {first: state.second, second: state.first, picked: "Colors swapped; the samples keep their shape and seed"};
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind !== "tap") {
+    return state;
+  }
+  let picked: string = "Tiles on the floor";
+  if (e.body === "woodBox") {
+    picked = "Wood on the box";
+  } else if (e.body === "plankCylinder") {
+    picked = "Planks on the cylinder: side and cap";
+  } else if (e.body === "brickL") {
+    picked = "Brick on the L: top and cut edges";
+  }
+  return {first: state.first, second: state.second, picked: picked};
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 1: floor", "", "Back: wood box, planks cylinder. Front: brick L.", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", state.picked),
+      ui.Text("caption", "Tiles floor. Blue and gold are both supplied paint colors."),
+      ui.Button("secondary", "Swap colors", "onSwap", 0, true)
+    ])
+  ]);
+}

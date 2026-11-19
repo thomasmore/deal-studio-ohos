@@ -1,0 +1,52 @@
+@jsonable
+class AppState {
+  first: string;
+  second: string;
+  picked: string;
+}
+
+function init(): AppState {
+  return {first: "#235a9f", second: "#f2bc62", picked: "Tap a sample; drag empty space to inspect"};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 5.5, 7, 0, 0.35, 0, true));
+  things.push(scene.paint(scene.table(4.2, 4, state.first), "checker", state.second));
+  things.push(scene.paint(scene.hull("stonePyramid", -0.95, 0, -0.85,
+    [-0.68, 0, -0.68, 0.68, 0, -0.68, 0.68, 0, 0.68, -0.68, 0, 0.68, 0, 1.4, 0], state.first), "stone", state.second));
+  things.push(scene.paint(scene.sphere("sandSphere", 0.95, 0.7, -0.85, 0.7, state.first), "sand", state.second));
+  things.push(scene.paint(scene.cylinder("metalCylinder", 0, 0.65, 1.05, 0.72, 1.3, state.first), "metal", state.second));
+  return things;
+}
+
+function onSwap(state: AppState, value: number): AppState {
+  return {first: state.second, second: state.first, picked: "Colors swapped; the samples keep their shape and seed"};
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind !== "tap") {
+    return state;
+  }
+  let picked: string = "Checker on the table";
+  if (e.body === "stonePyramid") {
+    picked = "Stone on the pyramid hull";
+  } else if (e.body === "sandSphere") {
+    picked = "Sand on the sphere: inspect the seam and poles";
+  } else if (e.body === "metalCylinder") {
+    picked = "Metal on the cylinder: side and cap";
+  }
+  return {first: state.first, second: state.second, picked: picked};
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 1: table", "", "Back: stone hull, sand sphere. Front: metal cylinder.", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", state.picked),
+      ui.Text("caption", "Checker table. Blue and gold are both supplied paint colors."),
+      ui.Button("secondary", "Swap colors", "onSwap", 0, true)
+    ])
+  ]);
+}

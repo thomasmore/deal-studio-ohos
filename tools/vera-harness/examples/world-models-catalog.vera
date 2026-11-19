@@ -1,0 +1,78 @@
+@jsonable
+class AppState {
+  alternate: boolean;
+  picked: string;
+}
+
+function init(): AppState {
+  return {alternate: false, picked: ""};
+}
+
+function names(state: AppState): string[] {
+  let car: string = "raceCarRed";
+  let barrier: string = "barrierRed";
+  if (state.alternate) {
+    car = "raceCarGreen";
+    barrier = "barrierWhite";
+  }
+  return [car, "treeSmall", "treeLarge", "pylon", "ramp", barrier,
+    "fenceStraight", "flagCheckers", "grandStandCovered", "pitsGarage", "tent", "roadStraight"];
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 9, 11, 0, 0.5, 0, false));
+  things.push(scene.floor("surface"));
+  let models: string[] = names(state);
+  let index: number = 0;
+  while (index < models.length()) {
+    let id: string = "sample" + ui.numberToString(index);
+    let x: number = -3.6 + (index % 4) * 2.4;
+    let z: number = -2.4 + math.floor(index / 4) * 2.4;
+    let model: scene.Thing = scene.model(id, models[index], x, 0, z, 1.5);
+    if (state.picked === id) {
+      model = scene.mark(model, "accent");
+    }
+    things.push(model);
+    index = index + 1;
+  }
+  return things;
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "tap") {
+    let index: number = 0;
+    while (index < 12) {
+      if (e.body === "sample" + ui.numberToString(index)) {
+        return {alternate: state.alternate, picked: e.body};
+      }
+      index = index + 1;
+    }
+  }
+  return state;
+}
+
+function onSwap(state: AppState, value: number): AppState {
+  return {alternate: !state.alternate, picked: state.picked};
+}
+
+function view(state: AppState): ui.View {
+  let selected: string = "Tap a model to mark it";
+  let models: string[] = names(state);
+  let index: number = 0;
+  while (index < models.length()) {
+    if (state.picked === "sample" + ui.numberToString(index)) {
+      selected = "Selected: " + models[index];
+    }
+    index = index + 1;
+  }
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 3: model catalog", "", "12 fixed samples; each longest side is 1.5 m", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", selected),
+      ui.Text("caption", "Back: car, small tree, large tree, cone. Middle: ramp, barrier, fence, flag. Front: stand, garage, tent, road."),
+      ui.Button("secondary", "Swap car and barrier", "onSwap", 0, true)
+    ])
+  ]);
+}

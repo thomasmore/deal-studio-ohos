@@ -13,8 +13,10 @@
 import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, SceneFrom, SceneShot, orbitPositions,
   topFace } from './VeraScene'
 import { PlayerDrive, ZoneEnter, yawOf, PLAYER_STOP } from './VeraLocomotion'
-import { pointBounds, PartRecords, PART_RECORD, addPartRecords, turnPoint } from './VeraShapes'
+import { pointBounds, partBounds, PartRecords, PART_RECORD, addPartRecords, turnPoint } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
+import { ParticleBurst, MAX_BURSTS, DUST_MIN_SPEED } from './VeraParticles'
+import { surfaceSeed } from './VeraNoise'
 
 /** Body kinds, as the native library numbers them. */
 export const PHYS_STATIC: number = 0
@@ -886,6 +888,9 @@ export function enterEvent(z: ZoneEnter): SimEvent {
 
 /** [minX, minY, minZ, maxX, maxY, maxZ] of a body where its spec puts it, turned as its spec turns it. */
 export function specBounds(b: BodySpec): number[] {
+  if (b.model.length > 0 && b.shape === 'hull') {
+    return partBounds(b.shape, b.dims, b.points, b.position, b.rotation)
+  }
   let half = b.shape === 'sphere' ? [b.dims[0] / 2, b.dims[0] / 2, b.dims[0] / 2]
     : b.shape === 'cylinder' ? [b.dims[0] / 2, b.dims[1] / 2, b.dims[0] / 2] : [b.dims[0] / 2, b.dims[1] / 2, b.dims[2] / 2]
   let e = [half[0], half[1], half[2]]
@@ -1161,6 +1166,8 @@ export class WorldSim {
   private struckClock: number = 0
   private spin: Float32Array = new Float32Array(6)
   private events: SimEvent[] = []
+  private pendingBursts: ParticleBurst[] = []
+  private burstSerial: number = 0
   /** The player (scene.player), '' for none; the stick as the renderer last set it; its driving; whether it was driven last step. */
   private player: string = ''
   private playerSpeed: number = 0
@@ -1193,8 +1200,8 @@ export class WorldSim {
 
   /** Whether frames are needed: loose bodies awake, a throw whose settling has not been told yet, or the player going. */
   needsFrames(): boolean {
-    return this.loose.length > 0 && (this.awake > 0 || this.settlePending || this.hitBest !== null || this.playerGoing() ||
-      this.shotsFlying > 0 || this.struckBest !== null)
+    return this.pendingBursts.length > 0 || (this.loose.length > 0 && (this.awake > 0 || this.settlePending ||
+      this.hitBest !== null || this.playerGoing() || this.shotsFlying > 0 || this.struckBest !== null))
   }
 
   /** The player's id, '' for none. */
@@ -1232,6 +1239,12 @@ export class WorldSim {
     return out
   }
 
+  takeBursts(): ParticleBurst[] {
+    let out = this.pendingBursts
+    this.pendingBursts = []
+    return out
+  }
+
   /** Empty the engine and forget every body. */
   reset(): void {
     if (this.stepping) { this.engine.stepEnd() }
@@ -1253,6 +1266,8 @@ export class WorldSim {
     this.hitBest = null
     this.lastHitAt = -1e9
     this.events = []
+    this.pendingBursts = []
+    this.burstSerial = 0
     this.fromMissing = []
     this.origin.clear()
     this.targets.clear()
@@ -1677,6 +1692,16 @@ export class WorldSim {
     let last = this.pairAt.get(key)
     if (last !== undefined && this.simTime - last < STRUCK_PAIR_COOLDOWN_S - 1e-9) { return }
     this.pairAt.set(key, this.simTime)
+    let shot = this.shots.indexOf(a) >= 0 || this.shots.indexOf(b) >= 0
+    if ((shot || speed >= DUST_MIN_SPEED) && Number.isFinite(px) && Number.isFinite(py) && Number.isFinite(pz)) {
+      let request = new ParticleBurst()
+      request.kind = shot ? 'sparks' : 'dust'
+      request.seed = surfaceSeed(JSON.stringify([key, this.burstSerial++]))
+      request.origin = [px, py, pz]
+      request.color = shot ? '#ffc45c' : '#a89b84'
+      this.pendingBursts.push(request)
+      if (this.pendingBursts.length > MAX_BURSTS) { this.pendingBursts.shift() }
+    }
     let known = this.struckSpeeds.get(body)
     if (known === undefined || speed > known) { this.struckSpeeds.set(body, speed) }
     let best = this.struckBest

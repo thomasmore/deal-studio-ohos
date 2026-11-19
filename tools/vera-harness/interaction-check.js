@@ -21,7 +21,7 @@ const world = items => S.decodeScene(new VeraArrayValue(items))
 const near = (a, b, eps, msg) => assert.ok(Math.abs(a - b) <= eps, msg + ': ' + a + ' vs ' + b)
 const nearAll = (a, b, eps, msg) => { assert.equal(a.length, b.length, msg); a.forEach((v, i) => near(v, b[i], eps, msg + ' [' + i + ']')) }
 const yawQ = deg => [0, Math.sin(deg * Math.PI / 360), 0, Math.cos(deg * Math.PI / 360)]
-const run = (sim, n, t0 = 0) => { const told = []; for (let f = 0; f < n; f++) { sim.step(FRAME_MS, t0 + f / 60); told.push(...sim.takeEvents()) } return told }
+const run = (sim, n, t0 = 0) => { const told = []; for (let f = 0; f < n; f++) { sim.step(FRAME_MS, t0 + f / 60); told.push(...sim.takeEvents()); sim.takeBursts() } return told }
 const velocity = (engine, sim, id) => { const out = new Float32Array(6); engine.readVelocity(sim.index.get(id), out); return Array.from(out) }
 const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
 
@@ -390,6 +390,172 @@ const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
   const k1 = ex.addBox(0.1, 0.1, 0.1, P.PHYS_KINEMATIC); ex.setPose(k1, 0, -1, 0, 0, 0, 0, 1)
   assert.equal(ex.explode(0, 0, 0, 2, 4), 3)
   ex.readVelocity(d1, vel); nearAll(Array.from(vel).slice(0, 3), [2, 0, 0], 1e-6, 'dv = strength * (1 - d / r), outward')
+}
+
+{
+  const Particles = loadVera('VeraParticles')
+  const Noise = loadVera('VeraNoise')
+  const scene = (trigger, at = [1, 2, 3], radius = 2, strength = 4) => world([call('blast', 'bomb', trigger, ...at, radius, strength)])
+  const zero = scene(0)
+  const one = scene(1)
+  assert.deepEqual(S.burstsForDiff(S.diffWorld(null, zero)), [])
+  assert.deepEqual(S.burstsForDiff(S.diffWorld(one, scene(1, [7, 8, 9], 3, 5))), [])
+  for (const diff of [S.diffWorld(null, one), S.diffWorld(zero, one), S.diffWorld(one, zero)]) {
+    const requests = S.burstsForDiff(diff)
+    assert.deepEqual(requests.map(r => [r.kind, r.origin, r.color]),
+      [['debris', [1, 2, 3], '#a68b6b'], ['smoke', [1, 2, 3], '#7f8895']])
+    assert.deepEqual(requests, S.burstsForDiff(diff))
+    assert.notEqual(requests[0].seed, requests[1].seed)
+    assert.ok(requests.every(r => r instanceof Particles.ParticleBurst))
+    assert.notEqual(requests[0].origin, requests[1].origin)
+    requests[0].origin[0] = 99
+    assert.deepEqual(S.burstsForDiff(diff)[0].origin, [1, 2, 3])
+  }
+  assert.notEqual(S.burstsForDiff(S.diffWorld(null, one))[0].seed, S.burstsForDiff(S.diffWorld(one, zero))[0].seed)
+  const direct = (id, trigger, kind = 'confetti') => world([call('burst', id, trigger, 4, 5, 6, kind, 'warning')])
+  const diff = S.diffWorld(null, direct('party', 1))
+  const [request] = S.burstsForDiff(diff)
+  assert.deepEqual({...request}, {kind: 'confetti', seed: Noise.surfaceSeed(JSON.stringify(['party', 1, 'confetti'])), origin: [4, 5, 6], color: 'warning'})
+  assert.notEqual(request.seed, S.burstsForDiff(S.diffWorld(null, direct('other', 1)))[0].seed)
+  assert.notEqual(request.seed, S.burstsForDiff(S.diffWorld(null, direct('party', 2)))[0].seed)
+  assert.notEqual(request.seed, S.burstsForDiff(S.diffWorld(null, direct('party', 1, 'smoke')))[0].seed)
+  const pool = new Particles.ParticlePool()
+  pool.emit(request)
+  assert.ok(pool.needsFrames() && pool.particleCount() > 0, 'a direct effect needs no physics or bodies')
+  pool.advance(0, 0)
+  pool.advance(10, 0)
+  assert.equal(pool.needsFrames(), false, 'expired particles release frames')
+  assert.equal(pool.particleCount(), 0)
+  const sim = new P.WorldSim(new P.FakePhys())
+  sim.apply(S.diffWorld(null, one), one)
+  assert.deepEqual(sim.takeBursts(), [], 'apply does not replay blast particles')
+  sim.reset()
+  sim.apply(diff, direct('party', 1))
+  assert.deepEqual(sim.takeBursts(), [], 'renderer owns explicit effects too')
+  const both = world([call('blast', 'bomb', 1, 1, 2, 3, 2, 4), call('burst', 'party', 1, 4, 5, 6, 'confetti', 'warning')])
+  assert.deepEqual(S.burstsForDiff(S.diffWorld(null, both)).map(r => r.kind), ['debris', 'smoke', 'confetti'])
+}
+
+{
+  const Particles = loadVera('VeraParticles')
+  const fake = new P.FakePhys()
+  let records = []
+  fake.drainContacts = out => { out.set(records); const n = records.length / P.CONTACT_RECORD; records = []; return n }
+  const sim = new P.WorldSim(fake)
+  const items = [call('floor', 'surface'),
+    call('shoot', call('sphere', 'shot', -30, 5, 0, 0.05, 'ink'), 1, false),
+    call('box', 'plain', 30, 0.5, 0, 1, 1, 1, 'ink'), call('box', 'plain2', 35, 0.5, 0, 1, 1, 1, 'ink')]
+  for (let k = 0; k < 40; k++) items.push(call('target', call('box', 't' + k, k * 2 - 40, 0.5, 10, 1, 1, 1, 'ink')))
+  const spec = world(items)
+  const apply = () => sim.apply(S.diffWorld(null, spec), spec)
+  apply()
+  const rec = (a, b, speed, at = [1, 2, 3]) => [a === '' ? sim.ground[0] : sim.index.get(a), b === '' ? sim.ground[0] : sim.index.get(b), speed, ...at]
+  const step = contacts => { records = contacts.flat(); sim.step(FRAME_MS, sim.simTime); return sim.takeEvents().filter(e => e.kind === 'struck') }
+  assert.deepEqual(step([rec('plain', 'plain2', 9), rec('t0', 'plain', 1.4), rec('shot', '', 9)]), [])
+  assert.deepEqual(sim.takeBursts(), [], 'unwatched, soft and shot-ground contacts are excluded')
+  let told = step([rec('shot', 't0', 2, [1, 2, 3]), rec('t1', 'plain', 20, [4, 5, 6])])
+  assert.equal(told.length, 1)
+  assert.equal(told[0].body, 't1', 'harder nonshot owns the VM aggregate')
+  let requests = sim.takeBursts()
+  assert.deepEqual(requests.map(r => [r.kind, r.origin, r.color]),
+    [['sparks', [1, 2, 3], '#ffc45c'], ['dust', [4, 5, 6], '#a89b84']], 'the aggregate cannot hide the shot visual')
+  const firstSeed = requests[0].seed
+  assert.deepEqual(sim.takeBursts(), [], 'draining transfers the queue once')
+  told = step([rec('t0', 'shot', 30), rec('t2', 'shot', 2, [7, 8, 9])])
+  assert.equal(told.length, 0, 'VM event rate limit still applies')
+  requests = sim.takeBursts()
+  assert.deepEqual(requests.map(r => [r.kind, r.origin]), [['sparks', [7, 8, 9]]], 'either contact side detects a shot; pair cooldown is shared')
+  step([rec('t3', 'plain', Particles.DUST_MIN_SPEED - 0.01), rec('t4', 'plain', Particles.DUST_MIN_SPEED), rec('', 't5', 4)])
+  assert.deepEqual(sim.takeBursts().map(r => [r.kind, r.color]), [['dust', '#a89b84'], ['dust', '#a89b84']], 'dust threshold is inclusive, target-ground remains accepted')
+  for (let f = 0; f < 20; f++) step([])
+  step([rec('t0', 'shot', 2, [3, 2, 1])])
+  requests = sim.takeBursts()
+  assert.equal(requests.length, 1, 'pair emits again after cooldown')
+  assert.notEqual(requests[0].seed, firstSeed)
+  sim.reset()
+  apply()
+  step([rec('shot', 't0', 2, [1, 2, 3])])
+  requests = sim.takeBursts()
+  assert.equal(requests[0].seed, firstSeed, 'reset makes the contact sequence deterministic')
+  step(Array.from({length: 39}, (_, k) => rec('shot', 't' + (k + 1), 2, [k + 1, 2, 3])))
+  requests = sim.takeBursts()
+  assert.equal(requests.length, Particles.MAX_BURSTS)
+  assert.deepEqual(requests.map(r => r.origin[0]), Array.from({length: Particles.MAX_BURSTS}, (_, k) => 40 - Particles.MAX_BURSTS + k), 'oldest pending requests are evicted')
+  const pool = new Particles.ParticlePool()
+  for (const request of requests) pool.emit(request)
+  assert.ok(pool.particleCount() <= Particles.MAX_PARTICLES)
+  assert.ok(pool.burstCount() <= Particles.MAX_BURSTS)
+  sim.reset()
+  apply()
+  step([rec('shot', 't0', 2, [11, 12, 13])])
+  const empty = world([])
+  sim.apply(S.diffWorld(spec, empty), empty)
+  assert.equal(fake.awakeDynamic(), 0)
+  assert.equal(sim.hasLoose(), false)
+  assert.equal(sim.needsFrames(), true, 'pending particles keep frames alive even after every body is collected')
+  requests = sim.takeBursts()
+  assert.deepEqual(requests[0].origin, [11, 12, 13], 'contact world position was captured before bodies were removed')
+  assert.equal(sim.needsFrames(), false, 'drained particles do not keep simulation frames alive')
+  for (const request of requests) pool.emit(request)
+  assert.equal(pool.needsFrames(), true, 'renderer pool keeps particles awake independently')
+  pool.advance(0)
+  pool.advance(10)
+  assert.equal(pool.needsFrames(), false, 'expired particles do not keep renderer frames alive')
+  sim.reset()
+  apply()
+  step([rec('shot', 't0', 2)])
+  sim.reset()
+  assert.deepEqual(sim.takeBursts(), [], 'reset clears unconsumed requests')
+  assert.equal(sim.needsFrames(), false)
+}
+
+{
+  const M = loadVera('VeraModels')
+  const name = M.modelNames()[0]
+  const shape = M.modelShape(name, 2)
+  const model = (id = 'model', x = 0, y = 0) => call('model', id, name, x, y, 0, 2)
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const spec = world([call('floor', 'surface'), call('loose', model(), 2)])
+  sim.apply(S.diffWorld(null, spec), spec)
+  const b = spec.bodies[0]
+  assert.equal(b.shape, 'hull')
+  assert.deepEqual(b.points, shape.points)
+  nearAll(sim.poseOf('model').slice(0, 3), [0, shape.dims[1] / 2, 0], 1e-6, 'model body is centred above support bottom')
+  assert.equal(fakeBody(fake, sim, 'model').awake, false, 'grounded loose model starts resting through the hull path')
+  const records = new Sh.PartRecords()
+  Sh.addPartRecords(records, b.shape, b.dims, b.points, 0, 0, 0, [0, 0, 0, 1])
+  assert.equal(records.records[0], 3, 'existing native hull type is used')
+  assert.deepEqual(records.points, shape.points)
+  const tilted = world([call('floor', 'surface'), call('loose', call('turn',
+    call('model', 'tree', 'treeSmall', 0, -0.10631207277372601, 0, 2), 0, 0, 30), 1)])
+  const tree = tilted.bodies[0]
+  const hullBounds = Sh.partBounds(tree.shape, tree.dims, tree.points, tree.position, tree.rotation)
+  nearAll(P.specBounds(tree), hullBounds, 1e-9, 'model bounds use transformed hull points')
+  near(P.specBounds(tree)[1], 0, 1e-9, 'tilted tree hull touches the floor')
+  const before = P.bodyRecords(tree)
+  assert.deepEqual(before.points, tree.points, 'tilted model collision points remain body-local')
+  sim.apply(S.diffWorld(spec, tilted), tilted)
+  nearAll(sim.poseOf('tree').slice(0, 3), tree.position, 1e-6, 'physics keeps the grounded model origin')
+  assert.equal(fakeBody(fake, sim, 'tree').awake, false, 'grounded tilted model starts asleep')
+  assert.deepEqual(P.bodyRecords(tree), before, 'bounds do not alter physics shape records')
+  for (const selected of M.modelNames()) {
+    const sample = world([call('turn', call('model', 'sample', selected, 2, 3, -4, 2), 20, 35, 30)]).bodies[0]
+    const untouched = JSON.stringify(sample)
+    nearAll(P.specBounds(sample), Sh.partBounds(sample.shape, sample.dims, sample.points, sample.position, sample.rotation),
+      1e-9, selected + ' transformed hull bounds')
+    assert.equal(JSON.stringify(sample), untouched, 'bounds leave model data unchanged')
+  }
+  const parent = [1, 2, 3, ...yawQ(90), 0, 0, 0, 0, 0, 0]
+  const from = world([call('from', model('child', 3, 0.2), 'parent', 0)]).bodies[0]
+  const [pose] = P.resolveFrom(parent, from.position, from.rotation, [], 0, 0)
+  nearAll(pose.slice(0, 3), [1, 2.2 + shape.dims[1] / 2, 0], 1e-6, 'from uses converted model centre offset in parent frame')
+  nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 0, -1], 1e-6, 'model front follows parent +x without a second asset yaw')
+  const placed = world([call('box', 'parent', 0, 1, 0, 0.2, 0.2, 0.2, 'ink'),
+    call('from', model('child', 3, 0.2), 'parent', 0)])
+  sim.apply(S.diffWorld(tilted, placed), placed)
+  assert.deepEqual(sim.fromMissing, [])
+  nearAll(sim.poseOf('child').slice(0, 3), [3, 1.2 + shape.dims[1] / 2, 0], 1e-6, 'WorldSim creates model hull in the parent frame')
 }
 
 console.log('interaction-check ok')

@@ -1,0 +1,59 @@
+@jsonable
+class AppState {
+  first: string;
+  second: string;
+  picked: string;
+}
+
+function init(): AppState {
+  return {first: "#235a9f", second: "#f2bc62", picked: "Tap a sample; drag empty space to inspect"};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 5.5, 7, 0, 0.65, 0, true));
+  things.push(scene.floor("surface"));
+  things.push(scene.group("materialPair", 0, 0, -1.05, [
+    scene.paint(scene.box("grassPart", -0.95, 0.7, 0, 1.35, 1.4, 1.35, state.first), "grass", state.second),
+    scene.paint(scene.cylinder("fabricPart", 0.95, 0.7, 0, 0.68, 1.4, state.first), "fabric", state.second)
+  ]));
+  things.push(scene.paint(scene.sphere("marbleLit", -0.95, 0.7, 1.05, 0.7, state.first), "marble", state.second));
+  things.push(scene.glow(scene.paint(scene.sphere("marbleGlow", 0.95, 0.7, 1.05, 0.7, state.first), "marble", state.second)));
+  return things;
+}
+
+function onSwap(state: AppState, value: number): AppState {
+  return {first: state.second, second: state.first, picked: "Colors swapped; the samples keep their shape and seed"};
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind !== "tap") {
+    return state;
+  }
+  let picked: string = "Plain floor for the group and glow comparison";
+  if (e.body === "materialPair") {
+    picked = "Grass box and fabric cylinder belong to one group";
+    if (e.other === "grassPart") {
+      picked = "Grass on the group's box part";
+    } else if (e.other === "fabricPart") {
+      picked = "Fabric on the group's cylinder part";
+    }
+  } else if (e.body === "marbleLit") {
+    picked = "Left: marble sphere with ordinary lighting";
+  } else if (e.body === "marbleGlow") {
+    picked = "Right: marble sphere with glow; both paint colors remain";
+  }
+  return {first: state.first, second: state.second, picked: picked};
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 1: parts and glow", "", "Back: grass and fabric parts. Front: marble, lit / glow.", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", state.picked),
+      ui.Text("caption", "Blue and gold are both supplied paint colors."),
+      ui.Button("secondary", "Swap colors", "onSwap", 0, true)
+    ])
+  ]);
+}

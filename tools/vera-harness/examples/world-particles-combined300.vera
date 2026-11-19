@@ -1,0 +1,69 @@
+@jsonable
+class AppState {
+  bursts: number;
+  round: number;
+}
+
+function init(): AppState {
+  return {bursts: 0, round: 0};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 11, 14, 0, 1, 0, true));
+  things.push(scene.sky("#172438", 0));
+  things.push(scene.table(12.5, 12.5, "#34445a"));
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let level: number = 0;
+  while (level < 3) {
+    let row: number = 0;
+    while (row < 10) {
+      let col: number = 0;
+      while (col < 10) {
+        let id: string = r + "cube" + ui.numberToString(level) + "-" + ui.numberToString(row) + "-" + ui.numberToString(col);
+        let color: string = "#77a9d9";
+        if ((row + col + level) % 2 === 1) {
+          color = "#dba95f";
+        }
+        let cube: scene.Thing = scene.loose(scene.box(id, (col - 4.5) * 1.05, 0.4 + level * 0.74, (row - 4.5) * 1.05, 0.72, 0.72, 0.72, color), 1);
+        things.push(scene.kick(cube, state.bursts, 0, 3, 0, 0.2));
+        col = col + 1;
+      }
+      row = row + 1;
+    }
+    level = level + 1;
+  }
+  let k: number = 0;
+  while (k < 8) {
+    let color: string = "#e568d1";
+    if (k % 2 === 1) {
+      color = "#ffd166";
+    }
+    things.push(scene.burst("confetti" + ui.numberToString(k), state.bursts, (k % 4 - 1.5) * 2.4, 3.2, -1.5 + math.floor(k / 4) * 3, "confetti", color));
+    k = k + 1;
+  }
+  return things;
+}
+
+function onBurst(state: AppState, value: number): AppState {
+  return {bursts: state.bursts + 1, round: state.round};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {bursts: state.bursts, round: state.round + 1};
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("technical", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 2: combined load", "", "Benchmark only: 300 loose cubes + 8 x 32 confetti", ""),
+      ui.World("fill", 0, "build", ""),
+      ui.Text("body", "300 bodies / 256 particles per press / burst " + ui.numberToString(state.bursts)),
+      ui.Text("caption", "Burst wakes every cube. No world events or ticker. Particles expire automatically."),
+      ui.ActionBar("spread", [
+        ui.Button("primary", "Burst + wake 300", "onBurst", 0, true),
+        ui.Button("secondary", "Restack", "onReset", 0, true)
+      ])
+    ])
+  ]);
+}

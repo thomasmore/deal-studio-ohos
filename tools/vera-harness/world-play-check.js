@@ -13,7 +13,7 @@ const {loadVera} = require('./source-loader')
 const {compileVeraSource} = loadVera('VeraCompiler')
 const {playWorld, WorldPlayReport, CODE_NOT_SEEN, CODE_OVERLAP, CODE_OUT_OF_WORLD, CODE_STILL, CODE_NO_SETTLE,
   CODE_RESULT_UNREAD, CODE_NO_WORLD, CODE_ORBITS_CROSS, CODE_TOO_SMALL, CODE_STUCK, CODE_WALKS_THROUGH, CODE_ZONE_UNREACHABLE,
-  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING, CODE_ID_SHOWN, CODE_BUTTON_TWICE, CODE_SHOT_OVER, shownId} = loadVera('VeraWorldPlay')
+  CODE_NO_TRAVEL, CODE_STRUCK_UNREAD, CODE_FROM_MISSING, CODE_ID_SHOWN, CODE_BUTTON_TWICE, CODE_SHOT_OVER, CODE_TEXTURE_TOO_SMALL, CODE_MODEL_GROUND, shownId} = loadVera('VeraWorldPlay')
 const B = loadVera('VeraBudget')
 const {playSurface} = loadVera('VeraSurfacePlay')
 
@@ -291,6 +291,133 @@ function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.Wo
     'things.push(scene.from(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ), "launcher", 0));',
     'things.push(scene.aim(scene.shoot(ball, 14, false), state.aimX, state.aimY, state.aimZ));')), '',
     'a shot made beyond the floor plays')
+}
+
+{
+  assert.equal(CODE_TEXTURE_TOO_SMALL, 'P0020')
+  assert.equal(CODE_BUTTON_TWICE, 'P0018')
+  assert.equal(CODE_SHOT_OVER, 'P0019')
+  const textured = (body, camera = 'scene.camera(0, 0, 10, 0, 0, 0, false)', setup = '') => `
+@jsonable class AppState { n: number; }
+function init(): AppState { return {n: 0}; }
+function build(state: AppState): scene.Thing[] {
+  return [${camera}, ${setup ? setup + ',' : ''} ${body}];
+}
+function onWorld(state: AppState, e: scene.Event): AppState { return {n: state.n + 1}; }
+function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.World("default", 0, "build", "onWorld")]); }
+`
+  const paint = body => `scene.paint(${body}, "wood", "warning")`
+  const box = (id, size, x = 0) => `scene.box("${id}", ${x}, 0, 0, ${size}, ${size}, ${size}, "ink")`
+  refused(textured(paint(box('small', 0.6))), CODE_TEXTURE_TOO_SMALL, /patterns are too small.*small/, 'dominant painted body about 19 vp across')
+  assert.equal(play(textured(paint(box('large', 2)))), '', 'large projected material patterns play')
+  assert.equal(play(textured(paint(box('near', 0.6)), 'scene.camera(0, 0, 4, 0, 0, 0, false)')), '', 'bringing the camera nearer makes the pattern readable')
+  assert.equal(play(textured(box('main', 2) + ', ' + paint(box('detail', 0.1, 2)))), '', 'tiny decorative paint does not invalidate a larger scene')
+  assert.equal(play(textured(box('main', 2) + ', ' + paint(box('detail', 0.6, 2)))), '', 'unreadable but subordinate painted detail is not evidence against the whole scene')
+  assert.equal(play(textured(paint(box('main', 2)) + ', ' + paint(box('detail', 0.1, 2)))), '', 'one tiny painted detail does not invalidate readable materials')
+  assert.equal(play(textured(box('main', 2) + ', ' + paint(box('behind', 0.6)).replace(', 0, 0, 0,', ', 0, 0, 20,'))), '', 'paint behind the camera is not evidence')
+  const part = size => `scene.group("group", 0, 0, 0, [${paint(box('part', size))}])`
+  refused(textured(part(0.6)), CODE_TEXTURE_TOO_SMALL, /patterns are too small.*part/, 'projected paint on a small group leaf')
+  assert.equal(play(textured(part(2))), '', 'large painted group leaf plays')
+  assert.equal(play(textured(`scene.turn(${part(2)}, 0, 45, 30)`)), '', 'rotated group leaves are projected with their parent transform')
+  assert.equal(play(textured(`scene.paint(scene.sphere("ball", 0, 0, 0, 1, "ink"), "marble", "accent")`)), '', 'material patterns on a large sphere play')
+  assert.equal(play(textured(`scene.paint(scene.sphere("ball", 0, 0, 0, 0.3, "ink"), "bands", "accent")`)), '', 'legacy sphere paint is not a metre-scale material check')
+  const ornament = `scene.group("group", 0, 0, 0, [${box('main', 2)}, ${paint(box('detail', 0.1, 1))}])`
+  assert.equal(play(textured(ornament)), '', 'paint coverage is measured on leaves, not the whole group bounds')
+  refused(textured(paint(box('broad', 100)), 'scene.camera(0, 0, 1000, 0, 0, 0, false)'), CODE_TEXTURE_TOO_SMALL,
+    /patterns are too small/, 'a broad body with subpixel metre-scale tiles')
+  const sheet = `scene.paint(scene.shape("sheet", 0, 0, 0, [-1, -1, 1, -1, 1, 1, -1, 1], "ink"), "tiles", "accent")`
+  assert.equal(play(textured(sheet, 'scene.camera(0, 6, 6, 0, 0, 0, false)')), '', 'a thin sheet seen face-on has readable coverage')
+  assert.equal(play(textured(paint(box('small', 0.6)), 'scene.camera(0, 3, 10, 0, 0, 0, false)',
+    'scene.paint(scene.floor("ink"), "tiles", "accent")')), '', 'a visible readable painted floor contributes screen coverage')
+  assert.equal(play(textured('scene.box("main", 0, 0.5, 0, 1, 1, 1, "ink")', 'scene.camera(0, 4, 5, 0, 0, 0, false)',
+    'scene.paint(scene.table(3, 2, "ink"), "wood", "accent")')), '', 'painted table coverage is projected')
+}
+
+{
+  const M = loadVera('VeraModels')
+  const S = loadVera('VeraScene')
+  const Sh = loadVera('VeraShapes')
+  const name = M.modelNames()[0]
+  const shape = M.modelShape(name, 1)
+  const model = (y = 0, x = 0, z = 0) => `scene.model("model", ${JSON.stringify(name)}, ${x}, ${y}, ${z}, 1)`
+  const scene = (body, setup = 'scene.floor("surface")', extra = '') => `
+@jsonable class AppState { n: number; }
+function init(): AppState { return {n: 0}; }
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [${setup ? setup + ',' : ''} ${body}];
+  ${extra}
+  return things;
+}
+function onWorld(state: AppState, e: scene.Event): AppState { return {n: state.n + 1}; }
+function view(state: AppState): ui.View { return ui.AppTheme("clean", "", [ui.World("default", 0, "build", "onWorld")]); }
+`
+  assert.equal(CODE_MODEL_GROUND, 'P0021')
+  assert.equal(play(scene(model())), '', 'support-bottom zero grounds a static model')
+  for (const selected of M.modelNames()) {
+    assert.equal(play(scene(`scene.model("model", ${JSON.stringify(selected)}, 0, 0, 0, 1)`)), '', selected + ' grounds through the real catalogue hull')
+  }
+  refused(scene(model(-0.2)), CODE_MODEL_GROUND, /SUPPORT BOTTOM/, 'static model below the floor')
+  refused(scene(model(0.3)), CODE_MODEL_GROUND, /supporting body/, 'unsupported static model above the floor')
+  assert.equal(play(scene(model(1), '')), '', 'without a floor or table models may float')
+  const support = 'scene.box("support", 0, 0.5, 0, 3, 1, 3, "ink")'
+  assert.equal(play(scene(`${model(1)}, ${support}`)), '', 'an elevated model may rest on a support declared after it')
+  assert.equal(play(scene(`${model(1)}, scene.loose(${support}, 1)`)), '', 'a resting loose support does not falsely invalidate a static model')
+  assert.equal(play(scene(`${model(1)}, scene.turn(${support}, 0, 45, 0)`)), '', 'yawed supports hold elevated models')
+  refused(scene(`${model(1, 4)}, ${support}`), CODE_MODEL_GROUND, null, 'an offside support does not hold a floating model')
+  refused(scene(`${model(1.2)}, ${support}`), CODE_MODEL_GROUND, null, 'a gap above a support')
+  assert.equal(play(scene(model(), 'scene.table(4, 4, "surface")')), '', 'model rests on table top')
+  refused(scene(model(0, 5), 'scene.table(4, 4, "surface")'), CODE_MODEL_GROUND, null, 'model beyond the table has no support')
+  assert.equal(play(scene(`scene.turn(${model()}, 0, 90, 0)`)), '', 'yaw preserves grounding')
+  const rotation = [0, 0, 90]
+  const rotated = Sh.partBounds('hull', shape.dims, shape.points, [0, shape.dims[1] / 2, 0], rotation)
+  const groundedY = -rotated[1]
+  assert.equal(play(scene(`scene.turn(${model(groundedY)}, 0, 0, 90)`)), '', 'tilted model with corrected support bottom is grounded')
+  if (Math.abs(rotated[1]) > 0.02) refused(scene(`scene.turn(${model()}, 0, 0, 90)`), CODE_MODEL_GROUND, null, 'tilting does not silently reground')
+  for (const body of [
+    `scene.loose(${model(1)}, 1)`, `scene.spin(${model(1)}, 4)`,
+    `scene.path(${model(1)}, [0, 0, 2, 0], 1, true)`, `scene.wander(${model(1)}, 2, 1)`,
+    `scene.orbit(${model(20)}, "centre", 3, 4, 0), scene.box("centre", 0, 1, 0, 0.2, 0.2, 0.2, "ink")`,
+    `scene.from(${model(1, 3)}, "parent", 0), scene.box("parent", 0, 0.5, 0, 1, 1, 1, "ink")`,
+    `scene.aim(${model(1)}, 3, 3, 0)`,
+  ]) assert.equal(play(scene(body)), '', 'motion or indirect placement is not a static grounding violation: ' + body)
+  const smallCar = (x, y, z) => `scene.model("car", "raceCarRed", ${x}, ${y}, ${z}, 0.2)`
+  refused(scene(`scene.sphere("support", 0, 1, 0, 1, "ink"), ${smallCar(0.8, 2, 0.8)}`),
+    CODE_MODEL_GROUND, null, 'sphere bounding-box corners do not support a floating model')
+  const rail = 'scene.turn(scene.box("support", 0, 0.5, 0, 4, 1, 0.1, "ink"), 0, 45, 0)'
+  refused(scene(`${rail}, ${smallCar(1.3, 1, 1.3)}`), CODE_MODEL_GROUND, null,
+    'empty corners of a yawed thin support do not hold a model')
+  assert.equal(play(scene(`${rail}, ${smallCar(0.7, 1, -0.7)}`)), '', 'actual yawed rail surface supports a model')
+  const bridge = 'scene.box("left", -0.6, 0.5, 0, 0.6, 1, 2, "ink"), ' +
+    'scene.box("right", 0.6, 0.5, 0, 0.6, 1, 2, "ink"), scene.model("car", "raceCarRed", 0, 1, 0, 2)'
+  assert.equal(play(scene(bridge)), '', 'separate contacts support a car bridging two boxes')
+  assert.equal(play(scene(`scene.sphere("support", 0, 1, 0, 1, "ink"), ${smallCar(0, 2, 0)}`)), '',
+    'sphere apex supports a model')
+  refused(scene(`scene.cylinder("support", 0, 0.5, 0, 1, 1, "ink"), ${smallCar(0.8, 1, 0.8)}`),
+    CODE_MODEL_GROUND, null, 'cylinder bounding-box corners do not support a model')
+  assert.equal(play(scene(`scene.cylinder("support", 0, 0.5, 0, 1, 1, "ink"), ${smallCar(0.4, 1, 0.4)}`)), '',
+    'cylinder cap supports a model away from its centre')
+  const wedge = 'scene.hull("support", 0, 0, 0, [-1,0,-1, 1,0,-1, -1,0,1, 1,0,1, -1,1,-1, -1,1,1], "ink")'
+  refused(scene(`${wedge}, ${smallCar(0.8, 1, 0)}`), CODE_MODEL_GROUND, null,
+    'a hull highest point does not support a model over its lower side')
+  assert.equal(play(scene(`${wedge}, ${smallCar(0, 0.5, 0)}`)), '', 'sloping hull contact is not mistaken for a gap')
+  const rim = 'scene.shape("support", 0, 0.5, 0, [-1,-1, 1,-1, 1,1, 0.5,1, 0.5,-0.5, -0.5,-0.5, -0.5,1, -1,1], "ink")'
+  refused(scene(`scene.thick(${rim}, 1), ${smallCar(0, 1, 0)}`), CODE_MODEL_GROUND, null,
+    'a concave prism opening does not support a model')
+  assert.equal(play(scene(`scene.thick(${rim}, 1), ${smallCar(0.8, 1, 0)}`)), '',
+    'a concave prism solid side supports a model')
+  const frame = 'scene.group("support", 0, 0.5, 0, [' +
+    'scene.box("left", -0.6, 0, 0, 0.6, 1, 2, "ink"), scene.box("right", 0.6, 0, 0, 0.6, 1, 2, "ink")])'
+  refused(scene(`${frame}, ${smallCar(0, 1, 0)}`), CODE_MODEL_GROUND, null, 'empty space between group parts is not support')
+  assert.equal(play(scene(`${frame}, scene.model("car", "raceCarRed", 0, 1, 0, 2)`)), '',
+    'separate group parts support a bridging car')
+  const tiltedTree = 'scene.turn(scene.model("tree", "treeSmall", 0, -0.10631207277372601, 0, 2), 0, 0, 30)'
+  assert.equal(play(scene(tiltedTree)), '', 'tilted static tree touches the floor through its hull')
+  assert.equal(play(scene(`scene.loose(${tiltedTree}, 1)`)), '', 'loose uses the same grounded tilted hull as static')
+  refused(scene('scene.loose(scene.turn(scene.model("tree", "treeSmall", 0, -0.156312072773726, 0, 2), 0, 0, 30), 1)'),
+    CODE_OUT_OF_WORLD, null, 'a genuinely penetrating tilted hull is still rejected')
+  const afterTap = 'if (state.n > 0) { things.push(' + model(1.3) + '); }'
+  refused(scene(support, 'scene.floor("surface")', afterTap), CODE_MODEL_GROUND, null, 'grounding is checked on rebuild too')
+  assert.ok(S.SCENE_FUNCTIONS.some(f => f.name === 'model'))
 }
 
 console.log('world-play-check ok\n  ' + budgets.join('\n  '))

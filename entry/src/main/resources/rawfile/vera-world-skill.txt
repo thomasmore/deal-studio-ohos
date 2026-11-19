@@ -63,16 +63,30 @@ Scale, units and placement:
   inside it than the two bodies reach added together, plus 0.05 -- a body reaches its radius, its rings' outer edge,
   or the orbit of what circles it plus that body. A small body can sit close to its neighbours; a big or ringed one
   needs room.
-- A body of height h stands on the ground at y = h / 2. Bodies never start inside one another or under y = 0. Bodies
+- A primitive body of height h stands on the ground at y = h / 2. A scene.model instead takes y as its SUPPORT BOTTOM:
+  y = 0 on the ground or y = the top of a supporting body. Its x/z are the support midpoint; the host places its body
+  centre at y plus half its scaled height. Never add half the height yourself. Bodies never start inside one another or under y = 0. Bodies
   meant to stand together touch: a row of side s is s apart, a stack s higher each level. Bodies meant to be told
   apart -- thrown, picked, counted -- start about 1.5 times their size apart, so they read as separate things. Loose
   bodies start over the table or floor, near x = 0, z = 0; with a table, inside its width and depth.
+- Prefer a matching imported model from the std/scene model catalogue instead of reconstructing it from primitives.
+  scene.model(id, name, x, y, z, size) takes an exact catalogue name and scales uniformly so the longest body side is
+  size metres, keeping its own imported colours. It is one ordinary body with a convex collision hull, already facing
+  +x; never compensate for the asset's original front with a 90-degree turn. Use primitives when no model matches.
+  Models cannot be group parts and cannot use paint, glow or split; these are rejected, not ignored. mark and rings
+  may wrap models; ordinary motion wrappers work on them. Use primitive bodies for things that need to break.
+  turn rotates about the converted body centre, not its feet, without adjusting height: tilting may require a different
+  support bottom to keep the rotated hull grounded. path and wander keep the converted centre height and add their
+  heading to turn; leave turn at zero to face the route. orbit ignores the model's placement and uses its centre body's
+  centre height. from takes the converted centre offset, including half the scaled model height, in the parent's frame,
+  not above the world ground. Imported models have no separately animated parts.
 - A body has the shape of the thing it is. A box, ball or cylinder only for a thing of that shape; any other flat
   shape (a triangle, a star, an arrow, a piece of a game) is scene.shape with its corners in order round it -- a flat
   sheet; scene.thick only for a thing that has a thickness (a tile, a coin, a slab), never for one asked for flat or
   thin -- and a solid one with points and flat faces (a pyramid, a crystal, a wedge) is scene.hull. Never stand a
-  box in for a shape the request names. A thing of several parts (an animal, a vehicle, a snowman, furniture) is one scene.group of its
-  parts, each placed from the group's centre; wrap the group, never a part, so it falls and is thrown as one body.
+  box in for a shape the request names. Without a matching model, a thing of several parts is one scene.group of its
+  parts, each placed from the group's centre; motion, glow and mark wrap the group, so it falls and is thrown as one body.
+  Paint and turn may wrap individual parts; swing belongs on a part.
 - Every body has an id of its own (ids built with ui.numberToString in loops), at most 300 bodies; about 100 loose
   bodies is plenty.
 - The host adds nothing to the scene by itself. Behind the world is the app's background unless scene.sky gives a
@@ -81,6 +95,12 @@ Scale, units and placement:
   There are no other lines, rings or outlines in 3D: never build stars, a backdrop or a path from bodies (a cylinder is a solid disc).
 - Colours: theme roles (accent, warning, danger, surface, ink ...) or "#rrggbb". A real thing has its real colours;
   bodies the person should tell apart differ in colour.
+- Materials: scene.paint(thing, pattern, color2) uses the thing's first colour and color2. Material patterns work on
+  every primitive body, individual group parts, whole groups, tables and floors; choose by the surface's appearance
+  from the catalogue. Sphere-only patterns work only on spheres. Painting a whole group replaces every part's prior
+  paint while keeping each part's first colour; paint parts separately for different materials. Patterns repeat in
+  metres rather than stretching across faces. Make the painted surfaces large enough in the view to see their pattern;
+  a tiny decorative painted part does not make an otherwise unpainted scene read as textured.
 
 The camera: scene.camera(x, y, z, lookX, lookY, lookZ, orbit) stands back from the bodies and above them, looking at
 their middle: for a scene about s metres across, about 2 s away and 1 to 1.5 s up; for bodies circling a centre, high
@@ -112,10 +132,11 @@ What a world can do, combined as the request needs:
   spin(turn(paint(sphere(...), pattern, colour2), 0, 0, tilt), dayS). Wrap the body the person tapped
   (state.selected === its id) in scene.mark(thing, "accent") -- never recolour it, its colours say what it is -- and
   the Text says its name and facts.
-- Walking by itself: a thing that walks, runs, drives or roams about is one body -- a scene.group for an animal or a
-  vehicle, built facing +x (its head or front towards +x) -- in scene.path(body, [x1, z1, x2, z2, ...], speed, true)
+- Walking by itself: a thing that walks, runs, drives or roams about is one body -- a matching scene.model or a
+  scene.group built facing +x -- in scene.path(body, [x1, z1, x2, z2, ...], speed, true)
   for a route round the scene, its corners clear of what stands there, or scene.wander(body, radius, speed) to roam
-  round where it is put. Its y is half its height, so its feet are on the ground; it faces the way it goes by itself.
+  round where it is put. A model takes y = 0 on the ground; a primitive or group has its centre at half its height.
+  It faces the way it goes by itself.
   Legs swing as it goes: scene.swing(leg, 20 to 30, 0.6 to 1, phase) on each leg part, the legs of a pair opposite
   (phaseDeg 0 and 180); they stop when it stands. A speed from the state (a Faster button) changes its pace and it
   goes on from where it is. scene.spin only turns a thing where it stands: never use it for a thing that moves about.
@@ -139,14 +160,21 @@ What a world can do, combined as the request needs:
   state. A tap that fires sends the shot at the point tapped: keep e.x, e.y, e.z in the state and aim at them. arc true
   for a thing thrown or lobbed, false for one that flies straight. The host keeps at most 16 shots and drops the oldest.
   What a shot did is known only from "struck" when it lands, never when it is fired: count a hit there.
-- Breaking: what can break is a scene.target -- anything, also a thing that walks or wanders by itself (its pieces
+- Breaking: what can break is a scene.target -- a primitive or group, never an imported model; also a thing that walks or wanders by itself (its pieces
   then fall loose). Only a shot, a thrown or falling body, a blast or the steered one running into it strikes it: a
   part of a body that turns (an arm, a blade) strikes nothing. On a "struck" above a strength (e.speed, or e.values for each of
   e.bodies) the handler keeps the id in the state (a list of broken ids), and from then on build returns the pieces of
   scene.split(thing, n, burst) in its place instead of it, so the pieces start where it was and fly apart. Pieces are
   never split again and are not targets.
 - A blast: scene.blast(id, trigger, x, y, z, radius, strength) pushes every loose body near the point away each time
-  its trigger, a count in the state, changes; "settled" follows it as it follows a throw.
+  its trigger, a count in the state, changes; "settled" follows it as it follows a throw. The host adds debris and smoke
+  at the blast point automatically: do not add a scene.burst for the same effect.
+- Particles: scene.burst(id, trigger, x, y, z, kind, color) is a brief visual effect, not a body; it works without
+  physics. Choose kind by appearance from the catalogue: sparks, smoke, dust, debris or confetti. Initially trigger 0
+  emits nothing; each change, including back to 0, emits once. Editing position, kind or colour with the same trigger
+  emits nothing. Keep the trigger count and any event point in state; the host animates and removes particles, never a
+  ui.Ticker. Give bursts ids unique among all bodies, zones, blasts and other bursts. Shots striking bodies already
+  give sparks at contact, and hard watched knocks give dust; never duplicate these automatic effects with scene.burst.
 - In words on the screen call shots and pieces what they are in this scene, never "shot", "piece" or "body", and never
   show an id (e.body, e.other): say what the thing is.
 - One thing to look at: the body or bodies it is made of, standing still or turning with scene.spin, an orbiting camera,

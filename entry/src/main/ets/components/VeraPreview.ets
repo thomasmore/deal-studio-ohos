@@ -1197,7 +1197,8 @@ export struct VeraPreview {
     for (let node of found) {
       let box = this.worlds.get(node)
       if (box === undefined) {
-        box = new WorldBox()
+        let context = this.getUIContext().getHostContext()
+        box = new WorldBox(context !== undefined ? context.filesDir : '')
         this.worlds.set(node, box)
       }
       if (node.label.length === 0 || this.error.length > 0) { continue }
@@ -1265,10 +1266,18 @@ export struct VeraPreview {
     let writeMs = 0
     let stepMs = 0
     let contacts = 0
+    let particles = 0
+    let emitted = 0
+    let particleMs = 0
     for (let box of this.worlds.values()) {
       writeMs += box.writeMs
       stepMs += box.stepMs
       contacts = Math.max(contacts, box.mostContacts)
+      particles += box.particleCount()
+      emitted += box.particlesEmitted
+      particleMs += box.particleMs
+      box.particlesEmitted = 0
+      box.particleMs = 0
       box.writeMs = 0
       box.stepMs = 0
       box.mostContacts = 0
@@ -1276,7 +1285,8 @@ export struct VeraPreview {
     }
     console.info('VERA-WORLD fps=' + (this.worldFrames * 1000 / (now - this.worldReportAt)).toFixed(1) +
       ' bodies=' + bodies.toString() + ' awake=' + awake.toString() + ' writeMs=' + (writeMs / this.worldFrames).toFixed(2) +
-      ' stepMs=' + (stepMs / this.worldFrames).toFixed(2) + ' contacts=' + contacts.toString())
+      ' stepMs=' + (stepMs / this.worldFrames).toFixed(2) + ' contacts=' + contacts.toString() +
+      ' particles=' + particles.toString() + ' emitted=' + emitted.toString() + ' particleMs=' + (particleMs / this.worldFrames).toFixed(2))
     this.worldReportAt = now
     this.worldFrames = 0
   }

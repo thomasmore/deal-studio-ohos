@@ -20,8 +20,11 @@
 
 import { RuntimeValue, VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraArrayValue, VeraObjectValue,
   RuntimeTrap } from './VeraInterpreter'
-import { GfxParam, GfxFunction, GFX_ROLES } from './VeraGfx'
-import { SURFACE_PATTERNS, surfacePattern, surfaceSeed } from './VeraSurfaces'
+import { GfxParam, GfxFunction, GFX_ROLES, isGfxColor } from './VeraGfx'
+import { ParticleBurst, PARTICLE_KINDS, particleKind } from './VeraParticles'
+import { SURFACE_PATTERNS, surfaceSeed } from './VeraSurfaces'
+import { TEXTURE_PATTERNS, texturePattern } from './VeraTextures'
+import { MODEL_CATALOG, modelShape, modelNames } from './VeraModels'
 import { MAX_SHAPE_POINTS, MAX_BODY_PARTS, MAX_SPLIT, outlineCheck, hullCheck, pointBounds, partBounds, partCount, boxGrid,
   sphereChunks, cylinderWedges, splitOutline, splitHull, hullVolume, outlineArea } from './VeraShapes'
 
@@ -42,9 +45,9 @@ export const SCENE_EVENT_KINDS: string[] = ['tap', 'swipe', 'hit', 'settled', 'e
 export const MAX_SHOTS: number = 16
 
 /** Things that are bodies, which every wrapper takes; the rest (camera, table, floor) set up the world. */
-const BODY_KINDS: string[] = ['box', 'sphere', 'cylinder', 'die', 'shape', 'hull', 'group']
+const BODY_KINDS: string[] = ['box', 'sphere', 'cylinder', 'die', 'shape', 'hull', 'group', 'model']
 /** Things that set up the world or tell of it and are not bodies. */
-const SETUP_KINDS: string[] = ['camera', 'table', 'floor', 'sky', 'zone', 'blast']
+const SETUP_KINDS: string[] = ['camera', 'table', 'floor', 'sky', 'zone', 'blast', 'burst']
 /** scene.shape without scene.thick is a sheet this share of its larger side thick, and never thinner than SHEET_MIN metres. */
 export const SHEET_RATIO: number = 0.01
 export const SHEET_MIN: number = 0.001
@@ -67,6 +70,8 @@ export const FOLLOW_MIN_BACK: number = 2.5
 export const FOLLOW_SIZE_UP: number = 1.6
 export const FOLLOW_MIN_UP: number = 1.2
 
+export const PAINT_PATTERNS: string[][] = TEXTURE_PATTERNS.concat(SURFACE_PATTERNS)
+
 function num(name: string): GfxParam { return new GfxParam(name, 'number') }
 function str(name: string): GfxParam { return new GfxParam(name, 'string') }
 function color(): GfxParam { return new GfxParam('color', 'color') }
@@ -87,11 +92,18 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
   new GfxFunction('hull', [str('id'), num('x'), num('y'), num('z'), new GfxParam('points', 'number[]'), color()], 'thing',
     'the smallest convex body round points [x1, y1, z1, x2, y2, z2, ...] in metres from x, y, z (4 to ' +
     MAX_SHAPE_POINTS.toString() + ' points, not all in one plane): a pyramid, a crystal, a gem, a wedge'),
+  new GfxFunction('model', [str('id'), str('name'), num('x'), num('y'), num('z'), num('size')], 'thing',
+    'an imported model from the model catalogue, in its own colours, uniformly scaled so its longest body side is size metres. ' +
+    'x and z are the support midpoint; y is the SUPPORT BOTTOM, not the centre: y = 0 stands on the ground, y = a support\'s ' +
+    'top stands on it. The body centre is y + half its scaled height. Already faces +x; turn rotates about that centre, ' +
+    'not its feet, without adjusting its height. path keeps that centre height and adds its heading to turn; orbit uses ' +
+    'its centre body\'s height, ignoring this placement; from takes the converted centre offset in the parent\'s frame. ' +
+    'Ordinary body wrappers, mark and rings work; paint, glow, split and use as a group part are unsupported'),
   new GfxFunction('group', [str('id'), num('x'), num('y'), num('z'), new GfxParam('parts', 'thing[]')], 'thing',
     'one rigid body made of parts -- an animal, a vehicle, a snowman, furniture: each part a box, sphere, cylinder, shape or ' +
     'hull placed by its own x, y, z from the group\'s x, y, z (turn a part to tilt it; 1 to ' + MAX_GROUP_PARTS.toString() +
     ' parts). The group falls, is thrown, turns and is tapped as one body (a tap tells the part in e.other); wrap the group, ' +
-    'never a part, in loose, kick, spin, orbit, glow or mark'),
+    'never a part, in loose, kick, spin, orbit, glow or mark; paint and turn may wrap individual parts. Models cannot be parts'),
   new GfxFunction('die', [str('id'), num('x'), num('y'), num('z'), num('size'), color()], 'thing',
     'a die with pips, a cube of side size centred on x, y, z; when it comes to rest the event "settled" tells the face on top ' +
     '(1..6) in e.values, in the order of e.bodies'),
@@ -125,11 +137,15 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'Never for a thing asked for flat or thin: without it a shape is already a flat sheet'),
   new GfxFunction('glow', [thing()], 'thing',
     'the thing shines by itself, casts no shadow and, if it stands still, lights the bodies round it from where it is, ' +
-    'each brighter on its side facing it: a sun, a lamp, a fire'),
+    'each brighter on its side facing it: a sun, a lamp, a fire. Unsupported on imported models, which keep their colours'),
   new GfxFunction('paint', [thing(), str('pattern'), new GfxParam('color2', 'color')], 'thing',
-    'a ball\'s surface: pattern drawn in the ball\'s own colour and color2, so it reads as what it is -- ' +
+    'a material surface in the thing\'s own colour and color2, on any primitive body, a group part, a whole group, a table or a floor: ' +
+    TEXTURE_PATTERNS.map((p: string[]): string => '"' + p[0] + '" ' + p[1]).join('; ') +
+    '. Material patterns repeat in metres, not stretched to each face. Painting a whole group replaces every part\'s prior paint, ' +
+    'keeping each part\'s first colour; paint parts separately for different materials. Sphere-only patterns: ' +
     SURFACE_PATTERNS.map((p: string[]): string => '"' + p[0] + '" ' + p[1]).join('; ') +
-    '. With scene.spin the pattern turns, so the ball is seen turning'),
+    '. Frame the painted surface large enough for the pattern to be seen; with spin the pattern turns with the body. ' +
+    'Unsupported on imported models, which keep their own colours'),
   new GfxFunction('rings', [thing(), num('inner'), num('outer'), color()], 'thing',
     'flat rings round the thing\'s equator from radius inner to outer (metres from its centre, both beyond its radius), ' +
     'tilted and carried with it'),
@@ -185,11 +201,19 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
   new GfxFunction('split', [thing(), num('n'), num('burst')], 'thing[]',
     'the thing broken into n pieces (2 to ' + MAX_SPLIT.toString() + '), ids its id + "-1" .. "-n", each from the thing ' +
     '(scene.from with burst), its colour and bounce, the mass shared by size: return them instead of the thing once it ' +
-    'breaks. A box or die gives blocks, a ball chunks, a cylinder wedges, a shape or hull cut pieces, a group its parts'),
+    'breaks. A box or die gives blocks, a ball chunks, a cylinder wedges, a shape or hull cut pieces, a group its parts. ' +
+    'Imported models cannot be split'),
   new GfxFunction('blast', [str('id'), num('trigger'), num('x'), num('y'), num('z'), num('radius'), num('strength')], 'thing',
     'an explosion at x, y, z each time trigger changes (keep a count in state): every loose body within radius metres is ' +
     'pushed away from it, by up to strength metres a second at the middle and less further out. Not a body; its id is ' +
-    'its own'),
+    'its own. It also throws out debris and smoke at the point, without an extra scene.burst'),
+  new GfxFunction('burst', [str('id'), num('trigger'), num('x'), num('y'), num('z'), str('kind'), color()], 'thing',
+    'a brief particle effect at x, y, z each time trigger changes: ' +
+    PARTICLE_KINDS.map((p: string[]): string => '"' + p[0] + '" ' + p[1]).join('; ') +
+    '. Keep a count in state; initially 0 does nothing, any change including back to 0 emits once. Changing position, kind ' +
+    'or colour without changing trigger emits nothing. Not a body, no physics needed, its id unique among all things. ' +
+    'The host animates and removes particles; never move them with a ticker. Shots striking bodies give sparks, and hard ' +
+    'watched knocks give dust automatically; do not repeat these effects with scene.burst'),
 ]
 
 /** The fields of scene.Event, in the order the prompt lists them. */
@@ -259,6 +283,16 @@ export class BlastSpec {
   strength: number = 0
 }
 
+export class BurstSpec {
+  id: string = ''
+  trigger: number = 0
+  x: number = 0
+  y: number = 0
+  z: number = 0
+  kind: string = ''
+  color: string = ''
+}
+
 export class SceneSwing {
   deg: number = 0
   periodS: number = 0
@@ -281,6 +315,7 @@ export class SceneOrbit {
 export class SceneThing {
   /** 'box' | 'sphere' | 'cylinder' | 'die' | 'shape' | 'hull' | 'group' | 'table' | 'floor' | 'sky' | 'camera' | 'zone' | 'blast' */
   kind: string = ''
+  model: string = ''
   /** scene.shape's outline [x1, z1, ...] or scene.hull's points [x1, y1, z1, ...], about x, y, z; [] for the rest. */
   points: number[] = []
   /** scene.group's parts, each placed about the group's x, y, z; [] for the rest. */
@@ -338,10 +373,11 @@ export class SceneThing {
   trigger: number = 0
   radius: number = 0
   strength: number = 0
+  burstKind: string = ''
 
   copy(): SceneThing {
     let t = new SceneThing()
-    t.kind = this.kind; t.id = this.id; t.x = this.x; t.y = this.y; t.z = this.z
+    t.kind = this.kind; t.model = this.model; t.id = this.id; t.x = this.x; t.y = this.y; t.z = this.z
     t.w = this.w; t.h = this.h; t.d = this.d; t.color = this.color
     t.lookX = this.lookX; t.lookY = this.lookY; t.lookZ = this.lookZ; t.orbitCamera = this.orbitCamera
     t.motion = this.motion; t.mass = this.mass; t.restitution = this.restitution; t.friction = this.friction
@@ -352,7 +388,7 @@ export class SceneThing {
     t.trail = this.trail; t.stars = this.stars; t.points = this.points; t.parts = this.parts
     t.path = this.path; t.wander = this.wander; t.player = this.player; t.follow = this.follow; t.swing = this.swing
     t.from = this.from; t.shot = this.shot; t.aim = this.aim; t.target = this.target
-    t.trigger = this.trigger; t.radius = this.radius; t.strength = this.strength
+    t.trigger = this.trigger; t.radius = this.radius; t.strength = this.strength; t.burstKind = this.burstKind
     return t
   }
 }
@@ -458,6 +494,7 @@ function asParts(args: RuntimeValue[], i: number, groupId: string): SceneThing[]
     let part = where + ': part "' + t.id + '"'
     if (t.kind === 'group') { throw new RuntimeTrap('R0029', part + ' is a group: put its parts in this group instead') }
     if (t.kind === 'die') { throw new RuntimeTrap('R0029', part + ' is a die: a die is a body of its own, not a part') }
+    if (t.kind === 'model') { throw new RuntimeTrap('R0029', part + ' is a model: models cannot be group parts; return it as a separate body') }
     if (BODY_KINDS.indexOf(t.kind) < 0) {
       throw new RuntimeTrap('R0029', part + ' is a ' + t.kind + ': a part is a box, sphere, cylinder, shape or hull')
     }
@@ -505,13 +542,22 @@ function asId(args: RuntimeValue[], i: number, fn: string): string {
 function asBody(args: RuntimeValue[], fn: string): SceneThing {
   let v = args.length > 0 ? args[0] : null
   if (!(v instanceof SceneThingValue)) {
-    throw new RuntimeTrap('R0020', 'scene.' + fn + ' takes a scene.Thing made by scene.box, sphere, cylinder, die, shape, hull or group')
+    throw new RuntimeTrap('R0020', 'scene.' + fn + ' takes a scene.Thing made by scene.box, sphere, cylinder, die, shape, hull, group or model')
   }
   let t = (v as SceneThingValue).thing
   if (BODY_KINDS.indexOf(t.kind) < 0) {
-    throw new RuntimeTrap('R0029', 'scene.' + fn + ' takes a body (box, sphere, cylinder, die, shape, hull, group), not the ' + t.kind)
+    throw new RuntimeTrap('R0029', 'scene.' + fn + ' takes a body (box, sphere, cylinder, die, shape, hull, group, model), not the ' + t.kind)
   }
   return t.copy()
+}
+
+function paintThing(source: SceneThing, pattern: string, color2: string): SceneThing {
+  let t = source.copy()
+  t.points = source.points.slice()
+  t.parts = source.parts.map((p: SceneThing): SceneThing => paintThing(p, pattern, color2))
+  t.pattern = pattern
+  t.color2 = color2
+  return t
 }
 
 function body(kind: string, args: RuntimeValue[]): SceneThing {
@@ -565,6 +611,22 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
       if (why.length > 0) { throw new RuntimeTrap('R0029', 'scene.hull "' + t.id + '": ' + why) }
       centreOnPoints(t, points, 3)
       t.color = asStr(args, 5)
+      return wrap(t)
+    }
+    case 'model': {
+      let t = new SceneThing()
+      t.kind = 'model'
+      t.id = asId(args, 0, 'model')
+      t.model = asStr(args, 1)
+      t.x = asNum(args, 2, 'x'); t.y = asNum(args, 3, 'y'); t.z = asNum(args, 4, 'z')
+      let shape = modelShape(t.model, positive(asNum(args, 5, 'size'), 'size'))
+      if (shape === null) {
+        throw new RuntimeTrap('R0029', 'scene.model has no model "' + t.model + '": use one of ' +
+          modelNames().map((n: string): string => '"' + n + '"').join(', '))
+      }
+      t.w = shape.dims[0]; t.h = shape.dims[1]; t.d = shape.dims[2]
+      t.y = finite(t.y + t.h / 2, 'model centre y')
+      t.points = shape.points.slice()
       return wrap(t)
     }
     case 'group': {
@@ -677,22 +739,30 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
     }
     case 'glow': {
       let t = asBody(args, 'glow')
+      if (t.kind === 'model') { throw new RuntimeTrap('R0029', 'scene.glow does not support models: models keep their imported colours') }
       t.glow = true
       return wrap(t)
     }
     case 'paint': {
-      let t = asBody(args, 'paint')
+      let v = args.length > 0 ? args[0] : null
+      if (!(v instanceof SceneThingValue)) {
+        throw new RuntimeTrap('R0020', 'scene.paint takes a scene.Thing: a body, group, table or floor')
+      }
+      let t = (v as SceneThingValue).thing
+      if (t.kind === 'model') { throw new RuntimeTrap('R0029', 'scene.paint does not support models: models keep their imported colours') }
       let pattern = asStr(args, 1)
-      if (!surfacePattern(pattern)) {
+      if (!PAINT_PATTERNS.some((p: string[]): boolean => p[0] === pattern)) {
         throw new RuntimeTrap('R0029', 'scene.paint has no pattern "' + pattern + '": use one of ' +
-          SURFACE_PATTERNS.map((p: string[]): string => '"' + p[0] + '"').join(', '))
+          PAINT_PATTERNS.map((p: string[]): string => '"' + p[0] + '"').join(', '))
       }
-      if (t.kind !== 'sphere') {
-        throw new RuntimeTrap('R0029', 'scene.paint paints a sphere; "' + t.id + '" is a ' + t.kind)
+      if (BODY_KINDS.indexOf(t.kind) < 0 && t.kind !== 'table' && t.kind !== 'floor') {
+        throw new RuntimeTrap('R0029', 'scene.paint takes a body, group, table or floor, not the ' + t.kind)
       }
-      t.pattern = pattern
-      t.color2 = asStr(args, 2)
-      return wrap(t)
+      if (!texturePattern(pattern) && t.kind !== 'sphere') {
+        throw new RuntimeTrap('R0029', 'scene.paint pattern "' + pattern + '" paints a sphere only; "' + t.id + '" is a ' +
+          t.kind + '. For this surface use ' + TEXTURE_PATTERNS.map((p: string[]): string => '"' + p[0] + '"').join(', '))
+      }
+      return wrap(paintThing(t, pattern, asStr(args, 2)))
     }
     case 'rings': {
       let t = asBody(args, 'rings')
@@ -867,6 +937,24 @@ export function invokeStdScene(name: string, args: RuntimeValue[]): RuntimeValue
       t.strength = asNum(args, 6, 'strength')
       return wrap(t)
     }
+    case 'burst': {
+      let t = new SceneThing()
+      t.kind = 'burst'
+      t.id = asId(args, 0, 'burst')
+      t.trigger = asNum(args, 1, 'burst trigger')
+      t.x = asNum(args, 2, 'burst x'); t.y = asNum(args, 3, 'burst y'); t.z = asNum(args, 4, 'burst z')
+      t.burstKind = asStr(args, 5)
+      if (!particleKind(t.burstKind)) {
+        throw new RuntimeTrap('R0029', 'scene.burst has no kind "' + t.burstKind + '": use one of ' +
+          PARTICLE_KINDS.map((p: string[]): string => '"' + p[0] + '"').join(', '))
+      }
+      t.color = asStr(args, 6)
+      if (!isGfxColor(t.color)) {
+        throw new RuntimeTrap('R0029', 'scene.burst colour "' + t.color + '" is unknown: use a theme role (' +
+          GFX_ROLES.join(' ') + '), "#rrggbb" or gfx.rgb(red, green, blue)')
+      }
+      return wrap(t)
+    }
     default:
       throw new RuntimeTrap('R0015', `unknown std/scene function: ${name}`)
   }
@@ -976,6 +1064,9 @@ function splitShapes(t: SceneThing, n: number): SceneThing[] {
  * not in the physics), in t's colour, bounce and glow, sharing t's mass (1 if it had none) by volume. Pure.
  */
 export function splitThing(t: SceneThing, n: number, burst: number): SceneThing[] {
+  if (t.kind === 'model' || t.model.length > 0) {
+    throw new RuntimeTrap('R0029', 'scene.split does not support models: use primitive bodies for things that break')
+  }
   let pieces = splitShapes(t, n)
   let total = 0
   for (let p of pieces) { total += thingVolume(p) }
@@ -987,6 +1078,10 @@ export function splitThing(t: SceneThing, n: number, burst: number): SceneThing[
     if (t.kind !== 'group') {
       p.color = t.color
       p.glow = t.glow
+      if (texturePattern(t.pattern)) {
+        p.pattern = t.pattern
+        p.color2 = t.color2
+      }
     }
     p.restitution = t.restitution
     p.friction = t.friction
@@ -1040,10 +1135,14 @@ export class TableSpec {
   width: number = 0
   depth: number = 0
   color: string = ''
+  pattern: string = ''
+  color2: string = ''
 }
 
 export class FloorSpec {
   color: string = ''
+  pattern: string = ''
+  color2: string = ''
 }
 
 export class SkySpec {
@@ -1053,6 +1152,7 @@ export class SkySpec {
 
 export class BodySpec {
   id: string = ''
+  model: string = ''
   /** 'box' | 'sphere' | 'cylinder' | 'shape' | 'hull' (a die is a box with isDie) */
   shape: string = 'box'
   /** A shape's outline [x1, z1, ...] or a hull's points [x1, y1, z1, ...], about its position; [] for the rest. */
@@ -1137,6 +1237,7 @@ export class WorldSpec {
   zones: ZoneSpec[] = []
   follow: FollowSpec | null = null
   blasts: BlastSpec[] = []
+  bursts: BurstSpec[] = []
   /** What decodeScene left out: shots older than the last MAX_SHOTS, and pieces (scene.from) over the body cap. */
   droppedShots: number = 0
   droppedPieces: number = 0
@@ -1145,7 +1246,8 @@ export class WorldSpec {
 function bodySpec(t: SceneThing): BodySpec {
   let b = new BodySpec()
   b.id = t.id
-  b.shape = t.kind === 'die' ? 'box' : t.kind
+  b.model = t.model
+  b.shape = t.kind === 'die' ? 'box' : t.kind === 'model' ? 'hull' : t.kind
   b.dims = [t.w, t.h, t.d]
   b.points = t.points
   b.parts = t.parts.map((p: SceneThing): BodySpec => bodySpec(p))
@@ -1193,11 +1295,21 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
   let world = new WorldSpec()
   if (!(value instanceof VeraArrayValue)) { return world }
   let byId = new Map<string, BodySpec>()
-  let zoneIds = new Set<string>()
   let player = ''
   let things: SceneThing[] = []
   for (let item of (value as VeraArrayValue).elements) {
     if (item instanceof SceneThingValue) { things.push((item as SceneThingValue).thing) }
+  }
+  let ids = new Set<string>()
+  for (let t of things) {
+    if (BODY_KINDS.indexOf(t.kind) < 0 && ['zone', 'blast', 'burst'].indexOf(t.kind) < 0) { continue }
+    if (ids.has(t.id)) {
+      let message = BODY_KINDS.indexOf(t.kind) >= 0
+        ? 'two bodies have the id "' + t.id + '": every body needs an id of its own'
+        : 'two things have the id "' + t.id + '": a ' + t.kind + ' needs an id of its own'
+      throw new RuntimeTrap('R0029', message)
+    }
+    ids.add(t.id)
   }
   // Only the last MAX_SHOTS shots are kept, in build order: a program that keeps every shot it ever fired is not stopped.
   let shots = things.filter((t: SceneThing): boolean => t.shot !== null && SETUP_KINDS.indexOf(t.kind) < 0).length
@@ -1222,13 +1334,12 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
       return true
     })
   }
-  let blastIds = new Set<string>()
   for (let t of things) {
-    if (t.kind === 'blast') {
-      if (blastIds.has(t.id) || zoneIds.has(t.id) || byId.has(t.id)) {
-        throw new RuntimeTrap('R0029', 'two things have the id "' + t.id + '": a blast needs an id of its own')
-      }
-      blastIds.add(t.id)
+    if (t.kind === 'burst') {
+      let x = new BurstSpec()
+      x.id = t.id; x.trigger = t.trigger; x.x = t.x; x.y = t.y; x.z = t.z; x.kind = t.burstKind; x.color = t.color
+      world.bursts.push(x)
+    } else if (t.kind === 'blast') {
       let x = new BlastSpec()
       x.id = t.id; x.trigger = t.trigger; x.x = t.x; x.y = t.y; x.z = t.z; x.radius = t.radius; x.strength = t.strength
       world.blasts.push(x)
@@ -1240,7 +1351,7 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
     } else if (t.kind === 'table') {
       if (world.table !== null) { throw new RuntimeTrap('R0029', 'a world has at most one scene.table') }
       let s = new TableSpec()
-      s.width = t.w; s.depth = t.d; s.color = t.color
+      s.width = t.w; s.depth = t.d; s.color = t.color; s.pattern = t.pattern; s.color2 = t.color2
       world.table = s
     } else if (t.kind === 'sky') {
       if (world.sky !== null) { throw new RuntimeTrap('R0029', 'a world has at most one scene.sky') }
@@ -1251,13 +1362,9 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
     } else if (t.kind === 'floor') {
       if (world.floor !== null) { throw new RuntimeTrap('R0029', 'a world has at most one scene.floor') }
       let f = new FloorSpec()
-      f.color = t.color
+      f.color = t.color; f.pattern = t.pattern; f.color2 = t.color2
       world.floor = f
     } else if (t.kind === 'zone') {
-      if (zoneIds.has(t.id) || byId.has(t.id) || blastIds.has(t.id)) {
-        throw new RuntimeTrap('R0029', 'two things have the id "' + t.id + '": a zone needs an id of its own')
-      }
-      zoneIds.add(t.id)
       let z = new ZoneSpec()
       z.id = t.id; z.x = t.x; z.z = t.z; z.r = t.w / 2; z.color = t.color
       world.zones.push(z)
@@ -1265,9 +1372,6 @@ export function decodeScene(value: RuntimeValue): WorldSpec {
         throw new RuntimeTrap('R0028', 'a world holds at most ' + MAX_WORLD_ZONES.toString() + ' zones')
       }
     } else {
-      if (byId.has(t.id) || zoneIds.has(t.id) || blastIds.has(t.id)) {
-        throw new RuntimeTrap('R0029', 'two bodies have the id "' + t.id + '": every body needs an id of its own')
-      }
       if (t.motion === 'loose' && t.orbit !== null) {
         throw new RuntimeTrap('R0029', 'body "' + t.id + '" is loose and orbits: it can be one or the other')
       }
@@ -1349,6 +1453,7 @@ export class WorldDiff {
   kick: BodySpec[] = []
   /** Blasts to set off now: trigger changed, or new with a trigger other than 0. */
   blast: BlastSpec[] = []
+  burst: BurstSpec[] = []
   /** The camera the program put, or the body it follows and how, changed. */
   cameraChanged: boolean = false
   tableChanged: boolean = false
@@ -1360,8 +1465,8 @@ export class WorldDiff {
 
   empty(): boolean {
     return this.create.length === 0 && this.remove.length === 0 && this.recreate.length === 0 && this.material.length === 0 &&
-      this.setPose.length === 0 && this.kick.length === 0 && this.blast.length === 0 && !this.cameraChanged && !this.tableChanged && !this.floorChanged &&
-      !this.backdropChanged && !this.zonesChanged
+      this.setPose.length === 0 && this.kick.length === 0 && this.blast.length === 0 && this.burst.length === 0 &&
+      !this.cameraChanged && !this.tableChanged && !this.floorChanged && !this.backdropChanged && !this.zonesChanged
   }
 }
 
@@ -1376,8 +1481,14 @@ function partsKey(b: BodySpec): string {
     p.position.join(','), p.rotation.join(','), p.pattern.length > 0 ? p.color : '', p.pattern, p.color2].join('|')))
 }
 
-function partColours(b: BodySpec): string {
-  return b.parts.map((p: BodySpec): string => p.color).join('|')
+function partsMaterialsSame(a: BodySpec, b: BodySpec): boolean {
+  if (a.parts.length !== b.parts.length) { return false }
+  for (let i = 0; i < a.parts.length; i++) {
+    let before = a.parts[i]
+    let after = b.parts[i]
+    if (before.color !== after.color || (a.glow || before.glow) !== (b.glow || after.glow)) { return false }
+  }
+  return true
 }
 
 function sameFollow(a: FollowSpec | null, b: FollowSpec | null): boolean {
@@ -1404,12 +1515,12 @@ function sameCamera(a: CameraSpec | null, b: CameraSpec | null): boolean {
 
 function sameTable(a: TableSpec | null, b: TableSpec | null): boolean {
   if (a === null || b === null) { return a === b }
-  return a.width === b.width && a.depth === b.depth && a.color === b.color
+  return a.width === b.width && a.depth === b.depth && a.color === b.color && a.pattern === b.pattern && a.color2 === b.color2
 }
 
 function sameFloor(a: FloorSpec | null, b: FloorSpec | null): boolean {
   if (a === null || b === null) { return a === b }
-  return a.color === b.color
+  return a.color === b.color && a.pattern === b.pattern && a.color2 === b.color2
 }
 
 /** What the backdrop paints from: the sky and the bodies leaving a trail. */
@@ -1434,7 +1545,7 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
     }
     kept.add(b.id)
     // A painted body's colours are in its mesh, so a new colour, pattern, rings or mark makes it again.
-    if (old.shape !== b.shape || old.isDie !== b.isDie || !sameNumbers(old.dims, b.dims) || !sameNumbers(old.points, b.points) ||
+    if (old.shape !== b.shape || old.model !== b.model || old.isDie !== b.isDie || !sameNumbers(old.dims, b.dims) || !sameNumbers(old.points, b.points) ||
         partsKey(old) !== partsKey(b) ||
         old.motion !== b.motion || (old.player === null) !== (b.player === null) ||
         old.mass !== b.mass || old.pattern !== b.pattern || old.color2 !== b.color2 || !sameNumbers(old.rings, b.rings) ||
@@ -1444,7 +1555,7 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
       // scene.from, shoot and aim are read only when a body is made: a change to them makes nothing again. scene.target
       // is watched or not in place.
       if (old.color !== b.color || old.glow !== b.glow || old.restitution !== b.restitution || old.friction !== b.friction ||
-          partColours(old) !== partColours(b) || old.target !== b.target) {
+          !partsMaterialsSame(old, b) || old.target !== b.target) {
         diff.material.push(b)
       }
       if (b.motion !== 'loose' && (!sameNumbers(old.position, b.position) || !sameNumbers(old.rotation, b.rotation))) {
@@ -1471,7 +1582,34 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
     let was = blastsBefore.get(x.id)
     if (was === undefined ? x.trigger !== 0 : was !== x.trigger) { diff.blast.push(x) }
   }
+  let burstsBefore = new Map<string, number>()
+  if (prev !== null) { for (let x of prev.bursts) { burstsBefore.set(x.id, x.trigger) } }
+  for (let x of next.bursts) {
+    let was = burstsBefore.get(x.id)
+    if (was === undefined ? x.trigger !== 0 : was !== x.trigger) { diff.burst.push(x) }
+  }
   return diff
+}
+
+function particleRequest(id: string, trigger: number, x: number, y: number, z: number, kind: string, color: string): ParticleBurst {
+  let request = new ParticleBurst()
+  request.kind = kind
+  request.seed = surfaceSeed(JSON.stringify([id, trigger, kind]))
+  request.origin = [x, y, z]
+  request.color = color
+  return request
+}
+
+export function burstsForDiff(diff: WorldDiff): ParticleBurst[] {
+  let out: ParticleBurst[] = []
+  for (let x of diff.blast) {
+    out.push(particleRequest(x.id, x.trigger, x.x, x.y, x.z, 'debris', '#a68b6b'))
+    out.push(particleRequest(x.id, x.trigger, x.x, x.y, x.z, 'smoke', '#7f8895'))
+  }
+  for (let x of diff.burst) {
+    out.push(particleRequest(x.id, x.trigger, x.x, x.y, x.z, x.kind, x.color))
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- kinematic motion and dice
@@ -1808,6 +1946,15 @@ export function describeSceneForPrompt(): string {
     lines.push('  scene.' + f.name + '(' + args.join(', ') + '): ' + (f.result === 'thing[]' ? 'scene.Thing[]' : 'scene.Thing') +
       '  -- ' + f.summary)
   }
+  lines.push('  Model catalogue (use only these exact names; imported colours are kept):')
+  for (let spec of MODEL_CATALOG) { lines.push('    "' + spec.name + '" -- ' + spec.description) }
+  lines.push('  Prefer a matching catalogue model to rebuilding it from primitives. Models are standalone bodies, never group parts; ' +
+    'paint, glow and split reject models, even through wrappers. mark and rings may wrap them. A model uses a convex hull for ' +
+    'physics; its visible mesh keeps its imported colours. size is its longest side after the host aligns its front to +x. ' +
+    'Do not add a compensating 90-degree turn. For models y is the support bottom; for primitives y is the centre. ' +
+    'turn pivots about the converted body centre without regrounding; path/wander keep that centre height and add their heading ' +
+    'to turn. from interprets that converted centre, including half the model height, as a parent-local offset. ' +
+    'orbit ignores the model placement and uses the orbit centre height, not its support bottom.')
   let fields: string[] = []
   for (let pair of SCENE_EVENT_FIELDS) { fields.push(pair[0] + ': ' + pair[1]) }
   lines.push('  class scene.Event { ' + fields.join('; ') + ' }  -- kind is ' +

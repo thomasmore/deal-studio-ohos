@@ -6,7 +6,8 @@
  * convex pieces (ear clipping, then triangles merged while the merge stays convex, Hertel-Mehlhorn), each one a prism. The
  * renderer takes a SurfaceMesh with flat faces, wound counter-clockwise seen from outside, as VeraSurfaces' meshes are.
  */
-import { SurfaceMesh } from './VeraSurfaces'
+import { SurfaceMesh, paintedSphere } from './VeraSurfaces'
+import { TEXTURE_TILE_M } from './VeraTextures'
 
 /** The most corners an outline may have, and the most points a hull. */
 export const MAX_SHAPE_POINTS: number = 64
@@ -233,8 +234,98 @@ function face(m: SurfaceMesh, a: number[], b: number[], c: number[], nx: number,
     m.positions.push(v[0], v[1], v[2])
     m.normals.push(nx, ny, nz)
     m.colors.push(1, 1, 1)
+    if (Math.abs(ny) >= Math.abs(nx) && Math.abs(ny) >= Math.abs(nz)) {
+      m.uvs.push(v[0] / TEXTURE_TILE_M, v[2] / TEXTURE_TILE_M)
+    } else if (Math.abs(nx) >= Math.abs(nz)) {
+      m.uvs.push(v[2] / TEXTURE_TILE_M, v[1] / TEXTURE_TILE_M)
+    } else {
+      m.uvs.push(v[0] / TEXTURE_TILE_M, v[1] / TEXTURE_TILE_M)
+    }
   }
   m.indices.push(base, base + 1, base + 2)
+}
+
+function textureVertex(m: SurfaceMesh, p: number[], n: number[], u: number, v: number): void {
+  m.positions.push(p[0], p[1], p[2])
+  m.normals.push(n[0], n[1], n[2])
+  m.colors.push(1, 1, 1)
+  m.uvs.push(u / TEXTURE_TILE_M, v / TEXTURE_TILE_M)
+}
+
+function textureQuad(m: SurfaceMesh, origin: number[], u: number[], v: number[], width: number, height: number): void {
+  let base = m.positions.length / 3
+  let n = cross3(u, v)
+  for (let t of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+    let p = [origin[0] + u[0] * width * t[0] + v[0] * height * t[1],
+      origin[1] + u[1] * width * t[0] + v[1] * height * t[1],
+      origin[2] + u[2] * width * t[0] + v[2] * height * t[1]]
+    textureVertex(m, p, n, width * t[0], height * t[1])
+  }
+  m.indices.push(base, base + 1, base + 2, base, base + 2, base + 3)
+}
+
+export function texturedBoxMesh(width: number, height: number, depth: number): SurfaceMesh {
+  let m = new SurfaceMesh()
+  let x = width / 2, y = height / 2, z = depth / 2
+  textureQuad(m, [x, -y, z], [0, 0, -1], [0, 1, 0], depth, height)
+  textureQuad(m, [-x, -y, -z], [0, 0, 1], [0, 1, 0], depth, height)
+  textureQuad(m, [-x, y, z], [1, 0, 0], [0, 0, -1], width, depth)
+  textureQuad(m, [-x, -y, -z], [1, 0, 0], [0, 0, 1], width, depth)
+  textureQuad(m, [-x, -y, z], [1, 0, 0], [0, 1, 0], width, height)
+  textureQuad(m, [x, -y, -z], [-1, 0, 0], [0, 1, 0], width, height)
+  return m
+}
+
+export function texturedPlaneMesh(width: number, depth: number): SurfaceMesh {
+  let m = new SurfaceMesh()
+  for (let p of [[-width / 2, 0, -depth / 2], [-width / 2, 0, depth / 2],
+      [width / 2, 0, depth / 2], [width / 2, 0, -depth / 2]]) {
+    textureVertex(m, p, [0, 1, 0], p[0], p[2])
+  }
+  m.indices.push(0, 1, 2, 0, 2, 3)
+  return m
+}
+
+export function texturedCylinderMesh(radius: number, height: number, segments: number = 32): SurfaceMesh {
+  let m = new SurfaceMesh()
+  let count = isFinite(segments) ? Math.max(3, Math.floor(segments)) : 32
+  for (let j = 0; j < 2; j++) {
+    for (let i = 0; i <= count; i++) {
+      let a = i === count ? 0 : 2 * Math.PI * i / count
+      let x = Math.cos(a), z = -Math.sin(a)
+      textureVertex(m, [radius * x, (j - 0.5) * height, radius * z], [x, 0, z], 2 * Math.PI * radius * i / count, height * j)
+    }
+  }
+  let row = count + 1
+  for (let i = 0; i < count; i++) { m.indices.push(i, i + 1, row + i, i + 1, row + i + 1, row + i) }
+  for (let side = 0; side < 2; side++) {
+    let ny = side === 0 ? 1 : -1
+    let y = ny * height / 2
+    let base = m.positions.length / 3
+    textureVertex(m, [0, y, 0], [0, ny, 0], 0, 0)
+    for (let i = 0; i <= count; i++) {
+      let a = i === count ? 0 : 2 * Math.PI * i / count
+      let x = radius * Math.cos(a), z = -radius * Math.sin(a)
+      textureVertex(m, [x, y, z], [0, ny, 0], x, z)
+    }
+    for (let i = 0; i < count; i++) {
+      if (ny > 0) { m.indices.push(base, base + i + 1, base + i + 2) }
+      else { m.indices.push(base, base + i + 2, base + i + 1) }
+    }
+  }
+  return m
+}
+
+export function texturedSphereMesh(radius: number, lon: number = 48, lat: number = 24): SurfaceMesh {
+  let cols = isFinite(lon) ? Math.max(3, Math.floor(lon)) : 48
+  let rows = isFinite(lat) ? Math.max(2, Math.floor(lat)) : 24
+  let m = paintedSphere(radius, '', [1, 1, 1], [1, 1, 1], 0, cols, rows)
+  for (let j = 0; j <= rows; j++) {
+    for (let i = 0; i <= cols; i++) {
+      m.uvs.push(2 * Math.PI * radius * i / cols / TEXTURE_TILE_M, Math.PI * radius * j / rows / TEXTURE_TILE_M)
+    }
+  }
+  return m
 }
 
 /** The outline as a solid h thick along y, centred on y = 0: top, bottom and a flat side for every edge. White vertices. */
