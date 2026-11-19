@@ -66,6 +66,11 @@
         "reason": "$string:record_audio_reason",
         "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
       },
+      {
+        "name": "ohos.permission.CAMERA",
+        "reason": "$string:camera_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+      },
       { "name": "ohos.permission.EXECUTE_INSIGHT_INTENT" },
       { "name": "ohos.permission.START_INVISIBLE_ABILITY" },
       { "name": "ohos.permission.START_ABILITIES_FROM_BACKGROUND" },

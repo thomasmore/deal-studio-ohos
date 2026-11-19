@@ -194,6 +194,9 @@ export const NEEDS_PROMPT: string =
   'dice that tumble, a drawing or signature area, a physics toy, an animated dial. A chart, a progress bar or a ring that only shows a figure is ' +
   'never a scene, and a scene is planned only when the request asks for something drawn, animated, moving or touched in its own ' +
   'words: a coin flip or a dice roll that does not ask for an animation is built from the other types. ' +
+  'A camera view is never a scene: the person is looking through the camera, not at a picture the app draws. Plan photographing, ' +
+  'scanning or looking through the camera as other. Describe the live preview and what the person captures with the shutter. ' +
+  'A request in which the person photographs, scans or points the camera at something always needs a live camera view; never leave it out. ' +
   'What a scene decides and everything that changes with it -- the result, the winner, a balance or score it pays into, the ' +
   'results so far -- belongs to that scene, written in its what, and is never also a figure, entries or an action; the inputs the person sets ' +
   'for it (a stake, a choice) stay inputs. When what the person draws or signs is kept with each record (a signature on a receipt, ' +
@@ -420,8 +423,13 @@ export function sketchFrom(plan: NeedsPlan): Sketch | null {
     } else if (n.type === NEED_ACTION) {
       events.push(r)
     } else if (n.type === NEED_SCENE) {
-      // Marked, so it goes to the written section as a scene: nothing of the catalogue or the parts draws one.
-      other.push(SCENE_MARK + n.words)
+      if (isCameraNeed(n.words)) {
+        // A camera view is not a drawn scene: the written section uses ui.Camera, with a live preview, not a Surface.
+        other.push(n.words)
+      } else {
+        // Marked, so it goes to the written section as a scene: nothing of the catalogue or the parts draws one.
+        other.push(SCENE_MARK + n.words)
+      }
     } else {
       other.push(n.words)
     }
@@ -432,6 +440,34 @@ export function sketchFrom(plan: NeedsPlan): Sketch | null {
   o['live'] = live
   o['other'] = other
   return parseSketch(JSON.stringify(o))
+}
+
+export function isCameraNeed(words: string): boolean {
+  return /\b(?:cameras?|photograph(?:s|ed|ing|y)?|scan(?:s|ned|ning|ners?)?)\b/i.test(words)
+}
+
+/**
+ * A request that says the person photographs or scans something must keep a
+ * camera need even when the plan leaves it out: the Exam Prep starter does, and
+ * a plan without it served a practice screen with no way to photograph a page.
+ * The need is written as other, so the section writer gets ui.Camera.
+ * For a multi-screen plan, return a retry reason if the camera has no screen.
+ */
+export function ensureCameraNeed(plan: NeedsPlan, prompt: string): string {
+  if (!isCameraNeed(prompt)) { return '' }
+  for (let n of plan.needs) {
+    if ((isCameraNeed(n.words) || isCameraNeed(n.from)) &&
+        (plan.screens.length === 0 || plan.screens.some((s: NeedScreen): boolean => s.needs.indexOf(n.id) >= 0))) { return '' }
+  }
+  if (plan.screens.length > 0) {
+    return 'Describe the requested camera need, give it an id and reference that id on the relevant screen'
+  }
+  let need = new Need()
+  need.type = NEED_OTHER
+  need.words = 'A live camera view inside the app: the person frames what they want to photograph and taps a shutter; ' +
+    'the captured photo is shown and kept.'
+  plan.needs.push(need)
+  return ''
 }
 
 const STOP_WORDS: string[] = ['the', 'and', 'for', 'with', 'that', 'this', 'when', 'from', 'your', 'you', 'are', 'its', 'has', 'have', 'will',

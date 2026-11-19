@@ -6,9 +6,10 @@
 
 import { AgentHost, HoleRecord, checkAgent, agentCancellation } from './AgentHost'
 import { CustomRequest, CustomResult, writeSection, stillWorks } from './AgentCustom'
-import { FragmentSpec, StateFieldSpec } from '../VeraTemplates'
+import { FragmentSpec, StateFieldSpec, cameraCaptureFragment } from '../VeraTemplates'
 import { ScreenPlan, PlanComponent, PlanSlot, assemblePlan, FILL_HOLE, FILL_REPORTED, NOTICE_SPLIT, NOTICE_INSTEAD_TITLE } from '../ScreenPlan'
 import { PartsContract } from '../VeraCompose'
+import { isCameraNeed } from '../NeedsPlan'
 import { withoutRepeatedButtons } from './AgentClaims'
 
 const OUTCOME_WRITTEN: string = 'written'
@@ -115,6 +116,23 @@ export async function writeHole(plan: ScreenPlan, prompt: string, hints: string[
   let cancellation = agentCancellation(host)
   let slots: PlanSlot[] = plan.toWrite()
   if (slots.length === 0) { return null }
+  // A camera view is ready-made: the live preview, its shutter and the photos it kept.
+  // It is filled here, not written by the model, so a camera need never competes with
+  // the screen's own list or clock (measured: Exam Prep's writer duplicated its list
+  // and the camera section was lost).
+  let cameraSlots = slots.filter((s: PlanSlot): boolean => isCameraNeed(s.need))
+  if (plan.appPlan === null && cameraSlots.length > 0) {
+    let cameraSpec = cameraCaptureFragment()
+    plan.components.push(new PlanComponent(FILL_HOLE, cameraSpec, new Map<string, string>()))
+    let cameraAt = plan.components.length - 1
+    for (let s of cameraSlots) { plan.fillWith(s, FILL_HOLE, cameraAt) }
+    slots = slots.filter((s: PlanSlot): boolean => !isCameraNeed(s.need))
+    if (slots.length === 0) {
+      let done = new CustomResult()
+      done.section = cameraSpec
+      return done
+    }
+  }
   // Phone needs an earlier hole of this request already found nothing can do are reported as it said, not asked again.
   let known = slots.filter((s: PlanSlot): boolean => s.phone && host.cannot.has(s.need))
   if (known.length > 0 && plan.components.length === 0 && known.length === slots.length) {

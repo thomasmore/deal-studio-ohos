@@ -537,6 +537,14 @@ export class UiHostEnvironment extends HostEnvironment {
           ['src', new VeraStringValue(argString(args, 1))],
           ['alt', new VeraStringValue(argString(args, 2))],
         ])
+      case 'Camera':
+        // The renderer reads the facing back from value and the shutter label from text.
+        return viewNode('camera', [
+          ['style', new VeraStringValue(argString(args, 0))],
+          ['action', new VeraStringValue(argString(args, 1))],
+          ['value', new VeraStringValue(argString(args, 2))],
+          ['text', new VeraStringValue(argString(args, 3))],
+        ])
       case 'Path':
         return viewNode('path', [
           ['style', new VeraStringValue(argString(args, 0))],

@@ -21,6 +21,7 @@ import { ResolvedTheme, resolveTheme, containerFill, toneFill, toneEdge, toneInk
   textSize, textWeight, textInk, buttonFill, buttonInk, pathFill, densityPad,
   densityGap, spacerSize, readableInk } from '../vera/VeraTheme'
 import { LiveNode, toLive, cloneLiveTree, reconcile, armReveal, markIconRoom } from './VeraLiveTree'
+import { VeraCamera } from '../vera/VeraCamera'
 import { MotionPose, motionPose, motionDuration, pivotPercent, poseMatrix, poseFromArray, multiplyMatrices, perspectiveMatrix,
   columnMajor, poseToPixels, samePose, animatedPose, TRANSFORM_DISTANCE, MOTION_BUDGET_MS } from '../vera/VeraMotion'
 import { displaySync } from '@kit.ArkGraphics2D'
@@ -669,6 +670,16 @@ export struct VeraPreview {
    * the ones in the frame now, in tree order, and the frame loop that drives the ones with a frame handler.
    */
   private surfaces: Map<LiveNode, SurfaceBox> = new Map<LiveNode, SurfaceBox>()
+  /** ui.Camera: its preview session, its XComponent surface controller, and what the frame shows while it opens. */
+  private camera: VeraCamera | null = null
+  private cameraNode: LiveNode | null = null
+  private cameraSurfaceId: string = ''
+  private cameraFacing: string = ''
+  private cameraOperation: Promise<void> = Promise.resolve()
+  private cameraController: XComponentController = new XComponentController()
+  @State cameraReady: boolean = false
+  @State cameraBusy: boolean = false
+  @State cameraNote: string = ''
   /**
    * The program's ui.Worlds: each one's 3D scene by its node. A world's build function runs once per state, in
    * renderView (reconcileWorlds), never per frame; what moves on its own -- orbits and spins -- is moved by the box on the
@@ -722,8 +733,9 @@ export struct VeraPreview {
   // Kinds renderNode has a branch for. Checked against the catalogue on mount so
   // a component that compiles but cannot be drawn is reported here rather than
   // discovered as a blank space in someone's generated app.
+  private static CAMERA_HEIGHT: number = 280
   private static RENDERED: string[] = ['column', 'scroll', 'row', 'card', 'text',
-    'button', 'cell', 'spacer', 'path', 'image', 'field', 'toggle', 'checkbox',
+    'button', 'cell', 'spacer', 'path', 'image', 'camera', 'field', 'toggle', 'checkbox',
     'slider', 'select', 'tabs', 'divider', 'progress', 'progressring', 'ticker', 'grid', 'listitem', 'canvas',
     'apptheme', 'hero', 'adaptivecolumns', 'header', 'section', 'sectionheader', 'listgroup', 'banner',
     'emptystate', 'stat', 'metricgroup', 'tilegrid', 'tile',
@@ -783,6 +795,7 @@ export struct VeraPreview {
   }
 
   onPreviewOnlyChanged(): void {
+    if (this.previewOnly) { this.cameraStop() }
     this.load()
   }
 
@@ -1458,6 +1471,7 @@ export struct VeraPreview {
       this.activeOptions.mode !== 'PREVIEW'
     this.draining = true
     this.disposed = true
+    this.cameraStop()
     this.fieldActions = []
     this.posts = []
     this.surfaceInputs.clear()
@@ -1645,6 +1659,11 @@ export struct VeraPreview {
       if (this.liveRoot !== null) {
         this.markLiveNodeGeneration(this.liveRoot!)
         markIconRoom(this.liveRoot!)
+      }
+      let cameraNode = this.cameraNode
+      if (cameraNode !== null) {
+        if (cameraNode.kind !== 'camera' || !this.isLiveNode(cameraNode)) { this.cameraStop() }
+        else if (cameraNode.value !== this.cameraFacing) { this.cameraStartFor(cameraNode, this.cameraSurfaceId) }
       }
       if (applied !== null && applied.fieldNode !== null) {
         let node = applied.fieldNode!
@@ -2667,6 +2686,74 @@ export struct VeraPreview {
    */
   private handleStringAction(action: string, value: string): void {
     this.dispatch(action, stringPayload(value), true, 'FIELD')
+  }
+
+  /**
+   * Start ui.Camera's preview once its XComponent surface exists. The surface
+   * id is read here, not in onAppear: before onLoad the surface does not exist
+   * and CameraKit rejects it.
+   */
+  private cameraStartFor(node: LiveNode, surfaceId: string): void {
+    if (this.previewOnly || this.disposed || !this.isLiveNode(node)) { return }
+    let facing = node.value
+    if (this.cameraNode === node && this.cameraSurfaceId === surfaceId && this.cameraFacing === facing) { return }
+    this.cameraStop()
+    let camera = new VeraCamera()
+    this.camera = camera
+    this.cameraNode = node
+    this.cameraSurfaceId = surfaceId
+    this.cameraFacing = facing
+    this.cameraNote = 'Starting camera…'
+    this.cameraOperation = this.cameraOperation.then(async (): Promise<void> => {
+      if (this.camera !== camera) { return }
+      await camera.start(surfaceId, facing.length > 0 ? facing : 'back')
+      if (this.disposed || this.camera !== camera) { return }
+      this.cameraNote = ''
+      this.cameraReady = true
+    }).catch((e: Error) => {
+      if (this.disposed || this.camera !== camera) { return }
+      this.cameraReady = false
+      this.cameraNote = e.message
+    })
+  }
+
+  /** Only the current surface can close its session after a screen change. */
+  private cameraStop(node: LiveNode | null = null): void {
+    if (node !== null && node !== this.cameraNode) { return }
+    this.cameraReady = false
+    this.cameraBusy = false
+    this.cameraNote = ''
+    if (this.camera !== null) {
+      let camera = this.camera
+      this.camera = null
+      this.cameraNode = null
+      this.cameraSurfaceId = ''
+      let closing = camera.stop()
+      this.cameraOperation = this.cameraOperation.then((): Promise<void> => closing)
+    }
+  }
+
+  /** One shutter tap: the captured JPEG comes back as a file URI, to the program's handler. */
+  private cameraShoot(node: LiveNode): void {
+    console.info('VERA-CAMERAUI shutter action=' + node.action + ' ready=' + this.cameraReady.toString() + ' busy=' + this.cameraBusy.toString())
+    if (this.camera === null || this.cameraNode !== node || !this.cameraReady || this.cameraBusy ||
+        this.transitioning || node.action.length === 0) { return }
+    let camera = this.camera
+    let next = this.captureFieldAction(node.action, stringPayload(''), true, node)
+    this.cameraBusy = true
+    this.cameraNote = ''
+    camera.capture().then((uri: string) => {
+      console.info('VERA-CAMERAUI captured ' + uri)
+      if (this.disposed || this.camera !== camera) { return }
+      this.cameraBusy = false
+      next.payload = stringPayload(uri)
+      this.enqueueFieldAction(next)
+    }).catch((e: Error) => {
+      if (this.disposed || this.camera !== camera) { return }
+      this.cameraBusy = false
+      this.cameraNote = e.message
+      console.error('VERA-CAMERAUI capture failed ' + e.message)
+    })
   }
 
   private handleBoolAction(action: string, value: boolean, node: LiveNode | null = null): void {
@@ -6179,6 +6266,67 @@ export struct VeraPreview {
         // A shape given an action is tappable like a button (the home-screen widget's drum).
         if (node.action.length > 0 && node.enabled) { this.handleAction(node.action, node.eventValue) }
       })
+    } else if (node.kind === 'camera') {
+      // A live preview, kept inside the generated screen: the XComponent owns the
+      // surface, VeraCamera owns the session, and the shutter dispatches the
+      // captured file URI through the same handler path as every other component.
+      Column({ space: this.t().gapBase }) {
+        if (this.previewOnly) {
+          Text('Live camera preview is available in the full-screen app.')
+            .fontSize(this.t().sizeCaption)
+            .fontFamily(this.textFamily())
+            .fontColor(this.t().inkMuted)
+            .width('100%')
+            .height(VeraPreview.CAMERA_HEIGHT)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(this.t().surface)
+            .borderRadius(this.t().radiusControl)
+        } else {
+          Stack({ alignContent: Alignment.Center }) {
+            XComponent({ id: 'vera-camera', type: XComponentType.SURFACE, controller: this.cameraController })
+              .width('100%')
+              .height(VeraPreview.CAMERA_HEIGHT)
+              .backgroundColor(Color.Black)
+              .onLoad(() => {
+                let surfaceId = ''
+                try { surfaceId = this.cameraController.getXComponentSurfaceId() } catch (_e) {}
+                if (surfaceId.length > 0) { this.cameraStartFor(node, surfaceId) }
+              })
+              .onDestroy(() => { this.cameraStop(node) })
+            if (!this.cameraReady) {
+              Text(this.cameraNote.length > 0 ? this.cameraNote : 'Starting camera…')
+                .fontSize(this.t().sizeCaption)
+                .fontFamily(this.textFamily())
+                .fontColor(Color.White)
+                .textAlign(TextAlign.Center)
+                .padding(this.t().gapBase)
+            }
+          }
+          .width('100%')
+          .height(VeraPreview.CAMERA_HEIGHT)
+          .borderRadius(this.t().radiusControl)
+          .clip(true)
+          Button(node.text.length > 0 ? node.text : 'Take photo')
+            .height(this.t().controlHeight)
+            .fontSize(this.t().sizeBody)
+            .fontFamily(this.textFamily())
+            .type(ButtonType.Capsule)
+            .backgroundColor(buttonFill(this.t(), 'primary'))
+            .fontColor(buttonInk(this.t(), 'primary'))
+            .enabled(this.cameraReady && !this.cameraBusy && node.action.length > 0)
+            .onClick(() => { this.cameraShoot(node) })
+          if (this.cameraReady && this.cameraNote.length > 0) {
+            Text(this.cameraNote)
+              .fontSize(this.t().sizeCaption)
+              .fontFamily(this.textFamily())
+              .fontColor(this.t().dangerInk)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+          }
+        }
+      }
+      .width('100%')
+      .onDisAppear(() => { this.cameraStop(node) })
     } else if (node.kind === 'image') {
       // std/ui has declared Image since the first version, but there was no
       // branch here, so every generated program that used one painted nothing

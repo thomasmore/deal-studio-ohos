@@ -114,9 +114,11 @@ function phoneRule(phone: string): string {
   if (phone.length === 0) {
     return DECLINE_RULE + '- The section never calls sdk.call, except "' + ASK_TARGET + '" as said below: what the phone does is not its job.\n' +
       '- Words written from what the person entered (suggestions, recipes, ideas) are never declined: "' + ASK_TARGET + '" writes them.\n' +
-      '- If the section cannot really do it with this language and these components -- it needs a camera, a live feed, ' +
-      'the person\'s location or data the phone does not hold -- decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
-      '</cannot> only when none of the needs can be done. Never fake it with made-up data.\n'
+      '- If the section cannot really do it with this language and these components -- it needs a live feed from somewhere ' +
+      'the phone cannot reach, the person\'s location or data the phone does not hold -- decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
+      '</cannot> only when none of the needs can be done. Never fake it with made-up data.\n' +
+      '- A camera view is not declined: use ui.Camera, which shows a live preview inside the app and hands the handler the ' +
+      'captured photo as a file URI. Do not use sdk.call camera targets for a screen that should keep the preview inside itself.\n'
   }
   return DECLINE_RULE + '- What the phone or another app must do, the section does with sdk.call from a handler, calling ONLY targets from ' +
     '"Phone functions found" in the request (and "' + ASK_TARGET + '", as said below), copied exactly, with the parameters they show, values from the screen\'s state. ' +
@@ -129,8 +131,10 @@ function phoneRule(phone: string): string {
     'if a function found does the nearest useful thing for the person -- shows or opens the same thing in the app made for it: ' +
     'write the section with that function, and say in a line on the screen what it does instead.\n' +
     '- Words written from what the person entered (suggestions, recipes, ideas) are never declined: "' + ASK_TARGET + '" writes them, as said below.\n' +
+    '- A camera view is not declined: use ui.Camera, which shows a live preview inside the app and hands the handler the ' +
+    'captured photo as a file URI. Do not use sdk.call camera targets for a screen that should keep the preview inside itself.\n' +
     '- If none of the phone functions found does what is needed, or it needs something the phone cannot give a program ' +
-    '(a camera, a live feed, the person\'s location), decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
+    '(a live feed from somewhere the phone cannot reach, the person\'s location), decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
     '</cannot> only when none of the needs can be done. Never fake it, never pretend a call happened, ' +
     'never call a target that is not listed.\n'
 }

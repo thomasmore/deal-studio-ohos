@@ -72,6 +72,30 @@ async function main() {
   assert.match(seen.code[0].system, /date drafts start at time\.daysSinceEpoch\(\)/)
   assert.match(seen.code[0].system, /reset to time\.daysSinceEpoch\(\) after Add\/Save\/reset/)
   assert.match(seen.code[0].system, /Editing copies the saved date unchanged/); checks++
+  const recipes = hostFor()
+  assert.equal((await run(recipes.host, 'Scandinavian recipes with a home overview, a notes list and an editor')).kind, 'agent')
+  assert.equal(recipes.seen.plans.length, 1); checks++
+  const cameraWriter = good.replace('ui.Text("heading", "Edit note"),',
+    'ui.Text("heading", "Edit note"), ui.Camera("default", "c_type", "back", "Capture"),')
+  const cameraHost = hostFor(attempt => {
+    const draft = plan()
+    if (attempt > 1) { draft.needs.push({id: 'photo', type: 'other', what: 'Photograph a page with a live camera preview'}) }
+    if (attempt > 2) { draft.screens[2].needs.push('photo') }
+    return draft
+  }, cameraWriter)
+  const cameraBuilt = await run(cameraHost.host, 'Notes with a home overview, a notes list and an editor to photograph a page')
+  assert.equal(cameraBuilt.kind, 'agent', cameraBuilt.reason)
+  assert.equal(cameraHost.seen.plans.length, 3)
+  assert.match(cameraHost.seen.plans[1], /camera need.*screen/)
+  assert.deepEqual(cameraBuilt.agent.composed.appPlan.screens[2].needs, ['editor', 'photo'])
+  assert.match(cameraHost.seen.code[0].user, /Photograph a page with a live camera preview/); checks++
+  const cameraVm = new VirtualMachine(deserializeVbc2(cameraBuilt.agent.vbc2), new UiHostEnvironment())
+  const cameraCount = node => (node.kind === 'camera' ? 1 : 0) + node.children.reduce((count, child) => count + cameraCount(child), 0)
+  const cameraCountOn = state => decodeVeraUi(cameraVm.execute('view', [state])).reduce((count, node) => count + cameraCount(node), 0)
+  const cameraHome = cameraVm.execute('init')
+  const cameraList = cameraVm.execute('c_list', [cameraHome, new VeraNumberValue(0)])
+  const cameraEditor = cameraVm.execute('c_edit', [cameraList, new VeraNumberValue(0)])
+  assert.deepEqual([cameraCountOn(cameraHome), cameraCountOn(cameraList), cameraCountOn(cameraEditor)], [0, 0, 1]); checks++
   const compiled = compileVeraSource(built.agent.source); assert.equal(smokeRun(compiled), ''); const env = new UiHostEnvironment(); const vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), env); let state = vm.execute('init')
   const field = key => state.fields.get('c_' + key)
   const tap = (handler, value = 0) => { state = vm.execute(handler, [state, typeof value === 'string' ? new VeraStringValue(value) : new VeraNumberValue(value)]) }

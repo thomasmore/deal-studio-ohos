@@ -82,6 +82,7 @@ const platform = {
   Scroller: class {},
   TextInputController,
   TextTimerController: class {},
+  XComponentController: class {},
   CanvasRenderingContext2D: class {},
   RenderingContextSettings: class {},
   TouchType: { Down: 0, Move: 1, Up: 2, Cancel: 3 },
@@ -153,7 +154,7 @@ const { compileVeraSource } = load(path.join(root, 'vera/VeraCompiler.ets'))
 const { veraStateStamp } = load(path.join(root, 'vera/VeraStateStamp.ets'))
 const { store } = load(path.join(root, 'vera/ProjectStore.ets'))
 store.init('/preview-host-fixture')
-function compile({ initial = 0, bad = false, viewTrapAfter = false, refreshTrap = false, refreshDelta = 0, ticker = 0, surface = false, animated = false, surfaceChange = '', effect = false, world = false, worldUnchanged = false, worldDirection = false, hideWorldAfterEvent = false } = {}) {
+function compile({ initial = 0, bad = false, viewTrapAfter = false, refreshTrap = false, refreshDelta = 0, ticker = 0, surface = false, animated = false, surfaceChange = '', effect = false, world = false, worldUnchanged = false, worldDirection = false, hideWorldAfterEvent = false, camera = false } = {}) {
   const changingSurface = surfaceChange === 'shift'
     ? ', ui.Column("default", shifted), ui.Surface("default", 100, 100, "drawOld", "", "pointer")'
     : ', ui.Surface("default", 100, 100, firstDraw, frameAction, "pointer")' +
@@ -191,6 +192,7 @@ function view(state: AppState): ui.View {
   return ui.Column("default", [ui.TextField("default", "Text", state.text, "edit"),
     ui.Text("body", ui.numberToString(state.n))
     ${ticker ? ', ui.Ticker("default", "clock", ' + ticker + ', true, "tick")' : ''}
+    ${camera ? ', ui.Camera("default", "edit", "back", "Capture")' : ''}
     ${surfaceChange ? changingSurface : surface ? ', ui.Surface("default", 100, 100, "draw", "' + (animated ? 'tick' : '') + '", "pointer")' : ''}
     ${world ? ', ui.World("default", 100, "buildWorld", "worldEvent")' : ''}]);
 }`
@@ -1656,6 +1658,51 @@ test('surface down and move flush fields without stopping ticker timers', async 
     }
   }
 })
+
+scenarios.push({ name: 'retained camera delivers only current actor input and stops in preview mode', action: async () => {
+  const f = fixture(compile({ camera: true }))
+  await f.mount()
+  const camera = walk(f.p.liveRoot).find(node => node.kind === 'camera')
+  const uri = 'file://fixture/capture.jpg'
+  let finishCapture
+  let stops = 0
+  f.p.camera = { capture: () => new Promise(resolve => { finishCapture = resolve }), stop: () => { stops++ } }
+  f.p.cameraNode = camera
+  f.p.cameraSurfaceId = 'preview-fixture'
+  f.p.cameraFacing = camera.value
+  f.p.cameraReady = true
+  f.p.cameraShoot(camera)
+  finishCapture(uri)
+  await pump()
+  assert.equal((await f.state()).text, uri)
+  const inputs = () => f.calls.filter(call => call.name === 'postInput').map(call => call.args[1])
+  assert.deepEqual(inputs().map(input => input.kind), ['HANDLER'])
+
+  f.p.cameraShoot(camera)
+  f.p.vbc2 = compile({ camera: true, initial: 3 }).vbc2
+  f.p.onProgramChanged()
+  await finish(f.p.operations)
+  assert.equal(stops, 0)
+  finishCapture('file://fixture/replaced.jpg')
+  await pump()
+  assert.equal(inputs().length, 1)
+  assert.equal((await f.state()).text, 'initial')
+
+  const retained = walk(f.p.liveRoot).find(node => node.kind === 'camera')
+  f.p.cameraShoot(retained)
+  finishCapture(uri)
+  await pump()
+  assert.equal((await f.state()).text, uri)
+  assert.deepEqual(inputs().map(input => input.kind), ['HANDLER', 'HANDLER'])
+
+  f.p.cameraShoot(retained)
+  f.p.previewOnly = true
+  f.p.onPreviewOnlyChanged()
+  assert.equal(stops, 1)
+  finishCapture('file://fixture/late.jpg')
+  await finish(f.p.operations)
+  assert.equal(inputs().length, 2)
+} })
 
 async function cleanup() {
   saveFailure = false

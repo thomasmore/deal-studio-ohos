@@ -13,7 +13,7 @@ import { OperationCancellation, isCancelled, throwIfCancelled } from './Operatio
 import { Sketch, SketchInput, ListField, SketchOption, SketchAsk, JevAsk, PlanReview, ComposeResult, composeFromSketch, closePartialJson, sketchSignature, describeSketch,
   listNeeds, clockOptions, listOptions, choice, askReady, askLive, SketchQuestion, answerTo, keepAnswers, LIST_SECTIONS, LIST_PUBLISHERS, PART } from './VeraCompose'
 import { NeedsPlan, Need, NEEDS_PROMPT, plainScenes, WIDGET_ROOM, WIDGET_NEEDS_NOTE, capForWidget, dropUnasked, NEED_COUNTDOWN, NEED_ACTION, NEED_FIGURE, ON_END, ON_ADDED, ON_TAP, parseNeedsPlan, sketchFrom, planningSketch,
-  needOf, navigationPlanProblem } from './NeedsPlan'
+  ensureCameraNeed, needOf, navigationPlanProblem } from './NeedsPlan'
 
 /** Whether the list keeps a reading in a unit the request gives a number in: a temperature, a pressure, a weight. */
 export function readsMeasure(sketch: Sketch, prompt: string): boolean {
@@ -322,6 +322,7 @@ async function drawOnce(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
     if (isCancelled(cancellation)) { return }
     let plan = parseNeedsPlan(reply)
     if (plan === null) { return }
+    ensureCameraNeed(plan!, prompt)
     let sketch = planningSketch(plan!)
     if (sketch === null) { return }
     let signature = sketchSignature(sketch!)
@@ -359,15 +360,17 @@ async function drawPlan(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
     }
     let problems: string[] = []
     let plan = reply !== null ? parseNeedsPlan(reply!, problems) : null
+    let cameraProblem = plan !== null ? ensureCameraNeed(plan!, prompt) : ''
     let sketch = plan !== null ? planningSketch(plan!) : null
     let navigation = plan !== null ? navigationPlanProblem(plan!) : ''
     // Prose is only a heuristic. It may request a better plan, but cannot disable the ordinary fallback on its own.
-    if (plan !== null && sketch !== null && navigation.length === 0) {
+    if (plan !== null && sketch !== null && navigation.length === 0 && cameraProblem.length === 0) {
       out.text = reply!
       out.plan = plan
       out.sketch = sketch
       return out
     }
+    if (cameraProblem.length > 0) { problems.push(cameraProblem) }
     let wrong = navigation.length > 0 ? navigation : (problems.length > 0 ? problems.join('; ') :
       (reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200)))
     user = prompt + note + '\n\nThe last answer could not be used: ' + wrong + '. Answer with the JSON object only, in the form asked for.'

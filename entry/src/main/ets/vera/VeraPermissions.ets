@@ -34,6 +34,31 @@ export async function requestCalendarPermissions(context: common.UIAbilityContex
   }
 }
 
+/**
+ * CAMERA is user_grant as well, but asked when a generated app first takes a
+ * photo rather than at startup: most runs never use it, and a camera dialog on
+ * every launch would ask for a capability the person did not come for. The
+ * status is checked again on every capture, so a later refusal answers the
+ * program instead of throwing.
+ */
+export async function ensureCameraPermission(context: common.UIAbilityContext): Promise<boolean> {
+  AbilityContext.value = context
+  let permissions: Permissions[] = ['ohos.permission.CAMERA']
+  try {
+    let manager = abilityAccessCtrl.createAtManager()
+    let status = await manager.checkAccessToken(context.applicationInfo.accessTokenId, permissions[0])
+    if (status === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) { return true }
+    let result = await manager.requestPermissionsFromUser(context, permissions)
+    let granted = result.authResults.length > 0 && result.authResults[0] === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED
+    hilog.info(DOMAIN, 'VERA', granted ? 'VERA-CAMERA permission granted' : 'VERA-CAMERA permission declined')
+    return granted
+  } catch (e) {
+    let err = e as BusinessError
+    hilog.error(DOMAIN, 'VERA', 'VERA-CAMERA permission request failed ' + err.code.toString())
+    return false
+  }
+}
+
 export async function requestMicrophonePermission(context: common.UIAbilityContext): Promise<void> {
   AbilityContext.value = context
   let permissions: Permissions[] = ['ohos.permission.MICROPHONE']

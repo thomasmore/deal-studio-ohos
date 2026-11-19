@@ -40,12 +40,12 @@ import {
   securityLabel,
   statfs
 } from '@kit.CoreFileKit'
-import { AbilityContext } from './VeraPermissions'
+import { AbilityContext, ensureCameraPermission } from './VeraPermissions'
 import { calendarSdkTargets, runCalendarSdkAdapter } from './VeraCalendarSdk'
 import { notifySdkTargets, runNotifySdkAdapter } from './VeraNotifySdk'
 import { LIVE_TARGET, liveFetch } from './VeraLive'
 import { ASK_TARGET, askText } from './VeraAsk'
-import { camera } from '@kit.CameraKit'
+import { camera, cameraPicker } from '@kit.CameraKit'
 import { audio } from '@kit.AudioKit'
 import {
   abilityAccessCtrl,
@@ -197,6 +197,51 @@ function cameraManagerOnce(): camera.CameraManager | null {
   } catch (e) {
     throw e as Error
   }
+}
+
+/**
+ * One photo, taken by the person in the system camera picker: the picker owns
+ * the viewfinder, shutter and confirmation, so a generated program gets a
+ * usable shot rather than a blind capture from a camera session with no
+ * preview surface. The picker saves its result to the media library and grants
+ * the caller read access to that URI; the host copies it into the app sandbox,
+ * and the answer is the sandbox file URI, which ui.Image can show. (Writing
+ * PickerProfile.saveUri directly is rejected by this vendor build with
+ * 13900012 Permission denied, so the copy is deliberate.)
+ * Cancelling or a picker failure answers an error the program can display.
+ */
+async function captureCameraPhoto(params: Map<string, string>): Promise<string> {
+  let context = AbilityContext.value
+  if (context === null) { throw new Error('camera: no ability context') }
+  if (!await ensureCameraPermission(context)) { throw new Error('camera permission not granted') }
+  let profile: cameraPicker.PickerProfile = {
+    cameraPosition: paramString(params, 'facing', 'back').toLowerCase() === 'front'
+      ? camera.CameraPosition.CAMERA_POSITION_FRONT : camera.CameraPosition.CAMERA_POSITION_BACK
+  }
+  let mediaTypes: cameraPicker.PickerMediaType[] = [cameraPicker.PickerMediaType.PHOTO]
+  let result = await cameraPicker.pick(context, mediaTypes, profile)
+  if (result.resultCode !== 0) { throw new Error('camera cancelled') }
+  if (result.resultUri.length === 0) { throw new Error('camera: no photo returned') }
+  let dir = context.filesDir + '/vera/photos'
+  try { fs.mkdirSync(dir, true) } catch (_e) {}
+  let path = dir + '/' + Date.now().toString() + '.jpg'
+  let source: fs.File | null = null
+  try {
+    source = fs.openSync(result.resultUri, fs.OpenMode.READ_ONLY)
+    fs.copyFileSync(source.fd, path)
+  } catch (e) {
+    // The picker grants read access to resultUri; if this vendor build does
+    // not, the URI can still be drawn while the grant lasts. Saving it into
+    // the sandbox is what makes it survive a restart, so try that first.
+    try { fs.unlinkSync(path) } catch (_e) {}
+    console.warn('VERA-CAMERA copy failed ' + (e as Error).message)
+    return result.resultUri
+  } finally {
+    if (source !== null) { fs.closeSync(source) }
+  }
+  let uri = fileUri.getUriFromPath(path)
+  console.info('VERA-CAMERA saved ' + uri)
+  return uri
 }
 
 let audioManagerInstance: audio.AudioManager | null = null
@@ -1336,6 +1381,9 @@ const ADAPTERS: Map<string, SdkAdapter> = new Map<string, SdkAdapter>([
   // ("0"/"1"/"2"), which happens to already be TorchMode's own numeric
   // encoding (OFF/ON/AUTO), so parsing it as int and casting is exact rather
   // than a guess.
+  ['CameraKit.PhotoOutput.capture', async (params: Map<string, string>): Promise<string> => {
+    return captureCameraPhoto(params)
+  }],
   ['CameraKit.CameraManager.setTorchMode', async (params: Map<string, string>): Promise<string> => {
     let manager = cameraManagerOnce()
     if (manager === null) { return 'error: no ability context yet' }

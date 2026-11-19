@@ -50,6 +50,7 @@ function createPreview({ runtime, HostOperationFailure, HostEffectsBridge, mocks
   assert.equal(errors.length, 0, errors.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('\n'))
   const platform = {
     Scroller: class {}, TextInputController: class { getText() { return '' } }, TextTimerController: class {},
+    XComponentController: class {},
     CanvasRenderingContext2D: class {}, RenderingContextSettings: class {},
     TouchType: { Down: 0, Up: 1, Move: 2, Cancel: 3 }, SliderChangeMode: { Begin: 0, Moving: 1, End: 2, Click: 3 },
     Date, console: { info() {}, warn() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
