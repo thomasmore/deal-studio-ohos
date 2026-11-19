@@ -471,6 +471,12 @@ export class WorldBox {
    * [px, py, pz, qx, qy, qz, qw] and no velocity (resolveFrom's form): where those bodies go without physics.
    */
   private fromParents: Map<string, number[]> = new Map<string, number[]>()
+  /**
+   * Bodies made from another (scene.from) that are built again in this apply (a new mark, the theme) and stood somewhere
+   * already: their pose as it is now, so they are built again there rather than placed from their parent a second time
+   * -- a parent that is gone (the body it broke from) would leave only its build pose, and the pieces would jump.
+   */
+  private keptFrom: Map<string, number[]> = new Map<string, number[]>()
   /** Node name -> body id, pips included, for a raycast hit. */
   private byName: Map<string, string> = new Map<string, string>()
   /** Node name -> part id, for a raycast that hits a part of a group. */
@@ -481,7 +487,12 @@ export class WorldBox {
   private loadedModels: Set<Scene> = new Set<Scene>()
   private resolvedMaterials: Map<string, Material> = new Map<string, Material>()
   private resolvedImages: Map<string, SceneImage> = new Map<string, SceneImage>()
-  private materialBindings: Map<Node, Material> = new Map<Node, Material>()
+  /**
+   * Which material each painted node holds, by the node's name: names are unique (a prefix and the serial), and a name is
+   * a string -- the kit's `.parent` and `.children` need not hand back the wrapper a node was painted through, so an
+   * identity test could miss a removed node's parts and keep their materials from being swept for good.
+   */
+  private materialBindings: Map<string, Material> = new Map<string, Material>()
   private groundMaterials: Set<Material> = new Set<Material>()
   private textureSamplers: Set<Sampler> = new Set<Sampler>()
   private resourcePending: number = 0
@@ -577,12 +588,10 @@ export class WorldBox {
   /** Show this world (with this theme) as soon as what is being applied now is done. */
   apply(spec: WorldSpec, theme: ResolvedTheme): void {
     if (this.destroyed || this.retired) { return }
-    let requests = burstsForDiff(diffWorld(this.wanted !== null ? this.wanted : this.applied, spec))
     this.wanted = spec
     this.wantedTheme = theme
     if (!this.particleReady && (spec.bursts.length > 0 || spec.blasts.length > 0 ||
       spec.bodies.some((b: BodySpec): boolean => b.target || b.shot !== null))) { this.particleWarmWanted = true }
-    this.queueBursts(requests)
     this.startParticles()
     this.pump()
   }
@@ -819,7 +828,6 @@ export class WorldBox {
     for (let i = 0; i < poses.length; i++) {
       let pose = poses[i]
       let node = this.particleNodes[i]
-      if (this.backdropOn) { node.visible = false }
       node.position = v3(pose.position[0], pose.position[1], pose.position[2])
       let color = this.particleColors.get(pose.color)
       if (color === undefined) {
@@ -830,10 +838,9 @@ export class WorldBox {
       let alpha = color[3] * pose.alpha
       let size = this.backdropOn ? pose.sizeM * Math.cbrt(Math.max(0, Math.min(1, alpha))) : pose.sizeM
       node.scale = v3(size, size, size)
-      if (!(alpha > 0)) { node.visible = false }
       let materialAlpha = this.backdropOn ? (alpha > 0 ? 1 : 0) : alpha
       this.particleMaterials[i].baseColor.factor = vec4([color[0], color[1], color[2], materialAlpha])
-      if (alpha > 0) { node.visible = true }
+      node.visible = alpha > 0
     }
     for (let i = poses.length; i < this.particleVisible; i++) {
       this.particleNodes[i].visible = false
@@ -1109,12 +1116,12 @@ export class WorldBox {
     // Dice thrown here draw from Math.random, so no two throws are alike (the host's checks seed them instead).
     let made = new WorldSim(engine, (): number => Math.random())
     made.reset()
-    // Only a trigger that changed in this apply throws. On the box's first apply (prev null) every non-zero trigger
-    // is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the dice by
-    // itself and overwrite the faces the state keeps.
+    // Only a trigger that changed in this apply throws or blasts. On the box's first apply (prev null) every non-zero
+    // trigger is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the
+    // dice by itself and overwrite the faces the state keeps; blasting it again would scatter the scene left there.
     let full = diffWorld(null, next)
     full.kick = prev !== null ? diff.kick : []
-    full.blast = diff.blast
+    full.blast = prev !== null ? diff.blast : []
     made.apply(full, next)
     this.sim = made
     this.steer()
@@ -1637,6 +1644,10 @@ export class WorldBox {
     let diff: WorldDiff = diffWorld(prev, next)
     let themeChanged = theme !== this.appliedTheme
     this.applyPhysics(prev, diff, next)
+    // Bursts from the same diff the physics was given, so the particles and the push agree: one per trigger the physics
+    // saw change (states given faster than they are applied are one change), and none on the first apply, whose triggers
+    // the state already had (restored on reopen) -- as kicks and blasts are not thrown again there (applyPhysics).
+    if (prev !== null) { this.queueBursts(burstsForDiff(diff)) }
     let live = new WorldSpec()
     this.bodies.forEach((entry: BodyNode) => { live.bodies.push(entry.spec) })
     let renderDiff = diffWorld(live, next)
@@ -1700,7 +1711,9 @@ export class WorldBox {
     }
     for (let id of diff.remove) { if (!removedFor.has(id)) { this.removeBody(id) } }
     let creating: BodySpec[] = []
+    this.keptFrom.clear()
     for (let b of diff.recreate) {
+      this.keepFrom(b)
       this.removeBody(b.id)
       creating.push(b)
     }
@@ -1711,6 +1724,7 @@ export class WorldBox {
       for (let b of next.bodies) {
         if (!rebuilding.has(b.id) && (legacyPaint(b) || b.parts.some((p: BodySpec): boolean => legacyPaint(p)) ||
           (b.model.length > 0 && (b.mark.length > 0 || b.rings.length > 0)))) {
+          this.keepFrom(b)
           this.removeBody(b.id)
           creating.push(b)
           themeRebuilt.add(b.id)
@@ -1789,6 +1803,7 @@ export class WorldBox {
     // The pieces are on screen: the bodies they broke from go now.
     removedFor.forEach((id: string) => { this.removeBody(id) })
     this.fromParents.clear()
+    this.keptFrom.clear()
     this.applied = next
     this.appliedTheme = theme
     if (themeChanged) { this.particleColors.clear() }
@@ -1995,7 +2010,7 @@ export class WorldBox {
     let subMeshes = (node as Geometry).mesh.subMeshes
     if (subMeshes.length > 0) {
       subMeshes[0].material = material
-      this.materialBindings.set(node, material)
+      this.materialBindings.set(node.name, material)
     }
   }
 
@@ -2004,7 +2019,20 @@ export class WorldBox {
    * the apply began (fromParents; where it was built for a piece whose parent is not there) and an aimed one turned to
    * its point, as WorldSim does it -- which places a loose one itself, and createBody takes its pose from there.
    */
+  private keepFrom(b: BodySpec): void {
+    if (b.from === null) { return }
+    let known = this.bodies.get(b.id)
+    if (known !== undefined) { this.keptFrom.set(b.id, [known.pos[0], known.pos[1], known.pos[2]].concat(quatOf(known.node))) }
+  }
+
   private place(entry: BodyNode, b: BodySpec): void {
+    let kept = this.keptFrom.get(b.id)
+    if (kept !== undefined) {
+      entry.node.position = v3(kept[0], kept[1], kept[2])
+      entry.node.rotation = quat([kept[3], kept[4], kept[5], kept[6]])
+      entry.pos = [kept[0], kept[1], kept[2]]
+      return
+    }
     if (b.from !== null || b.aim.length === 3) {
       let parent: number[] | null = null
       if (b.from !== null) {
@@ -2317,14 +2345,18 @@ export class WorldBox {
   }
 
   private removeNode(node: Node): void {
-    let dropped: Node[] = []
-    this.materialBindings.forEach((_material: Material, bound: Node) => {
-      let at: Node | null = bound
-      while (at !== null) {
-        if (at === node) { dropped.push(bound); break }
-        at = at.parent
+    // The names in the node's own subtree, walked down from it: the cost is that subtree, not every binding in the world.
+    let dropped: string[] = []
+    let walk: Node[] = [node]
+    while (walk.length > 0) {
+      let at = walk.pop() as Node
+      if (this.materialBindings.has(at.name)) { dropped.push(at.name) }
+      let n = at.children.count()
+      for (let i = 0; i < n; i++) {
+        let child = at.children.get(i)
+        if (child !== null) { walk.push(child) }
       }
-    })
+    }
     let root = this.scene !== null ? this.scene.root : null
     let detached = false
     try {

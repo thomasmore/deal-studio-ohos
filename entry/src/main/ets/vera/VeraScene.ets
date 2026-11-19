@@ -169,7 +169,7 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
     'to speed metres a second, turning to face it, under physics (it falls, is stopped by bodies and knocks loose ones). ' +
     'action is the label of a button beside the stick ("Jump", "Kick"; "" for none) that sends the event "action"; fire, if ' +
     'given, the label of a second button ("Fire"), which sends "action" too with its label in e.other. The ' +
-    'camera follows it unless the world has a scene.camera. At most one; it becomes loose (mass 1) if it was not'),
+    'camera follows it (scene.follow sets how far behind and above; a scene.camera is set aside, so leave it out). At most one; it becomes loose (mass 1) if it was not'),
   new GfxFunction('follow', [thing(), num('distance'), num('height')], 'thing',
     'the camera follows the thing from distance metres behind it and height metres above it, a drag turning the view round ' +
     'it: for a thing that travels. At most one, and not with scene.camera (a player is followed without it)'),
@@ -1591,7 +1591,7 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
   return diff
 }
 
-function particleRequest(id: string, trigger: number, x: number, y: number, z: number, kind: string, color: string): ParticleBurst {
+export function particleRequest(id: string, trigger: number, x: number, y: number, z: number, kind: string, color: string): ParticleBurst {
   let request = new ParticleBurst()
   request.kind = kind
   request.seed = surfaceSeed(JSON.stringify([id, trigger, kind]))

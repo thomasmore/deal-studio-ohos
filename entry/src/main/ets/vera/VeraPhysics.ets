@@ -11,12 +11,11 @@
  */
 
 import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, SceneFrom, SceneShot, orbitPositions,
-  topFace } from './VeraScene'
+  topFace, particleRequest } from './VeraScene'
 import { PlayerDrive, ZoneEnter, yawOf, PLAYER_STOP } from './VeraLocomotion'
 import { pointBounds, partBounds, PartRecords, PART_RECORD, addPartRecords, turnPoint } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
 import { ParticleBurst, MAX_BURSTS, DUST_MIN_SPEED } from './VeraParticles'
-import { surfaceSeed } from './VeraNoise'
 
 /** Body kinds, as the native library numbers them. */
 export const PHYS_STATIC: number = 0
@@ -1320,9 +1319,15 @@ export class WorldSim {
     // was built, facing the way it faced and going as it went. The player is stood upright: a character turns only about
     // y, so a tilt kept now (a box that had tumbled onto its side) would be kept for good. (Before this only the player
     // was kept; any other loose body went back to where it was built.)
+    // Only a body that was loose before: one only now let go (static or held until this state) has no live pose of its own
+    // to keep -- kept, it would be put to sleep where it was built, hanging in the air, instead of falling from there.
+    let wasLoose = new Set<string>()
+    if (this.spec !== null) {
+      for (let b of (this.spec as WorldSpec).bodies) { if (b.motion === 'loose') { wasLoose.add(b.id) } }
+    }
     let kept = new Map<string, number[]>()
     for (let b of diff.recreate) {
-      if (b.motion !== 'loose') { continue }
+      if (b.motion !== 'loose' || !wasLoose.has(b.id)) { continue }
       let live = this.liveState(b.id)
       if (live === null) { continue }
       let pose = live.slice(0, 7)
@@ -1694,12 +1699,8 @@ export class WorldSim {
     this.pairAt.set(key, this.simTime)
     let shot = this.shots.indexOf(a) >= 0 || this.shots.indexOf(b) >= 0
     if ((shot || speed >= DUST_MIN_SPEED) && Number.isFinite(px) && Number.isFinite(py) && Number.isFinite(pz)) {
-      let request = new ParticleBurst()
-      request.kind = shot ? 'sparks' : 'dust'
-      request.seed = surfaceSeed(JSON.stringify([key, this.burstSerial++]))
-      request.origin = [px, py, pz]
-      request.color = shot ? '#ffc45c' : '#a89b84'
-      this.pendingBursts.push(request)
+      this.pendingBursts.push(particleRequest(key, this.burstSerial++, px, py, pz, shot ? 'sparks' : 'dust',
+        shot ? '#ffc45c' : '#a89b84'))
       if (this.pendingBursts.length > MAX_BURSTS) { this.pendingBursts.shift() }
     }
     let known = this.struckSpeeds.get(body)

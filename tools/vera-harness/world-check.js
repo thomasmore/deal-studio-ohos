@@ -737,6 +737,19 @@ traps(() => host.invoke('std/scene', 'teleport', [], false), 'R0015')
     const ax = P.kickAxis('d1', 1)
     assert.ok(Math.abs(Math.hypot(...ax) - 1) < 1e-9); assert.deepEqual(P.kickAxis('d1', 1), ax); assert.notDeepEqual(P.kickAxis('d1', 2), ax)
   }
+  // A body let go only now (static until this state) falls from where it was built: made again for its new motion, it has
+  // no live pose to keep, so it is not put to sleep there in mid-air. One already loose and made again keeps its own.
+  {
+    const sim = new P.WorldSim(new P.FakePhys())
+    const held = S.decodeScene(new VeraArrayValue([call('floor', 'surface'), box('crate', 0, 2, 0, 'ink', 0.4)]))
+    const freed = S.decodeScene(new VeraArrayValue([call('floor', 'surface'), call('loose', box('crate', 0, 2, 0, 'ink', 0.4), 1)]))
+    sim.apply(S.diffWorld(null, held), held)
+    const d = S.diffWorld(held, freed)
+    assert.deepEqual(d.recreate.map(b => b.id), ['crate'], 'letting go makes the body again')
+    sim.apply(d, freed)
+    for (let f = 0; f < 60; f++) sim.step(FRAME_MS, f / 60)
+    assert.ok(sim.poseOf('crate')[1] < 1, 'a body let go falls: y=' + sim.poseOf('crate')[1])
+  }
   // A kick goes to the engine as setVelocity, only on a change of trigger.
   {
     const calls = []

@@ -822,10 +822,13 @@ private:
             }
             JPH::RVec3 p = BI().GetPosition(s.id);
             float x = static_cast<float>(p.GetX()), y = static_cast<float>(p.GetY()), z = static_cast<float>(p.GetZ());
-            bool out = y < minY_ || std::fabs(x) > halfX_ || std::fabs(z) > halfZ_ || !std::isfinite(x + y + z);
-            if (out && s.projectile) {
+            bool finite = std::isfinite(x + y + z);
+            bool out = y < minY_ || std::fabs(x) > halfX_ || std::fabs(z) > halfZ_ || !finite;
+            if (out && s.projectile && finite) {
                 // A shot that missed stops where it left the world (reported once, as it falls asleep) and stays
-                // there: sent home it would be fired again from the gun. One already stopped is left alone.
+                // there: sent home it would be fired again from the gun. One already stopped is left alone. A shot
+                // gone non-finite has nowhere to stop -- frozen there, its NaN pose would reach the node -- so it is sent
+                // home like any other body (as FakePhys does).
                 if (BI().IsActive(s.id)) {
                     BI().SetLinearAndAngularVelocity(s.id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
                     BI().DeactivateBody(s.id);
