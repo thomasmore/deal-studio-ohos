@@ -97,6 +97,94 @@ Given a directory, it also writes `roulette-sheet.svg`.
 `surface-edit-check.js` checks a change to a game or a scene with a mocked model: the guide shown, edits applied, a change that crashes mid-game repaired after it is played, one that never passes not served.
 `scene-hole-check.js` follows a scene through the agent with a mocked model: the classifier's three answers, the plan's `scene` need, the composer and Align leaving it to the written section, the scene guide's example playing, a scene only a button starts, and the writer repairing a scene that never moves.
 
+## 3D textures, particles and imported models
+
+`ui.World` programs describe their scene on state changes; the host owns physics, motion and particle frames.
+The capabilities and play-check limits are described in `docs/agent.md` under **Solid things in 3D**. From the
+repository root, with TypeScript available as above:
+
+```bash
+python3 tools/model-catalog.py --check
+for check in scene world shapes interaction world-play; do
+  node "tools/vera-harness/$check-check.js" || exit 1
+done
+for check in texture texture-renderer texture-cache particles particles-renderer models models-renderer; do
+  node "tools/vera-harness/$check-check.js" || exit 1
+done
+node tools/vera-harness/texture-proofs.js /tmp/opencode/texture-proofs.png
+```
+
+The proof output's parent directory must already exist. The PNG is a host raster proof of all 11 patterns on a
+cube, cylinder and floor patch using the actual texture pixels and metre-based UV meshes, not an ArkGraphics3D capture.
+
+| Check | What it verifies on the host |
+| --- | --- |
+| `texture-check.js` | The 11 material patterns' determinism, wrapping/seams, two-colour output and keys; legacy sphere patterns remain separate. |
+| `texture-renderer-check.js` | Actual renderer methods with mocked platform boundaries: PNG creation/reuse, materials, UVs, groups, ground, updates and failures. |
+| `texture-cache-check.js` | Resource bookkeeping and disk cleanup targeting 256 managed PNGs; active readers/writers are skipped, unmanaged files, directories and symlinks untouched. This is not a hard disk cap while files are active. |
+| `particles-check.js` | Five burst kinds, deterministic trajectories, lifetimes, floor clamping and eviction at 256 particles / 16 bursts. |
+| `particles-renderer-check.js` | Mocked renderer pool, independent imported no-shadow materials, native alpha versus Canvas spatial fade, live backdrop transitions, trigger-driven/automatic effects, lifecycle and failures; not native compositing proof. |
+| `models-check.js` | All 36 catalogue entries against packaged GLBs, hashes, transformed geometry, hull containment, scaling, orientation and catalogue-derived API/prompt. |
+| `models-renderer-check.js` | Mocked model loads/imports, shared sources, per-body instances, transforms, picking, updates, failures and cleanup; not native memory or shadow proof. |
+| `world-check.js`, `interaction-check.js`, `world-play-check.js` | Scene API validation/diffs, change-edge bursts and automatic effects, scripted play and repair diagnostics, including P0020/P0021. |
+
+`scene.paint`'s material patterns are `wood`, `planks`, `brick`, `tiles`, `stone`, `grass`, `sand`, `metal`,
+`marble`, `checker`, `fabric`; primitives, group parts/groups and ground use metre UVs. Sphere-only patterns
+remain sphere-only. `scene.burst` supports `sparks`, `smoke`, `dust`, `debris`, `confetti`: initial trigger 0 is
+silent, each change (even back to 0) emits, and changing other fields alone does not. Blasts add debris/smoke,
+shot contacts add sparks, and hard watched knocks add dust automatically; explicit bursts should not duplicate them.
+With no Canvas backdrop, particles retain source-alpha × lifetime-fade material blending. Explicit sky (including
+zero stars), stars, trails or stationary glow halos select the phase-2 opaque shrinking-cube fallback for all kinds:
+size × `cbrt(clamp(effectiveAlpha, 0, 1))`, alpha 1 when positive, hidden at zero, unchanged RGB. Low source alpha
+therefore means smaller opaque cubes. Live particles switch both ways on the next frame without replacing their
+independent imported BLEND/unlit no-shadow materials. This is a workaround for the confirmed native-to-Canvas
+sRGB/premultiplication boundary, not global alpha support; TEXTURE does not fix it. It remains until a platform fix.
+
+Model names/descriptions are the generated `VeraModels.ets` catalogue and `rawfile/models/models.json`, not a
+second handwritten list here. The 36 static CC0 Kenney Racing Kit 2.0 models keep their materials; size is the
+largest side, y the support bottom, and the host converts source +z forward to body +x. Motion, mark and rings work;
+paint/glow/group-part use/split do not. Collision is a convex hull, so visible openings are not passable.
+The asset directory includes `LICENSE.txt` and `SHA256SUMS`. Provenance is the public extracted-file mirror
+`Tiddybub/3d-assets`, pinned at `11ff7082e566a6278553bf7623980cb93dd41e27`, **not an official ZIP**.
+`python3 tools/model-catalog.py --check --source /path/to/pinned-extracted-inputs` additionally compares reproducible
+outputs against supplied source inputs and their manifest; `--check` alone verifies the local packaged set.
+
+Play codes are **P0020** (texture readability) and **P0021** (model grounding), not the plan's provisional numbers.
+P0020 estimates initial projected boxes and sampled ground coverage, only for sufficiently dominant paint; it is
+not pixel/occlusion/contrast analysis or a guarantee for every view. P0021 checks static models' rotated hull support
+when a floor/table exists, excluding from/shot/aim/orbit/path/wander; it does not check loose models, free-space
+worlds, stable balance or exact visible-mesh contact. See `docs/agent.md` for thresholds and scope.
+
+Focused fixtures: `examples/world-textures-{table,floor,parts-glow}.vera`,
+`examples/world-particles-{static,automatic,combined300}.vera`, and
+`examples/world-models-{catalog,forest,player}.vera`. They exercise textured ground/parts, explicit and automatic
+bursts (including a 300-body scene), 12 fixed catalogue samples with two swaps, 30 trees and a steered model. Running them on the host
+is not evidence that every model renders on-device. All-36 device coverage, native particle alpha blending/model
+shadows and native-memory behaviour remain subject to current device verification; no such completion is claimed here.
+
+### Retired phase-0 exploratory probe
+
+The `worldSpike` launch flag/routes, page/controller tail, five packaged synthetic GLBs and obsolete
+`world-spike-check.js` were removed on 2026-11-19. Historical measurements and exact pre-removal SHA-256 hashes
+remain in `results/world-spike-phase0-2026-11-18.json`. They are not current product acceptance results.
+`models-renderer-check.js` now asserts that spike sources, routes and fixtures stay out of product packaging,
+while retaining the literal product rawfile descriptor and model recovery tests.
+
+The locally authored fixture generator remains host-only:
+
+```bash
+python3 tools/world-spike-fixtures.py
+python3 tools/world-spike-fixtures.py --check
+python3 tools/world-spike-fixtures.py --output /tmp/opencode
+python3 tools/world-spike-fixtures.py --check /tmp/opencode
+```
+
+Default and bare `--check` validate deterministic generation entirely in memory, with no file writes.
+`--output` requires an explicit existing directory inside the host temporary directory and outside this repository;
+`--check HOST_DIR` validates an explicit existing host directory outside the repository without writing.
+There is no product rawfile auto-output. These fixtures do not replace the retained phase 1–3 product suites
+above or native verification; host resource counts do not measure native memory.
+
 The prompt workflow harness executes application request and repair methods with mocked HTTP responses:
 
 ```bash
