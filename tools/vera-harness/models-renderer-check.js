@@ -152,7 +152,13 @@ async function main() {
     await f.apply(box, spec)
     const entry = box.bodies.get('car'), imported = f.scenes[0].imports[0]
     assert.equal(box.materialBindings.size, 2)
-    for (const node of box.materialBindings.keys()) {
+    // Bindings are by node name; the bound nodes are the ring and the mark, children of the body's own node.
+    const bound = [...box.materialBindings.keys()]
+    const children = Array.from({length: entry.node.children.count()}, (_, i) => entry.node.children.get(i))
+    assert.equal(bound.length, 2)
+    for (const name of bound) {
+      const node = children.find(c => c.name === name)
+      assert.ok(node, 'a bound node is a child of the body: ' + name)
       assert.equal(node.parent, entry.node)
       assert.equal(box.bodyOf(node), 'car')
     }

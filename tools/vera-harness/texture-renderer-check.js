@@ -61,7 +61,9 @@ function fixture() {
         remove(child) {
           const at = children.indexOf(child)
           if (at >= 0) { children.splice(at, 1); child.parent = null }
-        }
+        },
+        get: index => children[index] || null,
+        count: () => children.length
       },
       destroy() { record('nodeDestroy', name, scene); this.destroys++ }
     }
@@ -649,7 +651,7 @@ async function main() {
       assert.equal(box.bodies.get(stable.id), kept)
       assert.equal(materialOf(kept.node), keptMaterial)
       assert.ok(partial.every(node => node.parent === null && node.destroys === 1))
-      assert.deepEqual([...box.materialBindings.keys()], [kept.node])
+      assert.deepEqual([...box.materialBindings.keys()], [kept.node.name])
       assert.deepEqual([...box.byName.keys()], [kept.node.name])
       await f.apply(box, world([]))
       assert.equal(box.materialBindings.size, 0)
@@ -671,7 +673,7 @@ async function main() {
     const pips = [...new Set(f.resources.filter(r => /^p\d+$/.test(r.name) && r.children))]
     assert.equal(pips.length, 20)
     assert.ok(pips.every(pip => pip.parent === null && pip.destroys === 1), 'all successful pip nodes are removed once')
-    assert.deepEqual([...box.materialBindings.keys()], [box.bodies.get('die').node])
+    assert.deepEqual([...box.materialBindings.keys()], [box.bodies.get('die').node.name])
     f.faults.clear()
     await f.apply(box, spec)
     assert.equal(box.bodies.get('die').pips.length, 21)

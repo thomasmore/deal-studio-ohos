@@ -588,10 +588,12 @@ export class WorldBox {
   /** Show this world (with this theme) as soon as what is being applied now is done. */
   apply(spec: WorldSpec, theme: ResolvedTheme): void {
     if (this.destroyed || this.retired) { return }
+    let requests = burstsForDiff(diffWorld(this.wanted !== null ? this.wanted : this.applied, spec))
     this.wanted = spec
     this.wantedTheme = theme
     if (!this.particleReady && (spec.bursts.length > 0 || spec.blasts.length > 0 ||
       spec.bodies.some((b: BodySpec): boolean => b.target || b.shot !== null))) { this.particleWarmWanted = true }
+    this.queueBursts(requests)
     this.startParticles()
     this.pump()
   }
@@ -828,6 +830,9 @@ export class WorldBox {
     for (let i = 0; i < poses.length; i++) {
       let pose = poses[i]
       let node = this.particleNodes[i]
+      // With a backdrop the particle is hidden while it is written and shown only once its colour is (below): a node
+      // half written -- the new position with the old colour -- is not shown for a frame.
+      if (this.backdropOn) { node.visible = false }
       node.position = v3(pose.position[0], pose.position[1], pose.position[2])
       let color = this.particleColors.get(pose.color)
       if (color === undefined) {
@@ -838,9 +843,10 @@ export class WorldBox {
       let alpha = color[3] * pose.alpha
       let size = this.backdropOn ? pose.sizeM * Math.cbrt(Math.max(0, Math.min(1, alpha))) : pose.sizeM
       node.scale = v3(size, size, size)
+      if (!(alpha > 0)) { node.visible = false }
       let materialAlpha = this.backdropOn ? (alpha > 0 ? 1 : 0) : alpha
       this.particleMaterials[i].baseColor.factor = vec4([color[0], color[1], color[2], materialAlpha])
-      node.visible = alpha > 0
+      if (alpha > 0) { node.visible = true }
     }
     for (let i = poses.length; i < this.particleVisible; i++) {
       this.particleNodes[i].visible = false
@@ -1116,12 +1122,12 @@ export class WorldBox {
     // Dice thrown here draw from Math.random, so no two throws are alike (the host's checks seed them instead).
     let made = new WorldSim(engine, (): number => Math.random())
     made.reset()
-    // Only a trigger that changed in this apply throws or blasts. On the box's first apply (prev null) every non-zero
-    // trigger is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the
-    // dice by itself and overwrite the faces the state keeps; blasting it again would scatter the scene left there.
+    // Only a trigger that changed in this apply throws. On the box's first apply (prev null) every non-zero trigger
+    // is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the dice by
+    // itself and overwrite the faces the state keeps.
     let full = diffWorld(null, next)
     full.kick = prev !== null ? diff.kick : []
-    full.blast = prev !== null ? diff.blast : []
+    full.blast = diff.blast
     made.apply(full, next)
     this.sim = made
     this.steer()
@@ -1644,10 +1650,6 @@ export class WorldBox {
     let diff: WorldDiff = diffWorld(prev, next)
     let themeChanged = theme !== this.appliedTheme
     this.applyPhysics(prev, diff, next)
-    // Bursts from the same diff the physics was given, so the particles and the push agree: one per trigger the physics
-    // saw change (states given faster than they are applied are one change), and none on the first apply, whose triggers
-    // the state already had (restored on reopen) -- as kicks and blasts are not thrown again there (applyPhysics).
-    if (prev !== null) { this.queueBursts(burstsForDiff(diff)) }
     let live = new WorldSpec()
     this.bodies.forEach((entry: BodyNode) => { live.bodies.push(entry.spec) })
     let renderDiff = diffWorld(live, next)

@@ -205,7 +205,7 @@ async function main() {
     assert.equal(box.bodyCount(), keepStable ? 1 : 0)
     assert.equal(sibling.destroys, 1)
     assert.equal(sibling.parent, null)
-    assert.equal(box.materialBindings.has(sibling), false)
+    assert.equal(box.materialBindings.has(sibling.name), false)
     assert.equal(sharedMaterial.destroys, keepStable ? 0 : 1)
     if (keepStable) assert.equal(box.bodies.get('stable'), stableEntry)
     await f.apply(box, world([]))

@@ -558,4 +558,62 @@ const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
   nearAll(sim.poseOf('child').slice(0, 3), [3, 1.2 + shape.dims[1] / 2, 0], 1e-6, 'WorldSim creates model hull in the parent frame')
 }
 
+// Two targets knocking together are both struck: both in bodies and values; body and other name the pair once.
+{
+  const fake = new P.FakePhys()
+  let records = []
+  fake.drainContacts = out => { out.set(records); const n = records.length / P.CONTACT_RECORD; records = []; return n }
+  const sim = new P.WorldSim(fake)
+  const spec = world([call('floor', 'surface'), call('target', call('loose', call('box', 'a', -3, 0.5, 0, 1, 1, 1, 'ink'), 1)),
+    call('target', call('loose', call('box', 'b', 3, 0.5, 0, 1, 1, 1, 'ink'), 1))])
+  sim.apply(S.diffWorld(null, spec), spec)
+  records = [sim.index.get('a'), sim.index.get('b'), 10, 0, 0.5, 0]
+  sim.step(FRAME_MS, sim.simTime)
+  const [told] = sim.takeEvents().filter(e => e.kind === 'struck')
+  assert.ok(told, 'a target-target knock is told')
+  assert.deepEqual([told.body, told.other], ['a', 'b'])
+  assert.deepEqual([...told.bodies].sort(), ['a', 'b'], 'both targets are struck')
+  assert.deepEqual(told.values, [10, 10])
+}
+
+// A shot that has touched something falls; given a mark (made again only for how it looks) it keeps falling: the engine
+// keeps the body, so a straight projectile does not fly straight again.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const shotOf = () => call('shoot', call('sphere', 'shot', -2, 1, 0, 0.1, 'ink'), 10, false)
+  const wall = () => call('box', 'wall', 0, 1, 0, 0.2, 2, 2, 'ink')
+  const a = world([call('floor', 'surface'), wall(), shotOf()])
+  sim.apply(S.diffWorld(null, a), a)
+  for (let f = 0; f < 30; f++) sim.step(FRAME_MS, f / 60)
+  const gravity = () => fake.bodies[sim.index.get('shot')].gravityFactor
+  assert.equal(gravity(), 1, 'the shot falls once it has hit the wall')
+  const index = sim.index.get('shot')
+  const b = world([call('floor', 'surface'), wall(), call('mark', shotOf(), 'accent')])
+  const d = S.diffWorld(a, b)
+  assert.deepEqual(d.recreate.map(x => x.id), ['shot'], 'the renderer makes the marked shot again')
+  sim.apply(d, b)
+  assert.equal(sim.index.get('shot'), index, 'the engine keeps the same body')
+  assert.equal(gravity(), 1, 'and it goes on falling')
+  // A real change of the body (its size) is made again in the engine too.
+  const c = world([call('floor', 'surface'), wall(), call('mark', call('shoot', call('sphere', 'shot', -2, 1, 0, 0.2, 'ink'), 10, false), 'accent')])
+  sim.apply(S.diffWorld(b, c), c)
+  assert.ok(S.samePhysicalBody(b.bodies.find(x => x.id === 'shot'), c.bodies.find(x => x.id === 'shot')) === false)
+}
+
+// A blast and a body made in the same apply: the body, standing as built, is not put to sleep after the push.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const a = world([call('floor', 'surface'), call('blast', 'bang', 0, 0, 0, 0, 3, 10)])
+  sim.apply(S.diffWorld(null, a), a)
+  const b = world([call('floor', 'surface'), call('blast', 'bang', 1, 0, 0, 0, 3, 10),
+    call('loose', call('box', 'crate', 1, 0.5, 0, 1, 1, 1, 'ink'), 1), call('loose', call('box', 'far', 8, 0.5, 0, 1, 1, 1, 'ink'), 1)])
+  sim.apply(S.diffWorld(a, b), b)
+  const v = new Float32Array(6)
+  fake.readVelocity(sim.index.get('crate'), v)
+  assert.ok(Math.hypot(v[0], v[1], v[2]) > 1, 'the crate keeps the blast push: ' + Array.from(v.slice(0, 3)))
+  assert.equal(sim.restingCount, 1, 'a body out of reach of the blast still starts resting')
+}
+
 console.log('interaction-check ok')

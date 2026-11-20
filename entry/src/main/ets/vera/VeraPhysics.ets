@@ -11,7 +11,7 @@
  */
 
 import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, SceneFrom, SceneShot, orbitPositions,
-  topFace, particleRequest } from './VeraScene'
+  topFace, particleRequest, samePhysicalBody } from './VeraScene'
 import { PlayerDrive, ZoneEnter, yawOf, PLAYER_STOP } from './VeraLocomotion'
 import { pointBounds, partBounds, PartRecords, PART_RECORD, addPartRecords, turnPoint } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
@@ -1321,27 +1321,37 @@ export class WorldSim {
     // was kept; any other loose body went back to where it was built.)
     // Only a body that was loose before: one only now let go (static or held until this state) has no live pose of its own
     // to keep -- kept, it would be put to sleep where it was built, hanging in the air, instead of falling from there.
-    let wasLoose = new Set<string>()
+    let before = new Map<string, BodySpec>()
     if (this.spec !== null) {
-      for (let b of (this.spec as WorldSpec).bodies) { if (b.motion === 'loose') { wasLoose.add(b.id) } }
+      for (let b of (this.spec as WorldSpec).bodies) { before.set(b.id, b) }
+    }
+    // Made again only for how it looks (a mark, a pattern, rings, a colour in a painted mesh): the renderer makes its node
+    // again, the engine keeps its body as it is -- velocity, sleep and a shot's gravity once it has touched something
+    // (a straight projectile made again would fly straight again). Only one the engine has, or it is made after all.
+    let inPlace: BodySpec[] = []
+    let rebuilt: BodySpec[] = []
+    for (let b of diff.recreate) {
+      let old = before.get(b.id)
+      if (old !== undefined && this.index.has(b.id) && samePhysicalBody(old, b)) { inPlace.push(b) } else { rebuilt.push(b) }
     }
     let kept = new Map<string, number[]>()
-    for (let b of diff.recreate) {
-      if (b.motion !== 'loose' || !wasLoose.has(b.id)) { continue }
+    for (let b of rebuilt) {
+      let old = before.get(b.id)
+      if (b.motion !== 'loose' || old === undefined || old.motion !== 'loose') { continue }
       let live = this.liveState(b.id)
       if (live === null) { continue }
       let pose = live.slice(0, 7)
       kept.set(b.id, (b.player !== null ? uprightPose(pose) : pose).concat(live.slice(7)))
     }
     for (let id of diff.remove) { this.removeBody(id, freed) }
-    for (let b of diff.recreate) { this.removeBody(b.id, freed) }
+    for (let b of rebuilt) { this.removeBody(b.id, freed) }
     // A body to create that the engine already has: an apply that stopped half-way (the renderer's 3D side failed after
     // this ran) is given again from the spec before it. Made again, not twice -- a second body under one id would stay
     // in the engine, colliding, with nothing to draw it or remove it.
     for (let b of diff.create) { this.removeBody(b.id, freed) }
     if (this.held && freed.size > 0) { this.dropPoses(freed) }
     let created: BodySpec[] = []
-    for (let b of diff.recreate) {
+    for (let b of rebuilt) {
       this.createBody(b, parents, kept.has(b.id))
       if (!kept.has(b.id)) { created.push(b) }
     }
@@ -1370,11 +1380,16 @@ export class WorldSim {
         this.engine.setVelocity(i, at[7], at[8], at[9], at[10], at[11], at[12])
       }
     })
-    for (let b of diff.material) {
+    for (let b of diff.material.concat(inPlace)) {
       let i = this.index.get(b.id)
       if (i === undefined) { continue }
       this.engine.setMaterial(i, b.mass, b.restitution, b.friction)
       this.engine.watch(i, b.target || b.shot !== null ? 1 : 0)
+    }
+    // One kept in place that the program places (not loose) goes where this spec puts it, as setPose would.
+    for (let b of inPlace) {
+      let i = this.index.get(b.id)
+      if (i !== undefined && b.motion !== 'loose') { this.placeBody(i, b) }
     }
     for (let b of diff.setPose) {
       let i = this.index.get(b.id)
@@ -1405,11 +1420,24 @@ export class WorldSim {
       }
       kicked.add(b.id)
     }
-    // A blast is a throw of whatever it pushes: settled is told once they have come to rest.
+    // A blast is a throw of whatever it pushes: settled is told once they have come to rest. What it pushes is not
+    // resting either -- put to sleep after it (restingAtStart), a body made in this same apply would lose the push.
+    // Within the radius as the engine reckons it (the centre of mass, here the pose), so the two agree.
+    let unrested = new Set<string>(kicked)
+    if (diff.blast.length > 0) {
+      for (let b of next.bodies) {
+        if (b.motion !== 'loose') { continue }
+        let live = this.liveState(b.id)
+        if (live === null) { continue }
+        for (let x of diff.blast) {
+          if (Math.hypot(live[0] - x.x, live[1] - x.y, live[2] - x.z) < x.radius) { unrested.add(b.id); break }
+        }
+      }
+    }
     for (let x of diff.blast) {
       thrown += this.engine.explode(x.x, x.y, x.z, x.radius, x.strength)
     }
-    let resting = created.length > 0 ? restingAtStart(next, created, kicked, this.standing(next, created)) : []
+    let resting = created.length > 0 ? restingAtStart(next, created, unrested, this.standing(next, created)) : []
     for (let id of resting) {
       let i = this.index.get(id)
       if (i !== undefined) { this.engine.sleep(i) }
@@ -1703,8 +1731,13 @@ export class WorldSim {
         shot ? '#ffc45c' : '#a89b84'))
       if (this.pendingBursts.length > MAX_BURSTS) { this.pendingBursts.shift() }
     }
-    let known = this.struckSpeeds.get(body)
-    if (known === undefined || speed > known) { this.struckSpeeds.set(body, speed) }
+    // Every target in the contact is struck: two targets knocking together are both in bodies and values (body and other
+    // name the pair once, for the event's own fields).
+    for (let id of [a, b]) {
+      if (id !== body && !(id.length > 0 && this.targets.has(id))) { continue }
+      let known = this.struckSpeeds.get(id)
+      if (known === undefined || speed > known) { this.struckSpeeds.set(id, speed) }
+    }
     let best = this.struckBest
     if (best === null || speed > best.speed) {
       let e = new SimEvent()

@@ -1481,6 +1481,23 @@ function partsKey(b: BodySpec): string {
     p.position.join(','), p.rotation.join(','), p.pattern.length > 0 ? p.color : '', p.pattern, p.color2].join('|')))
 }
 
+/**
+ * Whether two specs of one body are the same body to the physics: what it is (shape, model, die, sizes, outline, parts and
+ * where they sit), how it moves and its mass. What only shows (colours, pattern, rings, mark) is left out, as are the
+ * material and the watch, which the engine changes in place.
+ */
+export function samePhysicalBody(a: BodySpec, b: BodySpec): boolean {
+  return a.shape === b.shape && a.model === b.model && a.isDie === b.isDie && sameNumbers(a.dims, b.dims) &&
+    sameNumbers(a.points, b.points) && physicalPartsKey(a) === physicalPartsKey(b) && a.motion === b.motion &&
+    (a.player === null) === (b.player === null) && a.mass === b.mass
+}
+
+function physicalPartsKey(b: BodySpec): string {
+  if (b.parts.length === 0) { return '' }
+  return JSON.stringify(b.parts.map((p: BodySpec): string => [p.id, p.shape, p.dims.join(','), p.points.join(','),
+    p.position.join(','), p.rotation.join(',')].join('|')))
+}
+
 function partsMaterialsSame(a: BodySpec, b: BodySpec): boolean {
   if (a.parts.length !== b.parts.length) { return false }
   for (let i = 0; i < a.parts.length; i++) {
