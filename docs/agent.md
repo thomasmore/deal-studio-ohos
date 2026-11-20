@@ -114,8 +114,8 @@ launch flag, routes, page, controller tail, packaged synthetic GLBs and obsolete
 2026-11-19. Historical measurements and pre-removal SHA-256 provenance remain in
 `results/world-spike-phase0-2026-11-18.json`; the fixture generator is host-only and writes nothing by default.
 The product renderer and phase 1–3 suites remain. Host checks do not establish all 36 models working on-device,
-particle alpha blending or model shadows on-device, or native-memory behaviour; those remain subject to current
-device verification.
+particle alpha blending or model shadows on-device, or native-memory behaviour; what the phone runs of 2026-11-18/19
+did establish, and what they left open, is summarised in `docs/world-3d-verification.md`.
 
 ### A scene inside a screen
 

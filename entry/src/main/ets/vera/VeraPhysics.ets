@@ -807,6 +807,22 @@ export class FakePhys implements PhysEngine {
 
 // ---------------------------------------------------------------- WorldSim: the world's logic over an engine
 
+/** What WorldSim.apply does with the bodies diffWorld makes again (planRecreate). */
+class RecreatePlan {
+  /** Made again only for how they look: the engine keeps their bodies. */
+  inPlace: BodySpec[] = []
+  /** Made again in the engine too. */
+  rebuilt: BodySpec[] = []
+  /** Of those, loose ones that go on from their live state [pose, velocity]. */
+  kept: Map<string, number[]> = new Map<string, number[]>()
+}
+
+/** The kicks of one apply (giveKicks): the bodies kicked, and the throws to wait on, blasts' pushes added later. */
+class ThrowResult {
+  kicked: Set<string> = new Set<string>()
+  thrown: number = 0
+}
+
 /** Physics steps in fixed sixtieths of a second, at most this many per frame, from at most this much real time. */
 export const SIM_STEP_S: number = 1 / 60
 export const SIM_MAX_SUBSTEPS: number = 4
@@ -1288,7 +1304,11 @@ export class WorldSim {
     this.playerFlying = false
   }
 
-  /** Bring the engine from the world it had to next, by the diff between them (diffWorld). */
+  /**
+   * Bring the engine from the world it had to next, by the diff between them (diffWorld). The steps run in this order
+   * because each reads what the one before left: live poses are read before anything is removed, bodies are made before
+   * their poses, kicks and blasts are given, and resting bodies are put to sleep only after the throws are known.
+   */
   apply(diff: WorldDiff, next: WorldSpec): void {
     this.building = next
     // A step still running belongs to the world before this apply: finish it now, while its engine indices still name
@@ -1303,10 +1323,67 @@ export class WorldSim {
       this.buildGround(next)
       if (!first) { this.wakeResting() }
     }
-    let freed = new Set<number>()
     this.fromMissing = []
-    // Bodies made from another (scene.from) start in their parent's frame as it is now: taken before anything is removed,
-    // so a body broken into pieces in this same apply gives them where it was, how it went and how it turned.
+    let plan = this.planRecreate(diff)
+    let parents = this.parentsNow(diff)
+    let created = this.replaceBodies(diff, plan, parents)
+    this.restoreKept(plan.kept, next)
+    this.updateInPlace(diff, plan.inPlace)
+    let throws = this.giveKicks(diff)
+    let unrested = this.inBlastReach(diff, next, throws.kicked)
+    for (let x of diff.blast) {
+      throws.thrown += this.engine.explode(x.x, x.y, x.z, x.radius, x.strength)
+    }
+    this.startResting(next, created, unrested)
+    if (throws.thrown > 0) { this.beginThrow(throws.thrown) }
+    this.spec = next
+    this.indexWorld(next)
+    if (this.loose.length === 0) { this.settlePending = false }
+    this.awake = this.engine.awakeDynamic()
+    if (throws.thrown > 0) { this.lastKickAwake = this.awake }
+    this.shotsFlying = this.countFlying()
+  }
+
+  /**
+   * Which bodies diffWorld makes again are made again in the engine, and the live state the loose ones among them keep.
+   *
+   * Made again only for how it looks (a mark, a pattern, rings, a colour in a painted mesh): the renderer makes its node
+   * again, the engine keeps its body as it is -- velocity, sleep and a shot's gravity once it has touched something (a
+   * straight projectile made again would fly straight again). Only one the engine has, or it is made after all.
+   *
+   * A loose body made again (a new shape, the player only now) stays where the physics took it, not where it was built,
+   * facing the way it faced and going as it went. The player is stood upright: a character turns only about y, so a tilt
+   * kept now (a box that had tumbled onto its side) would be kept for good. Only a body that was loose before: one only
+   * now let go (static or held until this state) has no live pose of its own to keep -- kept, it would be put to sleep
+   * where it was built, hanging in the air, instead of falling from there.
+   */
+  private planRecreate(diff: WorldDiff): RecreatePlan {
+    let before = new Map<string, BodySpec>()
+    if (this.spec !== null) {
+      for (let b of (this.spec as WorldSpec).bodies) { before.set(b.id, b) }
+    }
+    let plan = new RecreatePlan()
+    for (let b of diff.recreate) {
+      let old = before.get(b.id)
+      if (old !== undefined && this.index.has(b.id) && samePhysicalBody(old, b)) {
+        plan.inPlace.push(b)
+        continue
+      }
+      plan.rebuilt.push(b)
+      if (b.motion !== 'loose' || old === undefined || old.motion !== 'loose') { continue }
+      let live = this.liveState(b.id)
+      if (live === null) { continue }
+      let pose = live.slice(0, 7)
+      plan.kept.set(b.id, (b.player !== null ? uprightPose(pose) : pose).concat(live.slice(7)))
+    }
+    return plan
+  }
+
+  /**
+   * Bodies made from another (scene.from) start in their parent's frame as it is now: taken before anything is removed,
+   * so a body broken into pieces in this same apply gives them where it was, how it went and how it turned.
+   */
+  private parentsNow(diff: WorldDiff): Map<string, number[]> {
     let parents = new Map<string, number[]>()
     for (let b of diff.create) {
       if (b.from === null) { continue }
@@ -1315,45 +1392,23 @@ export class WorldSim {
       let live = this.liveState(id)
       if (live !== null) { parents.set(id, live) }
     }
-    // A loose body made again (a new mark, a new shape, the player only now) stays where the physics took it, not where it
-    // was built, facing the way it faced and going as it went. The player is stood upright: a character turns only about
-    // y, so a tilt kept now (a box that had tumbled onto its side) would be kept for good. (Before this only the player
-    // was kept; any other loose body went back to where it was built.)
-    // Only a body that was loose before: one only now let go (static or held until this state) has no live pose of its own
-    // to keep -- kept, it would be put to sleep where it was built, hanging in the air, instead of falling from there.
-    let before = new Map<string, BodySpec>()
-    if (this.spec !== null) {
-      for (let b of (this.spec as WorldSpec).bodies) { before.set(b.id, b) }
-    }
-    // Made again only for how it looks (a mark, a pattern, rings, a colour in a painted mesh): the renderer makes its node
-    // again, the engine keeps its body as it is -- velocity, sleep and a shot's gravity once it has touched something
-    // (a straight projectile made again would fly straight again). Only one the engine has, or it is made after all.
-    let inPlace: BodySpec[] = []
-    let rebuilt: BodySpec[] = []
-    for (let b of diff.recreate) {
-      let old = before.get(b.id)
-      if (old !== undefined && this.index.has(b.id) && samePhysicalBody(old, b)) { inPlace.push(b) } else { rebuilt.push(b) }
-    }
-    let kept = new Map<string, number[]>()
-    for (let b of rebuilt) {
-      let old = before.get(b.id)
-      if (b.motion !== 'loose' || old === undefined || old.motion !== 'loose') { continue }
-      let live = this.liveState(b.id)
-      if (live === null) { continue }
-      let pose = live.slice(0, 7)
-      kept.set(b.id, (b.player !== null ? uprightPose(pose) : pose).concat(live.slice(7)))
-    }
+    return parents
+  }
+
+  /** Removes what goes and makes what comes; returns the bodies made new (not those keeping a live state). */
+  private replaceBodies(diff: WorldDiff, plan: RecreatePlan, parents: Map<string, number[]>): BodySpec[] {
+    let freed = new Set<number>()
     for (let id of diff.remove) { this.removeBody(id, freed) }
-    for (let b of rebuilt) { this.removeBody(b.id, freed) }
+    for (let b of plan.rebuilt) { this.removeBody(b.id, freed) }
     // A body to create that the engine already has: an apply that stopped half-way (the renderer's 3D side failed after
     // this ran) is given again from the spec before it. Made again, not twice -- a second body under one id would stay
     // in the engine, colliding, with nothing to draw it or remove it.
     for (let b of diff.create) { this.removeBody(b.id, freed) }
     if (this.held && freed.size > 0) { this.dropPoses(freed) }
     let created: BodySpec[] = []
-    for (let b of rebuilt) {
-      this.createBody(b, parents, kept.has(b.id))
-      if (!kept.has(b.id)) { created.push(b) }
+    for (let b of plan.rebuilt) {
+      this.createBody(b, parents, plan.kept.has(b.id))
+      if (!plan.kept.has(b.id)) { created.push(b) }
     }
     // Bodies made from others last, in build order, so a parent made in this apply is there for them.
     for (let b of diff.create) {
@@ -1366,12 +1421,16 @@ export class WorldSim {
       this.createBody(b, parents, false)
       created.push(b)
     }
+    return created
+  }
+
+  /** Bodies made again with a live state kept (planRecreate) go on from it. */
+  private restoreKept(kept: Map<string, number[]>, next: WorldSpec): void {
     kept.forEach((at: number[], id: string) => {
       let i = this.index.get(id)
       if (i === undefined) { return }
       this.engine.setPose(i, at[0], at[1], at[2], at[3], at[4], at[5], at[6])
-      let player = this.playerOf(next, id)
-      if (player) {
+      if (this.playerOf(next, id)) {
         // A character is woken where it stands, to settle on its feet; it keeps its velocity, never a tumble.
         this.engine.setVelocity(i, at[7], at[8], at[9], 0, 0, 0)
       } else if (Math.hypot(at[7], at[8], at[9]) < 1e-3 && Math.hypot(at[10], at[11], at[12]) < 1e-3) {
@@ -1380,6 +1439,10 @@ export class WorldSim {
         this.engine.setVelocity(i, at[7], at[8], at[9], at[10], at[11], at[12])
       }
     })
+  }
+
+  /** New materials and watches, bodies kept in place (planRecreate), and new poses of bodies the program places. */
+  private updateInPlace(diff: WorldDiff, inPlace: BodySpec[]): void {
     for (let b of diff.material.concat(inPlace)) {
       let i = this.index.get(b.id)
       if (i === undefined) { continue }
@@ -1395,8 +1458,11 @@ export class WorldSim {
       let i = this.index.get(b.id)
       if (i !== undefined) { this.placeBody(i, b) }
     }
-    let kicked = new Set<string>()
-    let thrown = 0
+  }
+
+  /** Kicks whose trigger changed: the bodies kicked, and how many of them are a throw to wait on (not the player). */
+  private giveKicks(diff: WorldDiff): ThrowResult {
+    let out = new ThrowResult()
     for (let b of diff.kick) {
       let i = this.index.get(b.id)
       if (i === undefined || b.kick === null || b.motion !== 'loose') { continue }
@@ -1405,11 +1471,11 @@ export class WorldSim {
         // The player's kick is a jump or a dash: no tumble, and not a throw to wait on (it walks on after it). Its
         // driving starts from that velocity and runs it out (drivePlayer), and frames run while it does.
         this.engine.setVelocity(i, k.vx, k.vy, k.vz, 0, 0, 0)
-        kicked.add(b.id)
+        out.kicked.add(b.id)
         this.playerKicked = b.id
         continue
       }
-      thrown++
+      out.thrown++
       if (b.isDie) {
         let v = dieThrow(k.vx, k.vy, k.vz, k.spin, this.draw(b.id + '#' + k.trigger.toString()))
         this.engine.setVelocity(i, v[0], v[1], v[2], v[3], v[4], v[5])
@@ -1418,43 +1484,57 @@ export class WorldSim {
         let w = k.spin * 2 * Math.PI
         this.engine.setVelocity(i, k.vx, k.vy, k.vz, axis[0] * w, axis[1] * w, axis[2] * w)
       }
-      kicked.add(b.id)
+      out.kicked.add(b.id)
     }
-    // A blast is a throw of whatever it pushes: settled is told once they have come to rest. What it pushes is not
-    // resting either -- put to sleep after it (restingAtStart), a body made in this same apply would lose the push.
-    // Within the radius as the engine reckons it (the centre of mass, here the pose), so the two agree.
+    return out
+  }
+
+  /**
+   * The bodies not to start resting: those kicked, and the loose ones a blast of this apply will push. A blast is a throw
+   * of whatever it pushes (settled is told once they have come to rest), and put to sleep after it (restingAtStart) a
+   * body made in this same apply would lose the push. Within the radius as the engine reckons it (the centre of mass,
+   * here the pose), so the two agree.
+   */
+  private inBlastReach(diff: WorldDiff, next: WorldSpec, kicked: Set<string>): Set<string> {
     let unrested = new Set<string>(kicked)
-    if (diff.blast.length > 0) {
-      for (let b of next.bodies) {
-        if (b.motion !== 'loose') { continue }
-        let live = this.liveState(b.id)
-        if (live === null) { continue }
-        for (let x of diff.blast) {
-          if (Math.hypot(live[0] - x.x, live[1] - x.y, live[2] - x.z) < x.radius) { unrested.add(b.id); break }
-        }
+    if (diff.blast.length === 0) { return unrested }
+    for (let b of next.bodies) {
+      if (b.motion !== 'loose') { continue }
+      let live = this.liveState(b.id)
+      if (live === null) { continue }
+      for (let x of diff.blast) {
+        if (Math.hypot(live[0] - x.x, live[1] - x.y, live[2] - x.z) < x.radius) { unrested.add(b.id); break }
       }
     }
-    for (let x of diff.blast) {
-      thrown += this.engine.explode(x.x, x.y, x.z, x.radius, x.strength)
-    }
+    return unrested
+  }
+
+  /** Bodies made standing as built start asleep (restingAtStart), but for those kicked or pushed now. */
+  private startResting(next: WorldSpec, created: BodySpec[], unrested: Set<string>): void {
     let resting = created.length > 0 ? restingAtStart(next, created, unrested, this.standing(next, created)) : []
     for (let id of resting) {
       let i = this.index.get(id)
       if (i !== undefined) { this.engine.sleep(i) }
     }
     this.restingCount = resting.length
-    if (thrown > 0) {
-      // A new throw: whatever the last one had not yet told is superseded, and this one settles once, after its bodies
-      // have been seen awake (see step).
-      this.events = this.events.filter((e: SimEvent): boolean => e.kind !== 'settled')
-      this.kickSerial++
-      this.lastKickBodies = thrown
-      this.settlePending = true
-      this.woke = false
-      this.stepsSinceKick = 0
-      this.kickAt = this.simTime
-    }
-    this.spec = next
+  }
+
+  /**
+   * A new throw: whatever the last one had not yet told is superseded, and this one settles once, after its bodies have
+   * been seen awake (see step).
+   */
+  private beginThrow(thrown: number): void {
+    this.events = this.events.filter((e: SimEvent): boolean => e.kind !== 'settled')
+    this.kickSerial++
+    this.lastKickBodies = thrown
+    this.settlePending = true
+    this.woke = false
+    this.stepsSinceKick = 0
+    this.kickAt = this.simTime
+  }
+
+  /** Which bodies are loose, kinematic, targets, shots and the player, as next has them. */
+  private indexWorld(next: WorldSpec): void {
     this.loose = []
     this.kinematic = []
     let player = ''
@@ -1481,10 +1561,6 @@ export class WorldSim {
     this.player = player
     if (this.playerKicked.length > 0 && this.playerKicked === player) { this.driving = true }
     this.playerKicked = ''
-    if (this.loose.length === 0) { this.settlePending = false }
-    this.awake = this.engine.awakeDynamic()
-    if (thrown > 0) { this.lastKickAwake = this.awake }
-    this.shotsFlying = this.countFlying()
   }
 
   /** Whether the body id is the player in spec. */
