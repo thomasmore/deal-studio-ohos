@@ -89,7 +89,7 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   assert.equal(w.follow.target, 'me', 'a world with a player and no camera follows it')
   assert.ok(w.follow.distance >= S.FOLLOW_MIN_BACK && w.follow.height >= S.FOLLOW_MIN_UP)
   const fixed = world([call('camera', 0, 3, 6, 0, 0, 0, false), call('player', box('me'), 3, '')])
-  assert.equal(fixed.follow, null, 'with the program\'s camera there is no follow')
+  assert.equal(fixed.follow.target, 'me', 'a scene.camera beside a player gives way: the camera follows the player'); assert.equal(fixed.camera, null)
   const chosen = world([call('follow', call('wander', box('cow'), 2, 1), 4, 2)])
   assert.deepEqual([chosen.follow.target, chosen.follow.distance, chosen.follow.height], ['cow', 4, 2], 'scene.follow on any body')
   const walker = world([call('path', box('w', 9, 0.5, 9), [0, 0, 2, 0], 1, false)]).bodies[0]
@@ -490,6 +490,127 @@ traps(() => world(Array.from({length: S.MAX_WORLD_ZONES + 1}, (_, i) => call('zo
   near(L.yawOf(up.slice(3)), 37, 1e-6, 'uprightPose keeps the heading')
   near(L.yawOf(P.uprightPose([0, 0, 0, ...look.quatXYZ(20, -120, 15)]).slice(3)), L.yawOf(look.quatXYZ(20, -120, 15)), 1e-6,
     'of a tipped body too')
+}
+
+// ---- the follow camera swings behind the player that walks, keeping its distance and height, and waits after a drag
+{
+  const spec = {target: 'me', distance: 4, height: 2}
+  const f = new L.Follower()
+  const pose = new look.CameraPose()
+  f.snap(pose, [0, 0.5, 0], 0, spec)
+  const flat0 = Math.hypot(f.offset[0], f.offset[2])
+  const up0 = f.offset[1]
+  // The body turns to face -z (heading 90): behind it is +z.
+  assert.equal(f.turnBehind(pose, 90, 1 / 60, false), false, 'standing, it does not swing')
+  near(Math.abs(f.yawGap(90)), 90, 1e-6, 'a quarter turn off behind')
+  for (let k = 0; k < 60; k++) f.turnBehind(pose, 90, 1 / 60, true)
+  const gap1 = Math.abs(f.yawGap(90))
+  assert.ok(gap1 < 90 * Math.exp(-1 / L.FOLLOW_TURN_S) + 1 && gap1 > 5, 'in a second it closes most of the gap, eased: ' + gap1.toFixed(1))
+  near(Math.hypot(f.offset[0], f.offset[2]), flat0, 1e-9, 'its distance along the ground is kept')
+  near(f.offset[1], up0, 1e-12, 'and its height')
+  for (let k = 0; k < 300; k++) f.turnBehind(pose, 90, 1 / 60, true)
+  assert.ok(Math.abs(f.yawGap(90)) < L.FOLLOW_BEHIND_DEG, 'it comes to stand behind it: ' + f.yawGap(90).toFixed(3))
+  near(pose.eye[2] - pose.look[2], flat0, 1e-3, 'behind a body facing -z is +z')
+  // A drag turns it away: it is held there for FOLLOW_HOLD_MS, then swings back.
+  f.turn(pose, Math.PI / 2, 0, 0.05)
+  const dragged = f.yawGap(90)
+  assert.ok(Math.abs(dragged) > 80, 'the drag turned it: ' + dragged.toFixed(1))
+  const holdFrames = Math.floor(L.FOLLOW_HOLD_MS / 1000 * 60) - 2
+  for (let k = 0; k < holdFrames; k++) assert.equal(f.turnBehind(pose, 90, 1 / 60, true), false, 'held after a drag (frame ' + k + ')')
+  near(f.yawGap(90), dragged, 1e-9, 'where the person put it')
+  for (let k = 0; k < 10; k++) f.turnBehind(pose, 90, 1 / 60, true)
+  assert.ok(Math.abs(f.yawGap(90)) < Math.abs(dragged), 'and after the hold it swings back')
+  // The hold counts down while the body stands, too.
+  f.turn(pose, 0.5, 0, 0.05)
+  for (let k = 0; k < 120; k++) f.turnBehind(pose, 90, 1 / 60, false)
+  assert.equal(f.turning(true), true, 'a hold runs out while the body stands')
+}
+
+// ---- the stick steers by the frame it was pushed in: held sideways under a camera that swings behind, no circle
+{
+  const P = loadVera('VeraPhysics')
+  const walk = (frozen) => {
+    const spec = world([call('floor', 'surface'), call('player', box('me', 0, 0.5, 0), 3, '')])
+    assert.ok(spec.follow !== null, 'the player is followed')
+    const sim = new P.WorldSim(new P.FakePhys())
+    sim.apply(S.diffWorld(null, spec), spec)
+    const f = new L.Follower()
+    const pose = look.followStart(look.followTarget(spec), spec.follow)
+    f.snap(pose, [0, 0.5, 0], 0, spec.follow)
+    const frame = new L.StickFrame()
+    const headings = []
+    for (let k = 0; k < 360; k++) {
+      // The stick pushed right all the time.
+      frame.push(pose, 1)
+      const d = frozen ? frame.direction(pose, 1, 0) : look.floorDirection(pose, 1, 0)
+      sim.setStick(d[0], d[2], 1)
+      sim.step(1000 / 60, k / 60)
+      const at = sim.poseOf('me')
+      f.step(pose, at.slice(0, 3), spec.follow, 1 / 60)
+      f.turnBehind(pose, L.yawOf(at.slice(3)), 1 / 60, sim.playerSpeedNow() > 0.3)
+      headings.push(L.yawOf(at.slice(3)))
+    }
+    return {headings, at: sim.poseOf('me')}
+  }
+  const held = walk(true)
+  const late = held.headings.slice(90)
+  const spread = Math.max(...late.map(h => Math.abs(L.turnDeg(late[0], h))))
+  assert.ok(spread < 3, 'pushed right, it walks one way while the camera swings behind it: heading varies ' + spread.toFixed(2) + ' deg')
+  near(L.turnDeg(held.headings[359], -90), 0, 3, 'the way right was when the push began (+z, heading -90): ' + held.headings[359].toFixed(1))
+  assert.ok(held.at[2] > 12, 'and it goes far along it: ' + held.at[2].toFixed(2))
+  // Steered by the camera as it is now, the same push walks it round in a circle: what the frozen frame is for.
+  const live = walk(false)
+  let turned = 0
+  for (let k = 1; k < live.headings.length; k++) turned += L.turnDeg(live.headings[k - 1], live.headings[k])
+  assert.ok(Math.abs(turned) > 180, 'steered by the live camera it turns on and on: ' + turned.toFixed(0) + ' deg')
+  // Let go, the frame goes; a drag while it is held takes the view as it is then.
+  const frame = new L.StickFrame()
+  const a = new look.CameraPose()
+  frame.push(a, 1)
+  const b = new look.CameraPose()
+  b.eye = [6, 3, 0]
+  assert.deepEqual(frame.direction(b, 1, 0).map(v => +v.toFixed(9)), look.floorDirection(a, 1, 0).map(v => +v.toFixed(9)), 'held: the first frame')
+  frame.refresh(b)
+  assert.deepEqual(frame.direction(b, 1, 0).map(v => +v.toFixed(9)), look.floorDirection(b, 1, 0).map(v => +v.toFixed(9)), 'a drag: the new view')
+  frame.push(b, 0)
+  assert.equal(frame.pose, null, 'let go, no frame')
+  frame.refresh(a)
+  assert.equal(frame.pose, null, 'and a drag with the stick let go keeps none')
+}
+
+// ---- a tap's ray: screenRay is the inverse of projectPoint
+{
+  const pose = new look.CameraPose()
+  pose.eye = [3, 4, 7]
+  pose.look = [-1, 0.5, 0]
+  for (const [w, h] of [[360, 640], [800, 400]]) {
+    for (const [x, y] of [[w / 2, h / 2], [10, 20], [w - 5, h - 7], [w * 0.3, h * 0.8]]) {
+      const [eye, dir] = look.screenRay(pose, w, h, x, y)
+      near(Math.hypot(...dir), 1, 1e-12, 'a unit direction')
+      assert.deepEqual(eye, pose.eye, 'from the eye')
+      for (const t of [0.5, 5, 40]) {
+        const back = look.projectPoint(pose, w, h, [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t])
+        near(back[0], x, 1e-6, 'lands back on x at ' + t + ' m')
+        near(back[1], y, 1e-6, 'lands back on y at ' + t + ' m')
+      }
+    }
+  }
+  const mid = look.screenRay(pose, 360, 640, 180, 320)[1]
+  const f = look.cameraBasis(pose)[0]
+  near(mid[0] * f[0] + mid[1] * f[1] + mid[2] * f[2], 1, 1e-12, 'the middle of the screen is straight ahead')
+}
+
+// ---- shots and pieces do not frame the world
+{
+  const base = [call('floor', 'surface'), box('crate', 0, 0.5, 0)]
+  const plain = look.worldBounds(world(base))
+  const shot = call('from', call('shoot', call('sphere', 'shot-1', 0.5, 0, 0, 0.1, 'ink'), 20, false), 'crate', 0)
+  const far = call('shoot', call('sphere', 'shot-2', 50, 3, 50, 0.1, 'ink'), 20, false)
+  const withShots = look.worldBounds(world([...base, shot, far]))
+  assert.deepEqual(withShots, plain, 'shots leave the bounds as they were')
+  assert.equal(look.worldFitPoints(world([...base, shot, far])).length, look.worldFitPoints(world(base)).length, 'and the fit points')
+  assert.equal(look.floorSize(world([...base, far])), look.floorSize(world(base)), 'and the floor')
+  assert.ok(look.framedOut(world([...base, far]).bodies.find(b => b.id === 'shot-2')), 'a shot is framed out')
 }
 
 console.log('locomotion-check ok')

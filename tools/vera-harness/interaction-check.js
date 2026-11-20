@@ -1,0 +1,710 @@
+// Shooting, breaking and blasts in the physics, on the host (WorldSim over FakePhys): where a body made from another
+// starts (resolveFrom, with w x r and an aim), pieces made from a body removed in the same apply, a shot that flies along
+// its +x, holds up nothing and stops where it leaves the world, struck told at most once a step and ten times a second,
+// for watched pairs only and once per pair in its cooldown, a body made again kept where the physics had it, settled
+// without shots and with pieces as 1, pieces awake from the start, a blast once per trigger, and FakePhys's own side of
+// the native contract (contact records of 6 with their point, the watched reserve, spin read back, kinds 4 and 5).
+'use strict'
+const assert = require('node:assert/strict')
+const {loadVera} = require('./source-loader')
+const {VeraNumberValue, VeraStringValue, VeraBooleanValue, VeraArrayValue} = loadVera('VeraInterpreter')
+const {UiHostEnvironment} = loadVera('VeraUi')
+const S = loadVera('VeraScene')
+const P = loadVera('VeraPhysics')
+const Sh = loadVera('VeraShapes')
+
+const FRAME_MS = 1000 / 60
+const host = new UiHostEnvironment()
+const call = (name, ...args) => host.invoke('std/scene', name, args.map(a => typeof a === 'number' ? new VeraNumberValue(a)
+  : typeof a === 'string' ? new VeraStringValue(a) : typeof a === 'boolean' ? new VeraBooleanValue(a) : a), false)
+const world = items => S.decodeScene(new VeraArrayValue(items))
+const near = (a, b, eps, msg) => assert.ok(Math.abs(a - b) <= eps, msg + ': ' + a + ' vs ' + b)
+const nearAll = (a, b, eps, msg) => { assert.equal(a.length, b.length, msg); a.forEach((v, i) => near(v, b[i], eps, msg + ' [' + i + ']')) }
+const yawQ = deg => [0, Math.sin(deg * Math.PI / 360), 0, Math.cos(deg * Math.PI / 360)]
+const run = (sim, n, t0 = 0) => { const told = []; for (let f = 0; f < n; f++) { sim.step(FRAME_MS, t0 + f / 60); told.push(...sim.takeEvents()); sim.takeBursts() } return told }
+const velocity = (engine, sim, id) => { const out = new Float32Array(6); engine.readVelocity(sim.index.get(id), out); return Array.from(out) }
+const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
+
+// ---- resolveFrom: the parent's frame, its velocity and spin, the burst, the shot, the aim
+{
+  // A parent at (1, 2, 3) turned 90 degrees about y (its +x is the world's -z), going (1, 0, 0), turning 2 rad/s about y.
+  const parent = [1, 2, 3, ...yawQ(90), 1, 0, 0, 0, 2, 0]
+  let [pose, v, w] = P.resolveFrom(parent, [1, 0, 0], [0, 0, 0], [], 0, 0)
+  nearAll(pose.slice(0, 3), [1, 2, 2], 1e-9, 'one metre ahead of the parent, in its frame')
+  nearAll(pose.slice(3), yawQ(90), 1e-9, 'turned as the parent is')
+  // v + w x r: r = (0, 0, -1), w x r = (2 * -1 - 0, 0, 0).
+  nearAll(v, [-1, 0, 0], 1e-9, 'the parent\'s velocity and its turn at that point')
+  nearAll(w, [0, 2, 0], 1e-9, 'and its spin')
+  ;[pose, v] = P.resolveFrom(parent, [1, 0, 0], [0, 0, 0], [], 3, 0)
+  nearAll(v, [-1, 0, -3], 1e-9, 'burst pushes it straight out of the parent\'s centre')
+  ;[pose, v] = P.resolveFrom(parent, [0, 0, 0], [0, 0, 0], [], 3, 0)
+  nearAll(v, [1, 3, 0], 1e-9, 'a piece at the centre is burst upward')
+  ;[pose, v] = P.resolveFrom(parent, [0.5, 0, 0], [0, 0, 0], [], 0, 10)
+  // r = (0, 0, -0.5): v + w x r = (1 - 1, 0, 0), and 10 along the parent's +x, the world's -z.
+  nearAll(v, [0, 0, -10], 1e-9, 'a shot goes at its speed along its own +x, carried by the parent')
+  // A rod laid along the way it flies (turned 90 about z, so its own +x is up) still goes the way the shooter faces: the
+  // shot's own turn is only how it looks. Found on the phone: a generated robot fired its bolts straight up.
+  ;[pose, v] = P.resolveFrom([0, 0.5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0], [0.3, 0, 0], [0, 0, 90], [], 0, 14)
+  nearAll(v, [14, 0, 0], 1e-9, 'a turned shot from a body goes the way the body faces')
+  nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 1, 0], 1e-9, 'and keeps its own turn for how it looks')
+  ;[pose, v] = P.resolveFrom(null, [0, 0, 0], [0, 90, 0], [], 0, 5)
+  nearAll(v, [0, 0, -5], 1e-9, 'alone and unaimed, a shot goes along its own +x')
+  // A shot built inside its shooter is moved ahead along +x, clear of it; one already clear is left where it is.
+  nearAll(P.clearOfShooter([0.2, -0.3, 0], [0.1, 0.1, 0.1], [1.2, 1, 0.4], false), [0.6 + 0.05 + P.SHOT_CLEARANCE_M, -0.3, 0], 1e-9, 'moved ahead of the shooter')
+  nearAll(P.clearOfShooter([0.9, -0.3, 0], [0.1, 0.1, 0.1], [1.2, 1, 0.4], false), [0.9, -0.3, 0], 0, 'already clear')
+  nearAll(P.clearOfShooter([0.2, 0.8, 0], [0.1, 0.1, 0.1], [1.2, 1, 0.4], false), [0.2, 0.8, 0], 0, 'above the shooter is clear')
+  near(P.clearOfShooter([0.2, 0, 0.1], [0.1, 0.1, 0.1], [1.2, 1, 0.4], true)[0], Math.hypot(0.6, 0.2) + 0.05 + P.SHOT_CLEARANCE_M, 1e-9, 'aimed: past its widest reach')
+  ;[pose] = P.resolveFrom(parent, [0, 0, 0], [0, 0, 90], [], 0, 0)
+  // The parent's turn, then its own: its +x (turned 90 about z, so up) stays up; its +y (turned to -x) is the parent's -x, +z.
+  nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 1, 0], 1e-9, 'its own turn is taken in the parent\'s frame (q . localRot)')
+  nearAll(Sh.turnPoint(pose.slice(3), 0, 1, 0), [0, 0, 1], 1e-9, 'its own turn is taken in the parent\'s frame (q . localRot)')
+  // No parent: the numbers are where it is, nothing inherited, no burst.
+  ;[pose, v, w] = P.resolveFrom(null, [4, 5, 6], [0, 0, 0], [], 7, 0)
+  nearAll(pose, [4, 5, 6, 0, 0, 0, 1], 1e-9, 'with no parent it stands where its numbers say'); nearAll(v, [0, 0, 0], 0, 'still'); nearAll(w, [0, 0, 0], 0, 'unturned')
+  // Aim without a parent: +x turned to the point.
+  ;[pose, v] = P.resolveFrom(null, [0, 1, 0], [0, 0, 0], [3, 1, -3], 0, 5)
+  const ahead = Sh.turnPoint(pose.slice(3), 1, 0, 0)
+  nearAll(ahead, [Math.SQRT1_2, 0, -Math.SQRT1_2], 1e-9, '+x points at the aim')
+  nearAll(v, [5 * Math.SQRT1_2, 0, -5 * Math.SQRT1_2], 1e-9, 'and a shot goes there')
+  // Aim with a parent: the offset is taken in the parent's place turned to the point, and the body points from where it is.
+  const still = [0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+  ;[pose, v] = P.resolveFrom(still, [1, 0, 0], [0, 0, 0], [0, 1, -5], 0, 10)
+  nearAll(pose.slice(0, 3), [0, 1, -1], 1e-9, 'one metre towards the aim from the parent')
+  nearAll(v, [0, 0, -10], 1e-9, 'flying at the aim')
+  ;[pose, v] = P.resolveFrom(still, [1, 0.5, 0], [0, 0, 0], [0, 1, -5], 0, 10)
+  nearAll(pose.slice(0, 3), [0, 1.5, -1], 1e-9, 'an offset up stays up in the turned frame')
+  const dir = [0 - 0, 1 - 1.5, -5 + 1], len = Math.hypot(...dir)
+  nearAll(v, dir.map(x => 10 * x / len), 1e-9, 'and the shot still goes at the aim point')
+  // The aimed pitch: up and down too.
+  const qa = P.lookQuat(1, 1, 0)
+  nearAll(Sh.turnPoint(qa, 1, 0, 0), [Math.SQRT1_2, Math.SQRT1_2, 0], 1e-9, 'lookQuat pitches up'); nearAll(Sh.turnPoint(qa, 0, 0, 1), [0, 0, 1], 1e-9, 'without a roll')
+}
+
+// ---- a body broken in an apply: its pieces come from where it is, going as it goes; awake; none missing
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const vase = () => call('target', call('loose', call('box', 'v', 0, 0.5, 0, 0.6, 1, 0.6, 'accent'), 2))
+  const w1 = world([call('floor', 'surface'), vase()])
+  sim.apply(S.diffWorld(null, w1), w1)
+  assert.equal(fakeBody(fake, sim, 'v').awake, false, 'the vase starts asleep on the floor')
+  // Moved and turned by the physics, then going and spinning when it breaks.
+  const i = sim.index.get('v')
+  fake.setPose(i, 2, 0.5, 1, ...yawQ(30))
+  fake.setVelocity(i, 0.5, 0, 0, 0, 1.5, 0)
+  const live = sim.poseOf('v')
+  const broken = [call('floor', 'surface'), ...call('split', vase(), 4, 2).elements]
+  const w2 = world(broken)
+  const d = S.diffWorld(w1, w2)
+  assert.deepEqual(d.remove, ['v']); assert.deepEqual(d.create.map(b => b.id), ['v-1', 'v-2', 'v-3', 'v-4'])
+  sim.apply(d, w2)
+  assert.deepEqual(sim.fromMissing, [], 'the parent removed in the same apply is found')
+  for (const b of w2.bodies) {
+    const [pose, v] = P.resolveFrom([...live, 0.5, 0, 0, 0, 1.5, 0], b.position, b.rotation, [], 2, 0)
+    nearAll(sim.poseOf(b.id), pose, 1e-5, b.id + ' is where the vase was, in its frame')
+    nearAll(velocity(fake, sim, b.id), [...v, 0, 1.5, 0], 1e-5, b.id + ' goes as the vase went, plus its burst')
+    const r = [pose[0] - live[0], pose[1] - live[1], pose[2] - live[2]]
+    const out = r.map(x => x / Math.hypot(...r))
+    // w x r for w = (0, 1.5, 0): (1.5 * rz, 0, -1.5 * rx).
+    nearAll(v, [0.5 + 1.5 * r[2] + 2 * out[0], 2 * out[1], -1.5 * r[0] + 2 * out[2]], 1e-9, b.id + ': v + w x r + burst')
+    assert.equal(fakeBody(fake, sim, b.id).awake, true, b.id + ' is not put to sleep where it starts')
+  }
+  assert.equal(sim.restingCount, 0, 'no piece rests at the start')
+  // They fly apart and come to rest; the settle that follows a throw counts every piece as knocked.
+  const kicked = world([...broken, call('kick', call('die', 'd', 3, 0.15, 3, 0.3, 'white'), 1, 0, 2, 0, 1)])
+  sim.apply(S.diffWorld(w2, kicked), kicked)
+  const told = run(sim, 600)
+  const settled = told.filter(e => e.kind === 'settled')
+  assert.equal(settled.length, 1, 'one settle')
+  const at = id => settled[0].values[settled[0].bodies.indexOf(id)]
+  for (const id of ['v-1', 'v-2', 'v-3', 'v-4']) assert.equal(at(id), 1, id + ' counts as knocked')
+  assert.ok(at('d') >= 1 && at('d') <= 6, 'the die still tells its face')
+}
+
+// ---- a parent that is nowhere: placed by its own numbers (a piece where its parent was built), and said so
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const w = world([call('floor', 'surface'), call('from', call('box', 'x', 1, 2, 3, 0.2, 0.2, 0.2, 'ink'), 'nobody', 5),
+    ...call('split', call('box', 'gone', 5, 0.5, 0, 1, 1, 1, 'ink'), 2, 0).elements])
+  const logged = []
+  const info = console.info
+  console.info = m => logged.push(m)
+  sim.apply(S.diffWorld(null, w), w)
+  console.info = info
+  assert.deepEqual(sim.fromMissing, ['x', 'gone-1', 'gone-2'])
+  assert.ok(logged.some(m => m === 'VERA-WORLD from missing parent=nobody id=x'), 'logged: ' + logged)
+  nearAll(sim.poseOf('x').slice(0, 3), [1, 2, 3], 1e-6, 'a plain from with no parent stands where its numbers say')
+  nearAll(velocity(fake, sim, 'x').slice(0, 3), [0, 0, 0], 1e-9, 'and has no burst: there is no centre to burst from')
+  near(sim.poseOf('gone-1')[0] + sim.poseOf('gone-2')[0], 10, 1e-6, 'the pieces where their parent was built')
+  // A new parent or burst later moves nothing.
+  const w2 = world([call('floor', 'surface'), call('from', call('box', 'x', 1, 2, 3, 0.2, 0.2, 0.2, 'ink'), 'other', 9),
+    ...call('split', call('box', 'gone', 5, 0.5, 0, 1, 1, 1, 'ink'), 2, 0).elements])
+  assert.ok(S.diffWorld(w, w2).empty())
+}
+
+// ---- a shot: along its +x, without gravity until it touches, not waited on, through no thin wall, stopped at the bound
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const shot = (id, x, y, speed, arc = false) => call('shoot', call('sphere', id, x, y, 0, 0.05, 'accent'), speed, arc)
+  const w1 = world([call('floor', 'surface'), call('kick', call('die', 'd', 0, 0.15, 3, 0.3, 'white'), 1, 0, 3, 0, 2), shot('s1', 0, 1, 20)])
+  sim.apply(S.diffWorld(null, w1), w1)
+  assert.equal(fakeBody(fake, sim, 's1').projectile, true, 'a shot is a projectile in the engine')
+  assert.ok(sim.needsFrames() && sim.shotsFlying === 1, 'a shot flying needs frames')
+  run(sim, 15)
+  const p = sim.poseOf('s1')
+  near(p[0], 5, 0.2, 'it went 5 m along +x in a quarter second'); near(p[1], 1, 1e-6, 'and did not fall: no gravity until it touches')
+  // The die settles while the shot is still flying: a shot holds up nothing, and is not among what settled.
+  let settled = null
+  for (let f = 0; f < 400 && !settled; f++) { sim.step(FRAME_MS, f / 60); settled = sim.takeEvents().find(e => e.kind === 'settled') || null }
+  assert.ok(settled, 'the throw settles')
+  assert.deepEqual(settled.bodies, ['d'], 'without the shot')
+  // A shot that leaves the world stops where it is, told once, and is never sent back.
+  for (let f = 0; f < 600; f++) sim.step(FRAME_MS, f / 60)
+  const out = sim.poseOf('s1')
+  assert.ok(out[0] > 99, 'it went past the bound: ' + out[0])
+  run(sim, 60)
+  nearAll(sim.poseOf('s1'), out, 1e-9, 'and stays where it stopped, not where it was made')
+  assert.equal(sim.shotsFlying, 0); assert.equal(fake.awakeDynamic(), 0)
+  assert.ok(!sim.needsFrames(), 'nothing flying, nothing awake: no frames')
+
+  // A shot at 30 m/s does not pass through a wall 2 cm thick; once it has touched it falls.
+  const fake2 = new P.FakePhys()
+  const sim2 = new P.WorldSim(fake2)
+  const w2 = world([call('floor', 'surface'), call('box', 'wall', 3, 1, 0, 0.02, 2, 2, 'ink'), call('target', call('box', 'behind', 4, 0.25, 0, 0.5, 0.5, 0.5, 'ink')),
+    shot('s2', 0, 1, 30)])
+  sim2.apply(S.diffWorld(null, w2), w2)
+  const told = run(sim2, 120)
+  let most = -Infinity
+  const pose = sim2.poseOf('s2')
+  most = Math.max(most, pose[0])
+  assert.ok(pose[0] < 3, 'the shot stayed this side of the wall: ' + pose[0])
+  assert.ok(pose[1] < 0.2, 'and fell after it touched it: y ' + pose[1])
+  assert.ok(!told.some(e => e.kind === 'struck' && e.body === 'behind'), 'what is behind the wall was not struck')
+  const hitWall = told.filter(e => e.kind === 'struck' && e.body === 's2')
+  assert.equal(hitWall.length, 1, 'a shot hitting a body is told once, with the shot as body: ' + JSON.stringify(told.filter(e => e.kind === 'struck')))
+  assert.equal(hitWall[0].other, 'wall'); near(hitWall[0].x, 2.99 - 0.02, 0.06, 'where it touched the wall')
+  assert.ok(!told.some(e => e.kind === 'struck' && e.other === '' && e.body === 's2'), 'a shot on the ground is not told')
+
+  // An arc shot falls from the start.
+  const fake3 = new P.FakePhys()
+  const sim3 = new P.WorldSim(fake3)
+  const w3 = world([call('floor', 'surface'), shot('s3', 0, 5, 10, true)])
+  sim3.apply(S.diffWorld(null, w3), w3)
+  run(sim3, 30)
+  assert.ok(sim3.poseOf('s3')[1] < 4, 'an arc shot falls: ' + sim3.poseOf('s3')[1])
+}
+
+// ---- struck: watched pairs only, harder than 1.5 m/s, once a step, ten a second, a pair once in 0.3 s
+{
+  const fake = new P.FakePhys()
+  let records = []
+  fake.drainContacts = out => { records.forEach((v, k) => { out[k] = v }); const n = records.length / 6; return n }
+  const sim = new P.WorldSim(fake)
+  const items = [call('floor', 'surface')]
+  for (let k = 0; k < 40; k++) items.push(call('target', call('box', 't' + k, k * 2, 0.5, 0, 1, 1, 1, 'ink')))
+  items.push(call('box', 'plain', 0, 0.5, 9, 1, 1, 1, 'ink'), call('box', 'plain2', 3, 0.5, 9, 1, 1, 1, 'ink'))
+  items.push(call('loose', call('box', 'ball', 0, 0.5, -9, 1, 1, 1, 'ink'), 1))
+  items.push(call('shoot', call('sphere', 'shot', 0, 3, -20, 0.05, 'ink'), 1, true))
+  const w = world(items)
+  sim.apply(S.diffWorld(null, w), w)
+  const ix = id => sim.index.get(id)
+  const ground = Array.from({length: 64}, (_, i) => i).find(i => sim.idAt(i) === '' && fake.bodies[i] && fake.bodies[i].alive)
+  const rec = (a, b, speed, x = 0, y = 0, z = 0) => [a === '' ? ground : ix(a), b === '' ? ground : ix(b), speed, x, y, z]
+  const struck = (frames, make) => {
+    const told = []
+    for (let f = 0; f < frames; f++) {
+      records = make(f).flat()
+      sim.step(FRAME_MS, f / 60)
+      for (const e of sim.takeEvents()) if (e.kind === 'struck') told.push([f, e])
+    }
+    records = []
+    return told
+  }
+  // Not watched, or too soft: nothing.
+  assert.deepEqual(struck(10, () => [rec('plain', 'plain2', 9), rec('t0', 'ball', 1.4), rec('shot', '', 9)]), [], 'unwatched pairs, a soft knock and a shot on the ground')
+  run(sim, 30)
+  // A target knocked by a body: body the target, other the body, the contact point.
+  let told = struck(1, () => [rec('ball', 't1', 4, 1.5, 0.7, -0.2)])
+  assert.equal(told.length, 1)
+  assert.deepEqual([told[0][1].body, told[0][1].other, told[0][1].speed, told[0][1].x, told[0][1].y].map(v => typeof v === 'number' ? +v.toFixed(3) : v),
+    ['t1', 'ball', 4, 1.5, 0.7], 'struck: the target, what hit it, how hard, where')
+  run(sim, 30, 1)
+  // Several at once: one struck, the hardest pair, every target in bodies hardest first.
+  told = struck(1, () => [rec('t2', 'ball', 3), rec('ball', 't3', 6), rec('t4', '', 2), rec('t3', 'plain', 5)])
+  assert.equal(told.length, 1, 'one struck a step')
+  assert.deepEqual([told[0][1].body, told[0][1].other], ['t3', 'ball'])
+  assert.deepEqual(told[0][1].bodies, ['t3', 't2', 't4']); assert.deepEqual(told[0][1].values.map(v => +v.toFixed(3)), [6, 3, 2])
+  assert.equal(told[0][1].bodies.includes('ball'), false, 'only what was struck, not what struck it')
+  run(sim, 30, 2)
+  // A new target knocked every step: at most ten a second, the rest merged into the next.
+  told = struck(120, f => [rec('t' + (5 + (f % 30)), 'ball', 2 + f % 3)])
+  assert.ok(told.length >= 18 && told.length <= 21, 'ten a second over two seconds: ' + told.length)
+  for (let k = 1; k < told.length; k++) assert.ok(told[k][0] - told[k - 1][0] >= 5, 'at least a tenth of a second apart: ' + told.map(t => t[0]))
+  assert.ok(told.slice(1).every(t => t[1].bodies.length >= 5), 'what waited is told with the next: ' + told.map(t => t[1].bodies.length))
+  run(sim, 30, 4)
+  // One pair knocking every step: told once each 0.3 s.
+  told = struck(60, () => [rec('t36', 'ball', 3)])
+  assert.ok(told.length >= 3 && told.length <= 4, 'one pair, at most once each 0.3 s: ' + told.map(t => t[0]))
+  for (let k = 1; k < told.length; k++) assert.ok(told[k][0] - told[k - 1][0] >= 17, 'the pair\'s cooldown: ' + told.map(t => t[0]))
+  run(sim, 30, 6)
+  // A target on the ground, and a shot on a body.
+  told = struck(1, () => [rec('', 't37', 3)])
+  assert.deepEqual([told[0][1].body, told[0][1].other], ['t37', ''], 'a target falling hard: other is the ground')
+  run(sim, 30, 7)
+  told = struck(1, () => [rec('plain', 'shot', 8)])
+  assert.deepEqual([told[0][1].body, told[0][1].other], ['shot', 'plain'], 'a shot on a body that is no target: body the shot')
+  // A target no longer: not told.
+  run(sim, 30, 8)
+  const w2 = world(items.map(t => t.thing.id === 't38' ? call('box', 't38', 76, 0.5, 0, 1, 1, 1, 'ink') : t))
+  const d = S.diffWorld(w, w2)
+  assert.deepEqual(d.material.map(b => b.id), ['t38'])
+  sim.apply(d, w2)
+  assert.equal(fakeBody(fake, sim, 't38').watched, false, 'unwatched in the engine')
+  assert.deepEqual(struck(1, () => [rec('ball', 't38', 9)]), [], 'and its knocks are not told')
+  // Frames go on while a struck waits.
+  records = []
+}
+
+// ---- a loose body made again stays where the physics had it, going as it went; at rest it stays asleep
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const scene = (mark, mass = 1) => {
+    let a = call('loose', call('box', 'a', 0, 0.25, 0, 0.5, 0.5, 0.5, 'ink'), mass)
+    let b = call('loose', call('box', 'b', 5, 0.25, 0, 0.5, 0.5, 0.5, 'ink'), 1)
+    if (mark) { a = call('mark', a, 'accent'); b = call('mark', b, 'accent') }
+    return world([call('floor', 'surface'), a, b])
+  }
+  let spec = scene(false)
+  sim.apply(S.diffWorld(null, spec), spec)
+  fake.setVelocity(sim.index.get('a'), 3, 0, 0, 0, 0, 0)
+  run(sim, 10)
+  const here = sim.poseOf('a')
+  const going = velocity(fake, sim, 'a')
+  assert.ok(here[0] > 0.3 && going[0] > 1, 'a slides along')
+  const restB = sim.poseOf('b')
+  const next = scene(true, 2)
+  const d = S.diffWorld(spec, next)
+  assert.deepEqual(d.recreate.map(b => b.id), ['a', 'b'], 'a mark and a mass make them again')
+  sim.apply(d, next)
+  nearAll(sim.poseOf('a'), here, 1e-6, 'made again, it is where it was, not where it was built')
+  nearAll(velocity(fake, sim, 'a').slice(0, 3), going.slice(0, 3), 1e-6, 'and goes on as it went')
+  nearAll(sim.poseOf('b'), restB, 1e-6, 'the one at rest stays put')
+  assert.equal(fakeBody(fake, sim, 'b').awake, false, 'asleep')
+}
+
+// ---- a blast: once per change of trigger, every loose body within its radius pushed away; settled follows
+{
+  const fake = new P.FakePhys()
+  let calls = 0
+  const explode = fake.explode.bind(fake)
+  fake.explode = (...a) => { calls++; return explode(...a) }
+  const sim = new P.WorldSim(fake)
+  const scene = trigger => world([call('floor', 'surface'), call('blast', 'bomb', trigger, 0, 0, 0, 3, 6),
+    ...[[1, 0], [-1, 0], [0, 2], [5, 0]].map(([x, z], k) => call('loose', call('box', 'c' + k, x, 0.25, z, 0.5, 0.5, 0.5, 'ink'), 1)),
+    call('box', 'fixed', 0, 0.25, -1, 0.5, 0.5, 0.5, 'ink')])
+  let spec = scene(0)
+  sim.apply(S.diffWorld(null, spec), spec)
+  run(sim, 10)
+  assert.equal(calls, 0, 'trigger 0: nothing')
+  let next = scene(1)
+  sim.apply(S.diffWorld(spec, next), next); spec = next
+  assert.equal(calls, 1, 'a new trigger: one blast')
+  const v = id => velocity(fake, sim, id)
+  assert.ok(v('c0')[0] > 3 && v('c1')[0] < -3 && v('c2')[2] > 1, 'pushed away from it: ' + [v('c0'), v('c1'), v('c2')].map(a => a.slice(0, 3).map(x => x.toFixed(2))).join(' | '))
+  near(Math.hypot(...v('c0').slice(0, 3)), 6 * (1 - Math.hypot(1, 0.25) / 3), 1e-4, 'by strength * (1 - d / r)')
+  assert.ok(Math.hypot(...v('c2').slice(0, 3)) < Math.hypot(...v('c0').slice(0, 3)), 'less further out')
+  nearAll(v('c3').slice(0, 3), [0, 0, 0], 1e-9, 'beyond the radius: untouched')
+  assert.deepEqual(sim.poseOf('fixed').slice(0, 3), [0, 0.25, -1], 'a fixed body is not moved')
+  sim.apply(S.diffWorld(spec, scene(1)), scene(1))
+  assert.equal(calls, 1, 'the same trigger: no second blast')
+  const told = run(sim, 600)
+  assert.equal(told.filter(e => e.kind === 'settled').length, 1, 'what it threw settles once')
+}
+
+// ---- FakePhys's side of the native contract
+{
+  // Contact records of six, with the point where they touch, and spin read back when there is room for it.
+  const fp = new P.FakePhys()
+  fp.setGravity(-9.81)
+  fp.setBound(-5, 99, 99)
+  const floor = fp.addBox(50, 0.5, 50, P.PHYS_STATIC)
+  fp.setPose(floor, 0, -0.5, 0, 0, 0, 0, 1)
+  const a = fp.addBox(0.1, 0.1, 0.1, P.PHYS_DYNAMIC)
+  fp.setPose(a, 2, 0.3, 1, 0, 0, 0, 1)
+  fp.setVelocity(a, 0, -3, 0, 0, 4, 0)
+  for (let k = 0; k < 10; k++) fp.step(1 / 60, 1)
+  const out = new Float32Array(6 * 16)
+  const n = fp.drainContacts(out)
+  assert.equal(n, 1, 'one contact begun')
+  assert.deepEqual([out[0], out[1]].sort(), [floor, a].sort())
+  near(out[3], 2, 0.11, 'the point is under the box'); near(out[4], 0, 0.02, 'on the floor'); near(out[5], 1, 0.11, 'z')
+  const vel = new Float32Array(6)
+  fp.setVelocity(a, 1, 2, 3, 4, 5, 6)
+  assert.equal(fp.readVelocity(a, vel), 1); assert.deepEqual(Array.from(vel), [1, 2, 3, 4, 5, 6], 'v and then w')
+  const three = new Float32Array(3).fill(9)
+  assert.equal(fp.readVelocity(a, three), 1); assert.deepEqual(Array.from(three), [1, 2, 3], 'no room, no spin')
+  assert.equal(fp.readVelocity(a, new Float32Array(2)), 0, 'fewer than 3: nothing')
+  // Kinds 4 and 5: dynamic, watched, not counted awake.
+  const s4 = fp.addSphere(0.05, P.PHYS_PROJECTILE)
+  const s5 = fp.addSphere(0.05, P.PHYS_PROJECTILE_ARC)
+  fp.setPose(s4, 10, 5, 0, 0, 0, 0, 1); fp.setPose(s5, 12, 5, 0, 0, 0, 0, 1)
+  fp.step(1 / 60, 1)
+  assert.equal(fp.bodies[s4].watched && fp.bodies[s5].watched, true, 'projectiles are watched')
+  assert.equal(fp.bodies[s4].awake && fp.bodies[s5].awake, true)
+  const awake = fp.awakeDynamic()
+  fp.remove(s4); fp.remove(s5)
+  assert.equal(fp.awakeDynamic(), awake, 'and not among awakeDynamic')
+  // The watched reserve: a thousand bodies landing at once fill the ordinary records; the watched one still gets in.
+  const many = new P.FakePhys()
+  many.setGravity(-9.81)
+  many.setBound(-5, 200, 200)
+  const g = many.addBox(150, 0.5, 150, P.PHYS_STATIC)
+  many.setPose(g, 0, -0.5, 0, 0, 0, 0, 1)
+  const ids = []
+  for (let k = 0; k < 1000; k++) {
+    const i = many.addBox(0.1, 0.1, 0.1, P.PHYS_DYNAMIC)
+    many.setPose(i, (k % 40) * 0.5 - 10, 0.09, Math.floor(k / 40) * 0.5 - 6, 0, 0, 0, 1)
+    ids.push(i)
+  }
+  // The last in the order the records are written (keys sort as strings: '0:999' last), so the reserve is what lets it in.
+  const watched = ids[998]
+  many.watch(watched, 1)
+  many.step(1 / 60, 1)
+  const buf = new Float32Array(6 * P.CONTACT_CAP)
+  const got = many.drainContacts(buf)
+  assert.equal(got, P.CONTACT_CAP - P.CONTACT_WATCH_RESERVE + 1, 'ordinary contacts stop at 960 records, the watched one is kept: ' + got)
+  let found = false
+  for (let k = 0; k < got; k++) if (buf[6 * k] === watched || buf[6 * k + 1] === watched) found = true
+  assert.ok(found, 'the watched body\'s contact is among them')
+  assert.equal(many.drainContacts(buf), 0, 'drained')
+  // explode counts what it pushed: dynamic bodies, characters and projectiles; not fixed ones.
+  const ex = new P.FakePhys()
+  ex.setGravity(0)
+  const d1 = ex.addBox(0.1, 0.1, 0.1, P.PHYS_DYNAMIC); ex.setPose(d1, 1, 0, 0, 0, 0, 0, 1)
+  const c1 = ex.addBox(0.1, 0.1, 0.1, P.PHYS_CHARACTER); ex.setPose(c1, 0, 1, 0, 0, 0, 0, 1)
+  const p1 = ex.addSphere(0.1, P.PHYS_PROJECTILE); ex.setPose(p1, 0, 0, 1, 0, 0, 0, 1)
+  const f1 = ex.addBox(0.1, 0.1, 0.1, P.PHYS_STATIC); ex.setPose(f1, -1, 0, 0, 0, 0, 0, 1)
+  const k1 = ex.addBox(0.1, 0.1, 0.1, P.PHYS_KINEMATIC); ex.setPose(k1, 0, -1, 0, 0, 0, 0, 1)
+  assert.equal(ex.explode(0, 0, 0, 2, 4), 3)
+  ex.readVelocity(d1, vel); nearAll(Array.from(vel).slice(0, 3), [2, 0, 0], 1e-6, 'dv = strength * (1 - d / r), outward')
+}
+
+{
+  const Particles = loadVera('VeraParticles')
+  const Noise = loadVera('VeraNoise')
+  const scene = (trigger, at = [1, 2, 3], radius = 2, strength = 4) => world([call('blast', 'bomb', trigger, ...at, radius, strength)])
+  const zero = scene(0)
+  const one = scene(1)
+  assert.deepEqual(S.burstsForDiff(S.diffWorld(null, zero)), [])
+  assert.deepEqual(S.burstsForDiff(S.diffWorld(one, scene(1, [7, 8, 9], 3, 5))), [])
+  for (const diff of [S.diffWorld(null, one), S.diffWorld(zero, one), S.diffWorld(one, zero)]) {
+    const requests = S.burstsForDiff(diff)
+    assert.deepEqual(requests.map(r => [r.kind, r.origin, r.color]),
+      [['debris', [1, 2, 3], '#a68b6b'], ['smoke', [1, 2, 3], '#7f8895']])
+    assert.deepEqual(requests, S.burstsForDiff(diff))
+    assert.notEqual(requests[0].seed, requests[1].seed)
+    assert.ok(requests.every(r => r instanceof Particles.ParticleBurst))
+    assert.notEqual(requests[0].origin, requests[1].origin)
+    requests[0].origin[0] = 99
+    assert.deepEqual(S.burstsForDiff(diff)[0].origin, [1, 2, 3])
+  }
+  assert.notEqual(S.burstsForDiff(S.diffWorld(null, one))[0].seed, S.burstsForDiff(S.diffWorld(one, zero))[0].seed)
+  const direct = (id, trigger, kind = 'confetti') => world([call('burst', id, trigger, 4, 5, 6, kind, 'warning')])
+  const diff = S.diffWorld(null, direct('party', 1))
+  const [request] = S.burstsForDiff(diff)
+  assert.deepEqual({...request}, {kind: 'confetti', seed: Noise.surfaceSeed(JSON.stringify(['party', 1, 'confetti'])), origin: [4, 5, 6], color: 'warning'})
+  assert.notEqual(request.seed, S.burstsForDiff(S.diffWorld(null, direct('other', 1)))[0].seed)
+  assert.notEqual(request.seed, S.burstsForDiff(S.diffWorld(null, direct('party', 2)))[0].seed)
+  assert.notEqual(request.seed, S.burstsForDiff(S.diffWorld(null, direct('party', 1, 'smoke')))[0].seed)
+  const pool = new Particles.ParticlePool()
+  pool.emit(request)
+  assert.ok(pool.needsFrames() && pool.particleCount() > 0, 'a direct effect needs no physics or bodies')
+  pool.advance(0, 0)
+  pool.advance(10, 0)
+  assert.equal(pool.needsFrames(), false, 'expired particles release frames')
+  assert.equal(pool.particleCount(), 0)
+  const sim = new P.WorldSim(new P.FakePhys())
+  sim.apply(S.diffWorld(null, one), one)
+  assert.deepEqual(sim.takeBursts(), [], 'apply does not replay blast particles')
+  sim.reset()
+  sim.apply(diff, direct('party', 1))
+  assert.deepEqual(sim.takeBursts(), [], 'renderer owns explicit effects too')
+  const both = world([call('blast', 'bomb', 1, 1, 2, 3, 2, 4), call('burst', 'party', 1, 4, 5, 6, 'confetti', 'warning')])
+  assert.deepEqual(S.burstsForDiff(S.diffWorld(null, both)).map(r => r.kind), ['debris', 'smoke', 'confetti'])
+}
+
+{
+  const Particles = loadVera('VeraParticles')
+  const fake = new P.FakePhys()
+  let records = []
+  fake.drainContacts = out => { out.set(records); const n = records.length / P.CONTACT_RECORD; records = []; return n }
+  const sim = new P.WorldSim(fake)
+  const items = [call('floor', 'surface'),
+    call('shoot', call('sphere', 'shot', -30, 5, 0, 0.05, 'ink'), 1, false),
+    call('box', 'plain', 30, 0.5, 0, 1, 1, 1, 'ink'), call('box', 'plain2', 35, 0.5, 0, 1, 1, 1, 'ink')]
+  for (let k = 0; k < 40; k++) items.push(call('target', call('box', 't' + k, k * 2 - 40, 0.5, 10, 1, 1, 1, 'ink')))
+  const spec = world(items)
+  const apply = () => sim.apply(S.diffWorld(null, spec), spec)
+  apply()
+  const rec = (a, b, speed, at = [1, 2, 3]) => [a === '' ? sim.ground[0] : sim.index.get(a), b === '' ? sim.ground[0] : sim.index.get(b), speed, ...at]
+  const step = contacts => { records = contacts.flat(); sim.step(FRAME_MS, sim.simTime); return sim.takeEvents().filter(e => e.kind === 'struck') }
+  assert.deepEqual(step([rec('plain', 'plain2', 9), rec('t0', 'plain', 1.4), rec('shot', '', 9)]), [])
+  assert.deepEqual(sim.takeBursts(), [], 'unwatched, soft and shot-ground contacts are excluded')
+  let told = step([rec('shot', 't0', 2, [1, 2, 3]), rec('t1', 'plain', 20, [4, 5, 6])])
+  assert.equal(told.length, 1)
+  assert.equal(told[0].body, 't1', 'harder nonshot owns the VM aggregate')
+  let requests = sim.takeBursts()
+  assert.deepEqual(requests.map(r => [r.kind, r.origin, r.color]),
+    [['sparks', [1, 2, 3], '#ffc45c'], ['dust', [4, 5, 6], '#a89b84']], 'the aggregate cannot hide the shot visual')
+  const firstSeed = requests[0].seed
+  assert.deepEqual(sim.takeBursts(), [], 'draining transfers the queue once')
+  told = step([rec('t0', 'shot', 30), rec('t2', 'shot', 2, [7, 8, 9])])
+  assert.equal(told.length, 0, 'VM event rate limit still applies')
+  requests = sim.takeBursts()
+  assert.deepEqual(requests.map(r => [r.kind, r.origin]), [['sparks', [7, 8, 9]]], 'either contact side detects a shot; pair cooldown is shared')
+  step([rec('t3', 'plain', Particles.DUST_MIN_SPEED - 0.01), rec('t4', 'plain', Particles.DUST_MIN_SPEED), rec('', 't5', 4)])
+  assert.deepEqual(sim.takeBursts().map(r => [r.kind, r.color]), [['dust', '#a89b84'], ['dust', '#a89b84']], 'dust threshold is inclusive, target-ground remains accepted')
+  for (let f = 0; f < 20; f++) step([])
+  step([rec('t0', 'shot', 2, [3, 2, 1])])
+  requests = sim.takeBursts()
+  assert.equal(requests.length, 1, 'pair emits again after cooldown')
+  assert.notEqual(requests[0].seed, firstSeed)
+  sim.reset()
+  apply()
+  step([rec('shot', 't0', 2, [1, 2, 3])])
+  requests = sim.takeBursts()
+  assert.equal(requests[0].seed, firstSeed, 'reset makes the contact sequence deterministic')
+  step(Array.from({length: 39}, (_, k) => rec('shot', 't' + (k + 1), 2, [k + 1, 2, 3])))
+  requests = sim.takeBursts()
+  assert.equal(requests.length, Particles.MAX_BURSTS)
+  assert.deepEqual(requests.map(r => r.origin[0]), Array.from({length: Particles.MAX_BURSTS}, (_, k) => 40 - Particles.MAX_BURSTS + k), 'oldest pending requests are evicted')
+  const pool = new Particles.ParticlePool()
+  for (const request of requests) pool.emit(request)
+  assert.ok(pool.particleCount() <= Particles.MAX_PARTICLES)
+  assert.ok(pool.burstCount() <= Particles.MAX_BURSTS)
+  sim.reset()
+  apply()
+  step([rec('shot', 't0', 2, [11, 12, 13])])
+  const empty = world([])
+  sim.apply(S.diffWorld(spec, empty), empty)
+  assert.equal(fake.awakeDynamic(), 0)
+  assert.equal(sim.hasLoose(), false)
+  assert.equal(sim.needsFrames(), true, 'pending particles keep frames alive even after every body is collected')
+  requests = sim.takeBursts()
+  assert.deepEqual(requests[0].origin, [11, 12, 13], 'contact world position was captured before bodies were removed')
+  assert.equal(sim.needsFrames(), false, 'drained particles do not keep simulation frames alive')
+  for (const request of requests) pool.emit(request)
+  assert.equal(pool.needsFrames(), true, 'renderer pool keeps particles awake independently')
+  pool.advance(0)
+  pool.advance(10)
+  assert.equal(pool.needsFrames(), false, 'expired particles do not keep renderer frames alive')
+  sim.reset()
+  apply()
+  step([rec('shot', 't0', 2)])
+  sim.reset()
+  assert.deepEqual(sim.takeBursts(), [], 'reset clears unconsumed requests')
+  assert.equal(sim.needsFrames(), false)
+}
+
+{
+  const M = loadVera('VeraModels')
+  const name = M.modelNames()[0]
+  const shape = M.modelShape(name, 2)
+  const model = (id = 'model', x = 0, y = 0) => call('model', id, name, x, y, 0, 2)
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const spec = world([call('floor', 'surface'), call('loose', model(), 2)])
+  sim.apply(S.diffWorld(null, spec), spec)
+  const b = spec.bodies[0]
+  assert.equal(b.shape, 'hull')
+  assert.deepEqual(b.points, shape.points)
+  nearAll(sim.poseOf('model').slice(0, 3), [0, shape.dims[1] / 2, 0], 1e-6, 'model body is centred above support bottom')
+  assert.equal(fakeBody(fake, sim, 'model').awake, false, 'grounded loose model starts resting through the hull path')
+  const records = new Sh.PartRecords()
+  Sh.addPartRecords(records, b.shape, b.dims, b.points, 0, 0, 0, [0, 0, 0, 1])
+  assert.equal(records.records[0], 3, 'existing native hull type is used')
+  assert.deepEqual(records.points, shape.points)
+  const tilted = world([call('floor', 'surface'), call('loose', call('turn',
+    call('model', 'tree', 'treeSmall', 0, -0.10631207277372601, 0, 2), 0, 0, 30), 1)])
+  const tree = tilted.bodies[0]
+  const hullBounds = Sh.partBounds(tree.shape, tree.dims, tree.points, tree.position, tree.rotation)
+  nearAll(P.specBounds(tree), hullBounds, 1e-9, 'model bounds use transformed hull points')
+  near(P.specBounds(tree)[1], 0, 1e-9, 'tilted tree hull touches the floor')
+  const before = P.bodyRecords(tree)
+  assert.deepEqual(before.points, tree.points, 'tilted model collision points remain body-local')
+  sim.apply(S.diffWorld(spec, tilted), tilted)
+  nearAll(sim.poseOf('tree').slice(0, 3), tree.position, 1e-6, 'physics keeps the grounded model origin')
+  assert.equal(fakeBody(fake, sim, 'tree').awake, false, 'grounded tilted model starts asleep')
+  assert.deepEqual(P.bodyRecords(tree), before, 'bounds do not alter physics shape records')
+  for (const selected of M.modelNames()) {
+    const sample = world([call('turn', call('model', 'sample', selected, 2, 3, -4, 2), 20, 35, 30)]).bodies[0]
+    const untouched = JSON.stringify(sample)
+    nearAll(P.specBounds(sample), Sh.partBounds(sample.shape, sample.dims, sample.points, sample.position, sample.rotation),
+      1e-9, selected + ' transformed hull bounds')
+    assert.equal(JSON.stringify(sample), untouched, 'bounds leave model data unchanged')
+  }
+  const parent = [1, 2, 3, ...yawQ(90), 0, 0, 0, 0, 0, 0]
+  const from = world([call('from', model('child', 3, 0.2), 'parent', 0)]).bodies[0]
+  const [pose] = P.resolveFrom(parent, from.position, from.rotation, [], 0, 0)
+  nearAll(pose.slice(0, 3), [1, 2.2 + shape.dims[1] / 2, 0], 1e-6, 'from uses converted model centre offset in parent frame')
+  nearAll(Sh.turnPoint(pose.slice(3), 1, 0, 0), [0, 0, -1], 1e-6, 'model front follows parent +x without a second asset yaw')
+  const placed = world([call('box', 'parent', 0, 1, 0, 0.2, 0.2, 0.2, 'ink'),
+    call('from', model('child', 3, 0.2), 'parent', 0)])
+  sim.apply(S.diffWorld(tilted, placed), placed)
+  assert.deepEqual(sim.fromMissing, [])
+  nearAll(sim.poseOf('child').slice(0, 3), [3, 1.2 + shape.dims[1] / 2, 0], 1e-6, 'WorldSim creates model hull in the parent frame')
+}
+
+// Two targets knocking together are both struck: both in bodies and values; body and other name the pair once.
+{
+  const fake = new P.FakePhys()
+  let records = []
+  fake.drainContacts = out => { out.set(records); const n = records.length / P.CONTACT_RECORD; records = []; return n }
+  const sim = new P.WorldSim(fake)
+  const spec = world([call('floor', 'surface'), call('target', call('loose', call('box', 'a', -3, 0.5, 0, 1, 1, 1, 'ink'), 1)),
+    call('target', call('loose', call('box', 'b', 3, 0.5, 0, 1, 1, 1, 'ink'), 1))])
+  sim.apply(S.diffWorld(null, spec), spec)
+  records = [sim.index.get('a'), sim.index.get('b'), 10, 0, 0.5, 0]
+  sim.step(FRAME_MS, sim.simTime)
+  const [told] = sim.takeEvents().filter(e => e.kind === 'struck')
+  assert.ok(told, 'a target-target knock is told')
+  assert.deepEqual([told.body, told.other], ['a', 'b'])
+  assert.deepEqual([...told.bodies].sort(), ['a', 'b'], 'both targets are struck')
+  assert.deepEqual(told.values, [10, 10])
+}
+
+// A shot that has touched something falls; given a mark (made again only for how it looks) it keeps falling: the engine
+// keeps the body, so a straight projectile does not fly straight again.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const shotOf = () => call('shoot', call('sphere', 'shot', -2, 1, 0, 0.1, 'ink'), 10, false)
+  const wall = () => call('box', 'wall', 0, 1, 0, 0.2, 2, 2, 'ink')
+  const a = world([call('floor', 'surface'), wall(), shotOf()])
+  sim.apply(S.diffWorld(null, a), a)
+  for (let f = 0; f < 30; f++) sim.step(FRAME_MS, f / 60)
+  const gravity = () => fake.bodies[sim.index.get('shot')].gravityFactor
+  assert.equal(gravity(), 1, 'the shot falls once it has hit the wall')
+  const index = sim.index.get('shot')
+  const b = world([call('floor', 'surface'), wall(), call('mark', shotOf(), 'accent')])
+  const d = S.diffWorld(a, b)
+  assert.deepEqual(d.recreate.map(x => x.id), ['shot'], 'the renderer makes the marked shot again')
+  sim.apply(d, b)
+  assert.equal(sim.index.get('shot'), index, 'the engine keeps the same body')
+  assert.equal(gravity(), 1, 'and it goes on falling')
+  // A real change of the body (its size) is made again in the engine too.
+  const c = world([call('floor', 'surface'), wall(), call('mark', call('shoot', call('sphere', 'shot', -2, 1, 0, 0.2, 'ink'), 10, false), 'accent')])
+  sim.apply(S.diffWorld(b, c), c)
+  assert.ok(S.samePhysicalBody(b.bodies.find(x => x.id === 'shot'), c.bodies.find(x => x.id === 'shot')) === false)
+}
+
+// A blast and a body made in the same apply: the body, standing as built, is not put to sleep after the push.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const a = world([call('floor', 'surface'), call('blast', 'bang', 0, 0, 0, 0, 3, 10)])
+  sim.apply(S.diffWorld(null, a), a)
+  const b = world([call('floor', 'surface'), call('blast', 'bang', 1, 0, 0, 0, 3, 10),
+    call('loose', call('box', 'crate', 1, 0.5, 0, 1, 1, 1, 'ink'), 1), call('loose', call('box', 'far', 8, 0.5, 0, 1, 1, 1, 'ink'), 1)])
+  sim.apply(S.diffWorld(a, b), b)
+  const v = new Float32Array(6)
+  fake.readVelocity(sim.index.get('crate'), v)
+  assert.ok(Math.hypot(v[0], v[1], v[2]) > 1, 'the crate keeps the blast push: ' + Array.from(v.slice(0, 3)))
+  assert.equal(sim.restingCount, 1, 'a body out of reach of the blast still starts resting')
+}
+
+// A loose body at rest made again as another shape is not put to sleep where the old one rested: it settles from there.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const crate = size => world([call('floor', 'surface'), call('loose', call('box', 'r', 0, 0.5, 0, size, size, size, 'ink'), 1)])
+  const a = crate(1)
+  sim.apply(S.diffWorld(null, a), a)
+  assert.equal(fakeBody(fake, sim, 'r').awake, false, 'the crate starts resting')
+  const b = crate(0.4)
+  sim.apply(S.diffWorld(a, b), b)
+  near(sim.poseOf('r')[1], 0.5, 1e-6, 'made again where it was')
+  assert.equal(fakeBody(fake, sim, 'r').awake, true, 'but awake: asleep it would hang 0.3 m above the floor')
+  run(sim, 240)
+  near(sim.poseOf('r')[1], 0.2, 0.02, 'it comes down onto the floor')
+  // The same shape made again (a new mass) at rest stays asleep where it is.
+  const c = world([call('floor', 'surface'), call('loose', call('box', 'r', 0, 0.5, 0, 0.4, 0.4, 0.4, 'ink'), 3)])
+  sim.apply(S.diffWorld(b, c), c)
+  assert.equal(fakeBody(fake, sim, 'r').awake, false, 'a new mass alone keeps it asleep')
+}
+
+// An aimed body is built turned to its aim; settled compares it with that, not with its unaimed rotation.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const crate = call('aim', call('loose', call('box', 'c', 0, 0.25, 0, 0.5, 0.5, 0.5, 'ink'), 1), 0, 0.25, -5)
+  const a = world([call('floor', 'surface'), crate, call('die', 'd', 3, 0.15, 3, 0.3, 'white')])
+  sim.apply(S.diffWorld(null, a), a)
+  const b = world([call('floor', 'surface'), crate, call('kick', call('die', 'd', 3, 0.15, 3, 0.3, 'white'), 1, 0, 2, 0, 1)])
+  sim.apply(S.diffWorld(a, b), b)
+  const settled = run(sim, 600).filter(e => e.kind === 'settled')
+  assert.equal(settled.length, 1, 'the throw settles')
+  assert.equal(settled[0].values[settled[0].bodies.indexOf('c')], 0, 'the aimed crate nothing touched is not knocked over')
+}
+
+// A piece made again without a live pose of its own (the engine lost it: an apply that stopped half-way), whose parent
+// goes in the same apply, is placed from the parent as the physics had it.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const parent = call('loose', call('box', 'p', 0, 0.5, 0, 1, 1, 1, 'ink'), 1)
+  const piece = size => call('from', call('box', 'k', 1, 0, 0, size, size, size, 'ink'), 'p', 0)
+  const a = world([call('floor', 'surface'), parent, piece(0.2)])
+  sim.apply(S.diffWorld(null, a), a)
+  fake.setPose(sim.index.get('p'), 3, 0.5, 0, 0, 0, 0, 1)
+  fake.remove(sim.index.get('k')); sim.index.delete('k')
+  const b = world([call('floor', 'surface'), piece(0.3)])
+  const d = S.diffWorld(a, b)
+  assert.deepEqual(d.remove, ['p']); assert.deepEqual(d.recreate.map(x => x.id), ['k'])
+  sim.apply(d, b)
+  assert.deepEqual(sim.fromMissing, [], 'its parent, removed in this apply, is found')
+  nearAll(sim.poseOf('k').slice(0, 3), [4, 0.5, 0], 1e-6, 'one metre along the parent from where the physics had it')
+}
+
+// A blast that reaches only the player begins no throw (settled never tells the player), and the player runs out the push.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const scene = trigger => world([call('floor', 'surface'), call('blast', 'bang', trigger, 0, 0, 0, 3, 8),
+    call('player', call('box', 'me', 1, 0.5, 0, 0.5, 1, 0.5, 'ink'), 2, ''),
+    call('loose', call('box', 'far', 9, 0.25, 0, 0.5, 0.5, 0.5, 'ink'), 1)])
+  const a = scene(0)
+  sim.apply(S.diffWorld(null, a), a)
+  run(sim, 30)
+  const kicks = sim.kickSerial
+  const b = scene(1)
+  sim.apply(S.diffWorld(a, b), b)
+  assert.equal(sim.kickSerial, kicks, 'no throw for a push of the player alone')
+  assert.ok(velocity(fake, sim, 'me')[0] > 1, 'the player is pushed away')
+  run(sim, 2)
+  assert.ok(velocity(fake, sim, 'me')[0] > 1, 'and is not stopped by its own driving the next step')
+  assert.equal(run(sim, 300).filter(e => e.kind === 'settled').length, 0, 'nothing settles: nothing was thrown')
+}
+
+// FakePhys: a shot stopped at the bound and then knocked moves, and is stopped again while it is still outside.
+{
+  const fp = new P.FakePhys()
+  fp.setBound(-10, 20, 20)
+  const s = fp.addSphere(0.1, P.PHYS_PROJECTILE)
+  fp.setPose(s, 30, 1, 0, 0, 0, 0, 1)
+  fp.step(1 / 60, 1)
+  assert.equal(fp.bodies[s].frozen, true, 'outside the bound it stops')
+  fp.wake(fp.bodies[s])
+  fp.bodies[s].v = [1, 0, 0]
+  fp.step(1 / 60, 1)
+  assert.equal(fp.bodies[s].frozen, true, 'knocked, it is stopped again')
+  assert.equal(fp.awakeDynamic(), 0)
+  const out = new Float32Array(16)
+  fp.step(1 / 60, 1)
+  assert.equal(fp.readAwake(out), 0, 'and is no longer reported awake')
+}
+
+console.log('interaction-check ok')

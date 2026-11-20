@@ -3,8 +3,11 @@
 //
 // Units are metres, seconds and kilograms; quaternions are x, y, z, w; y is up. A body is named
 // by a dense index that is reused after remove(). Bodies are static (0), dynamic (1), kinematic (2)
-// or a character (3): a dynamic body that stays upright, turns only about y and is driven (drive()).
-// Nothing here is thread-safe except the contact buffer: call it from one thread.
+// or a character (3): a dynamic body that stays upright, turns only about y and is driven (drive()). A projectile (4)
+// is a dynamic body cast along its motion (Jolt's LinearCast, so a fast one does not pass through a thin wall), without
+// gravity until it first touches something; a projectile with an arc (5) is the same with gravity from the start. Both
+// are watched (see watch()) and are never sent home by the world bound: one leaving it stops where it is.
+// Nothing here is thread-safe except the contact buffer and the touch / watch flags: call it from one thread.
 #pragma once
 
 #include <Jolt/Jolt.h>
@@ -35,7 +38,7 @@ JPH_SUPPRESS_WARNINGS
 
 namespace vphys {
 
-enum Kind { kStatic = 0, kDynamic = 1, kKinematic = 2, kCharacter = 3 };
+enum Kind { kStatic = 0, kDynamic = 1, kKinematic = 2, kCharacter = 3, kProjectile = 4, kProjectileArc = 5 };
 
 namespace layers {
 constexpr JPH::ObjectLayer kNonMoving = 0;
@@ -118,11 +121,13 @@ public:
         JoltOnce();
         maxBodies = std::max(maxBodies, 16);
         touching_.reset(new std::atomic<uint8_t>[maxBodies]);
+        watched_.reset(new std::atomic<uint8_t>[maxBodies]);
         touchCount_ = static_cast<size_t>(maxBodies);
         for (size_t i = 0; i < touchCount_; i++) {
             touching_[i].store(0, std::memory_order_relaxed);
+            watched_[i].store(0, std::memory_order_relaxed);
         }
-        contacts_.setTouching(touching_.get(), touchCount_);
+        contacts_.setFlags(touching_.get(), watched_.get(), touchCount_);
         temp_ = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
         jobs_ = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
                                                            std::max(threads, 0));
@@ -152,6 +157,9 @@ public:
         }
         bodies_.clear();
         free_.clear();
+        for (size_t i = 0; i < touchCount_; i++) {
+            watched_[i].store(0, std::memory_order_relaxed);
+        }
         reported_.clear();
         lastActive_.clear();
         contacts_.clear();
@@ -164,7 +172,7 @@ public:
         }
     }
 
-    // A dynamic body below minY, or beyond +-halfX / +-halfZ, goes back to its creation pose.
+    // A dynamic body below minY, or beyond +-halfX / +-halfZ, goes back to its creation pose; a projectile stops there.
     void setBound(float minY, float halfX, float halfZ)
     {
         minY_ = minY;
@@ -263,6 +271,9 @@ public:
         }
         Destroy(bodies_[i]);
         bodies_[i].alive = false;
+        bodies_[i].projectile = false;
+        bodies_[i].gravityOff = false;
+        SetWatched(i, false);
         free_.push_back(i);
     }
 
@@ -327,17 +338,74 @@ public:
         }
     }
 
-    // The linear velocity of one body (m/s) into out3; false when there is no such body.
-    bool readVelocity(int i, float *out3) const
+    // The linear velocity of one body (m/s) into out[0..2] and, when n >= 6, its angular velocity (rad/s, about the
+    // world axes) into out[3..5]. Never writes more than n floats; false (nothing written) when there is no such body
+    // or n < 3.
+    bool readVelocity(int i, float *out, size_t n = 3) const
     {
-        if (!Valid(i)) {
+        if (!Valid(i) || out == nullptr || n < 3) {
             return false;
         }
         JPH::Vec3 v = BI().GetLinearVelocity(bodies_[i].id);
-        out3[0] = v.GetX();
-        out3[1] = v.GetY();
-        out3[2] = v.GetZ();
+        out[0] = v.GetX();
+        out[1] = v.GetY();
+        out[2] = v.GetZ();
+        if (n >= 6) {
+            JPH::Vec3 w = BI().GetAngularVelocity(bodies_[i].id);
+            out[3] = w.GetX();
+            out[4] = w.GetY();
+            out[5] = w.GetZ();
+        }
         return true;
+    }
+
+    // Marks (on != 0) or unmarks a body of any kind as watched: a contact it takes part in is kept in the contact
+    // buffer's last kWatchReserve places, which ordinary contacts never fill. Projectiles start watched.
+    void watch(int i, int on)
+    {
+        if (Valid(i)) {
+            SetWatched(i, on != 0);
+        }
+    }
+    bool watched(int i) const
+    {
+        return Valid(i) && static_cast<size_t>(i) < touchCount_ && watched_[i].load(std::memory_order_relaxed) != 0;
+    }
+
+    // A blast at c: every dynamic body (a character and a projectile included) whose centre of mass is within radius
+    // gets a velocity change of strength * (1 - d / radius) m/s away from c (straight up for one at c), whatever its
+    // mass, and is woken with its sleep cap restarted. Returns how many bodies were pushed.
+    int explode(float cx, float cy, float cz, float radius, float strength)
+    {
+        if (!system_ || !(radius > 0) || !std::isfinite(radius) || !std::isfinite(strength) ||
+            !std::isfinite(cx + cy + cz)) {
+            return 0;
+        }
+        JPH::Vec3 c(cx, cy, cz);
+        int n = 0;
+        for (size_t i = 0; i < bodies_.size(); i++) {
+            Slot &s = bodies_[i];
+            if (!s.alive || s.kind != kDynamic) {
+                continue;
+            }
+            JPH::Vec3 d = JPH::Vec3(BI().GetCenterOfMassPosition(s.id)) - c;
+            float len = d.Length();
+            if (!(len < radius)) {
+                continue;
+            }
+            JPH::Vec3 dir = len > 1e-4f ? d / len : JPH::Vec3(0, 1, 0);
+            float dv = strength * (1.0f - len / radius);
+            const JPH::Body *b = system_->GetBodyLockInterfaceNoLock().TryGetBody(s.id);
+            float invMass = b && b->GetMotionPropertiesUnchecked() ? b->GetMotionPropertiesUnchecked()->GetInverseMass() : 0;
+            if (!(invMass > 0)) {
+                continue;
+            }
+            BI().AddImpulse(s.id, dir * (dv / invMass));
+            BI().ActivateBody(s.id);
+            s.awakeFor = 0;
+            n++;
+        }
+        return n;
     }
 
     // Puts a dynamic body to sleep where it is, as if it had come to rest there: it stays put until
@@ -371,6 +439,14 @@ public:
             touching_[i].store(0, std::memory_order_relaxed);
         }
         system_->Update(dt, std::max(substeps, 1), temp_.get(), jobs_.get());
+        // A projectile flies straight until it first touches something; from then on it falls as anything does.
+        for (size_t i = 0; i < bodies_.size() && i < touchCount_; i++) {
+            Slot &s = bodies_[i];
+            if (s.alive && s.gravityOff && touching_[i].load(std::memory_order_relaxed) != 0) {
+                BI().SetGravityFactor(s.id, 1.0f);
+                s.gravityOff = false;
+            }
+        }
         RollingResistance(dt);
         std::vector<int> moved;
         ApplyBound(moved);
@@ -446,8 +522,9 @@ public:
         return true;
     }
 
-    // Triples [a, b, approachSpeed] of contacts begun since the last drain; at most cap triples.
-    // What the buffer could not hold is counted in droppedContacts().
+    // Records of kContactRecord floats [a, b, approachSpeed, px, py, pz] of contacts begun since the last drain, at most
+    // cap records: a and b are the two bodies' indices (every body has one, the ground included; the order is Jolt's),
+    // p is the world contact point (on a's surface). What the buffer could not hold is counted in droppedContacts().
     int drainContacts(float *out, int cap) { return contacts_.drain(out, cap); }
     uint32_t droppedContacts() const { return contacts_.dropped(); }
 
@@ -461,8 +538,9 @@ public:
         int n = 0;
         for (const JPH::BodyID &id : active) {
             int idx = IndexOf(id);
-            // A character is the person's to move: one walking about never keeps a throw from settling.
-            if (idx >= 0 && bodies_[idx].kind == kDynamic && !bodies_[idx].character) {
+            // A character is the person's to move: one walking about never keeps a throw from settling. Nor does a
+            // projectile in flight: nothing waits for a shot to land.
+            if (idx >= 0 && bodies_[idx].kind == kDynamic && !bodies_[idx].character && !bodies_[idx].projectile) {
                 n++;
             }
         }
@@ -471,7 +549,6 @@ public:
 
 private:
     static constexpr float kSleepCapSeconds = 8.0f;
-    static constexpr size_t kContactCap = 1024;
     // Half-extent below which a moving body is cast along its motion (a sheet 2 cm thick or thinner).
     static constexpr float kThinHalf = 0.01f;
     // Rolling and spinning resistance. Jolt has neither, so a ball rolls on, a snowman on its side rolls in circles and
@@ -482,6 +559,11 @@ private:
     static constexpr float kRollDecel = 1.0f;
 
 public:
+    // The contact buffer holds kContactCap records between drains; ordinary contacts stop at kContactCap - kWatchReserve,
+    // so a contact with a watched body still finds room during a collapse.
+    static constexpr size_t kContactCap = 1024;
+    static constexpr size_t kWatchReserve = 64;
+    static constexpr int kContactRecord = 6;
     static constexpr int kMaxHullPoints = 128;
     static constexpr int kMaxParts = 32;
     static constexpr int kPartRecord = 12;
@@ -495,6 +577,8 @@ private:
         float awakeFor = 0;  // seconds awake in a row, for the sleep cap
         bool rolls = false;  // has a round side: a sphere, a cylinder, or parts with one of them
         bool character = false;  // driven (kCharacter at creation): upright, turning about y only
+        bool projectile = false;  // kProjectile / kProjectileArc at creation: cast, watched, stopped by the bound
+        bool gravityOff = false;  // a kProjectile that has touched nothing yet
         float rollRadius = 0.05f;  // its smallest half-extent: how far its surface is from its centre, for rolling
         float home[7] = {0, 0, 0, 0, 0, 0, 1};
     };
@@ -507,23 +591,27 @@ private:
             Touch(b1, b2);
             JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
             float speed = (b1.GetPointVelocity(p) - b2.GetPointVelocity(p)).Dot(m.mWorldSpaceNormal);
+            size_t limit = Watched(b1) || Watched(b2) ? kContactCap : kContactCap - kWatchReserve;
             std::lock_guard<std::mutex> lock(mutex_);
-            if (items_.size() >= kContactCap) {
+            if (items_.size() >= limit) {
                 dropped_++;
                 return;
             }
             items_.push_back({static_cast<float>(b1.GetUserData()), static_cast<float>(b2.GetUserData()),
-                              std::fabs(speed)});
+                              std::fabs(speed), static_cast<float>(p.GetX()), static_cast<float>(p.GetY()),
+                              static_cast<float>(p.GetZ())});
         }
         void OnContactPersisted(const JPH::Body &b1, const JPH::Body &b2, const JPH::ContactManifold &,
                                 JPH::ContactSettings &) override
         {
             Touch(b1, b2);
         }
-        // Where the bodies touching in this step are marked, one flag per body index (called from the job threads).
-        void setTouching(std::atomic<uint8_t> *flags, size_t count)
+        // Where the bodies touching in this step are marked (from the job threads), and which bodies are watched (read
+        // there), one flag per body index.
+        void setFlags(std::atomic<uint8_t> *touching, std::atomic<uint8_t> *watched, size_t count)
         {
-            touching_ = flags;
+            touching_ = touching;
+            watched_ = watched;
             touchCount_ = count;
         }
         int drain(float *out, int cap)
@@ -531,9 +619,10 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             int n = static_cast<int>(std::min(items_.size(), static_cast<size_t>(std::max(cap, 0))));
             for (int i = 0; i < n; i++) {
-                out[i * 3] = items_[i].a;
-                out[i * 3 + 1] = items_[i].b;
-                out[i * 3 + 2] = items_[i].speed;
+                const Item &it = items_[static_cast<size_t>(i)];
+                float *o = out + static_cast<size_t>(i) * kContactRecord;
+                o[0] = it.a; o[1] = it.b; o[2] = it.speed;
+                o[3] = it.px; o[4] = it.py; o[5] = it.pz;
             }
             dropped_ += static_cast<uint32_t>(items_.size() - n);
             items_.clear();
@@ -560,9 +649,15 @@ private:
                 }
             }
         }
+        bool Watched(const JPH::Body &b) const
+        {
+            JPH::uint64 i = b.GetUserData();
+            return i < touchCount_ && watched_[i].load(std::memory_order_relaxed) != 0;
+        }
         std::atomic<uint8_t> *touching_ = nullptr;
+        std::atomic<uint8_t> *watched_ = nullptr;
         size_t touchCount_ = 0;
-        struct Item { float a, b, speed; };
+        struct Item { float a, b, speed, px, py, pz; };
         mutable std::mutex mutex_;
         std::vector<Item> items_;
         uint32_t dropped_ = 0;
@@ -586,6 +681,12 @@ private:
         BI().GetPositionAndRotation(bodies_[i].id, p, q);
         o[0] = static_cast<float>(p.GetX()); o[1] = static_cast<float>(p.GetY()); o[2] = static_cast<float>(p.GetZ());
         o[3] = q.GetX(); o[4] = q.GetY(); o[5] = q.GetZ(); o[6] = q.GetW();
+    }
+    void SetWatched(int i, bool on)
+    {
+        if (i >= 0 && static_cast<size_t>(i) < touchCount_) {
+            watched_[i].store(on ? 1 : 0, std::memory_order_relaxed);
+        }
     }
     void Destroy(Slot &s)
     {
@@ -623,9 +724,11 @@ private:
         if (!system_) {
             return -1;
         }
-        kind = std::max(0, std::min(kind, 3));
+        kind = std::max(0, std::min(kind, 5));
         bool character = kind == kCharacter;
-        if (character) {
+        bool projectile = kind == kProjectile || kind == kProjectileArc;
+        bool gravityOff = kind == kProjectile;
+        if (character || projectile) {
             kind = kDynamic;
         }
         JPH::EMotionType mt = kind == kStatic ? JPH::EMotionType::Static
@@ -646,6 +749,10 @@ private:
             s.mAngularDamping = 0;
             s.mMotionQuality = JPH::EMotionQuality::LinearCast;
             rolls = false;
+        }
+        if (projectile) {
+            s.mMotionQuality = JPH::EMotionQuality::LinearCast;
+            s.mGravityFactor = gravityOff ? 0.0f : 1.0f;
         }
         // A thin moving body (a sheet, a coin) can pass most of its thickness into the ground in one step, deeper than
         // the penetration slop pushes back out of: cast it along its motion instead (Jolt's continuous collision).
@@ -676,6 +783,9 @@ private:
         slot.awakeFor = 0;
         slot.rolls = rolls;
         slot.character = character;
+        slot.projectile = projectile;
+        slot.gravityOff = gravityOff;
+        SetWatched(idx, projectile);  // a reused index never inherits its last body's flag
         JPH::Vec3 extent = shape->GetLocalBounds().GetExtent();
         slot.rollRadius = std::max(0.005f, std::min(extent.GetX(), std::min(extent.GetY(), extent.GetZ())));
         const float home[7] = {0, 0, 0, 0, 0, 0, 1};
@@ -712,7 +822,20 @@ private:
             }
             JPH::RVec3 p = BI().GetPosition(s.id);
             float x = static_cast<float>(p.GetX()), y = static_cast<float>(p.GetY()), z = static_cast<float>(p.GetZ());
-            if (y < minY_ || std::fabs(x) > halfX_ || std::fabs(z) > halfZ_ || !std::isfinite(x + y + z)) {
+            bool finite = std::isfinite(x + y + z);
+            bool out = y < minY_ || std::fabs(x) > halfX_ || std::fabs(z) > halfZ_ || !finite;
+            if (out && s.projectile && finite) {
+                // A shot that missed stops where it left the world (reported once, as it falls asleep) and stays
+                // there: sent home it would be fired again from the gun. One already stopped is left alone. A shot
+                // gone non-finite has nowhere to stop -- frozen there, its NaN pose would reach the node -- so it is sent
+                // home like any other body (as FakePhys does).
+                if (BI().IsActive(s.id)) {
+                    BI().SetLinearAndAngularVelocity(s.id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+                    BI().DeactivateBody(s.id);
+                    s.awakeFor = 0;
+                    moved.push_back(static_cast<int>(i));
+                }
+            } else if (out) {
                 BI().SetPositionAndRotation(s.id, JPH::RVec3(s.home[0], s.home[1], s.home[2]),
                                             JPH::Quat(s.home[3], s.home[4], s.home[5], s.home[6]),
                                             JPH::EActivation::Activate);
@@ -740,6 +863,7 @@ private:
     PairFilter pairFilter_;
     Contacts contacts_;
     std::unique_ptr<std::atomic<uint8_t>[]> touching_;  // per body index: touched something in the step under way
+    std::unique_ptr<std::atomic<uint8_t>[]> watched_;  // per body index: its contacts use the reserve (read by jobs)
     size_t touchCount_ = 0;
     std::unique_ptr<JPH::TempAllocatorImpl> temp_;
     std::unique_ptr<JPH::JobSystemThreadPool> jobs_;

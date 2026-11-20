@@ -1,0 +1,77 @@
+@jsonable
+class AppState {
+  shots: number;
+  blasts: number;
+  bursts: number;
+  impacts: number;
+  hardest: number;
+  round: number;
+}
+
+function init(): AppState {
+  return {shots: 0, blasts: 0, bursts: 0, impacts: 0, hardest: 0, round: 0};
+}
+
+function build(state: AppState): scene.Thing[] {
+  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 3.8, 7, 0, 1, -0.3, true));
+  things.push(scene.sky("#172438", 0));
+  things.push(scene.floor("#34445a"));
+  things.push(scene.box(r + "launcher", -2.2, 0.8, -0.7, 0.65, 0.65, 0.65, "#92b4de"));
+  things.push(scene.target(scene.box(r + "backstop", 1.4, 0.8, -0.7, 0.8, 1.6, 1.4, "#d77b50")));
+  things.push(scene.target(scene.bounce(scene.loose(scene.box(r + "drop", -0.4, 4, 0.9, 0.9, 0.9, 0.9, "#dfc299"), 2), 0, 0.8)));
+  let k: number = 0;
+  while (k < 4) {
+    things.push(scene.loose(scene.box(r + "block" + ui.numberToString(k), -1.5 + k, 0.4, -2.3, 0.8, 0.8, 0.8, "#83baa0"), 1));
+    k = k + 1;
+  }
+  let s: number = math.max(0, state.shots - 2);
+  while (s < state.shots) {
+    let ball: scene.Thing = scene.sphere(r + "shot" + ui.numberToString(s), 0.85, 0, 0, 0.18, "#ffd166");
+    things.push(scene.from(scene.aim(scene.shoot(ball, 10, false), 1.4, 0.8, -0.7), r + "launcher", 0));
+    s = s + 1;
+  }
+  things.push(scene.blast("blastEffect", state.blasts, 0, 0.15, -2.3, 2.5, 6));
+  things.push(scene.burst("celebrationEffect", state.bursts, 0, 1.4, 0.4, "confetti", "#e568d1"));
+  return things;
+}
+
+function onShoot(state: AppState, value: number): AppState {
+  return {shots: state.shots + 1, blasts: state.blasts, bursts: state.bursts, impacts: state.impacts, hardest: state.hardest, round: state.round};
+}
+
+function onBlast(state: AppState, value: number): AppState {
+  return {shots: state.shots, blasts: state.blasts + 1, bursts: state.bursts, impacts: state.impacts, hardest: state.hardest, round: state.round};
+}
+
+function onBurst(state: AppState, value: number): AppState {
+  return {shots: state.shots, blasts: state.blasts, bursts: state.bursts + 1, impacts: state.impacts, hardest: state.hardest, round: state.round};
+}
+
+function onReset(state: AppState, value: number): AppState {
+  return {shots: 0, blasts: state.blasts, bursts: state.bursts, impacts: 0, hardest: 0, round: state.round + 1};
+}
+
+function onWorld(state: AppState, e: scene.Event): AppState {
+  if (e.kind === "struck") {
+    return {shots: state.shots, blasts: state.blasts, bursts: state.bursts, impacts: state.impacts + 1, hardest: math.max(state.hardest, e.speed), round: state.round};
+  }
+  return state;
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 2: automatic effects", "", "Falling tan block: dust. Shoot: sparks. Blast: debris and smoke.", ""),
+      ui.World("fill", 0, "build", "onWorld"),
+      ui.Text("body", "Impacts: " + ui.numberToString(state.impacts) + " / hardest " + ui.numberToString(math.round(state.hardest)) + " m/s"),
+      ui.ActionBar("spread", [
+        ui.Button("secondary", "Burst", "onBurst", 0, true),
+        ui.Button("primary", "Shoot", "onShoot", 0, true),
+        ui.Button("secondary", "Blast", "onBlast", 0, true)
+      ]),
+      ui.Button("secondary", "Reset and drop", "onReset", 0, true)
+    ])
+  ]);
+}

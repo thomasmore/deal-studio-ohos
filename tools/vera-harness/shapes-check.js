@@ -52,7 +52,7 @@ assert.match(V.outlineCheck(comb), /too intricate/)
 
 // A mesh is closed (every edge in two triangles, once each way), and every face faces away from the inside.
 const checkMesh = (name, m, inside) => {
-  const key = i => [0, 1, 2].map(k => m.positions[3 * i + k].toFixed(6)).join(',')
+  const key = i => [0, 1, 2].map(k => (Math.round(m.positions[3 * i + k] * 1e6) / 1e6).toFixed(6)).join(',')
   const edges = new Map()
   for (let t = 0; t < m.indices.length; t += 3) {
     const v = [m.indices[t], m.indices[t + 1], m.indices[t + 2]]
@@ -150,4 +150,79 @@ assert.match(V.hullCheck([0, 0, 0, 1]), /triples/)
   assert.ok(Math.abs(v[0]) < 1e-9 && Math.abs(v[2] + 1) < 1e-9, '90 degrees about y takes +x to -z: ' + v)
 }
 
-console.log('shapes-check ok: star ' + starParts.length + ' pieces')
+const tile = loadVera('VeraTextures').TEXTURE_TILE_M
+const uvCheck = (name, mesh) => {
+  assert.equal(mesh.uvs.length, mesh.positions.length / 3 * 2, name + ': two UVs per vertex')
+  assert.equal(mesh.normals.length, mesh.positions.length)
+  assert.equal(mesh.colors.length, mesh.positions.length)
+  assert.ok(mesh.colors.every(c => c === 1), name + ': white vertices')
+  assert.ok(mesh.uvs.every(Number.isFinite), name + ': finite UVs')
+  for (const i of mesh.indices) assert.ok(Number.isInteger(i) && i >= 0 && i < mesh.positions.length / 3)
+  for (let i = 0; i < mesh.normals.length; i += 3) assert.ok(Math.abs(Math.hypot(...mesh.normals.slice(i, i + 3)) - 1) < 1e-9)
+}
+const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, a + ' vs ' + b)
+for (const [name, mesh] of [['prism', V.prismMesh(ell, 0.7)], ['hull', V.hullMesh(pyramid)]]) {
+  uvCheck(name, mesh)
+  for (let i = 0; i < mesh.positions.length / 3; i++) {
+    const p = mesh.positions.slice(i * 3, i * 3 + 3), n = mesh.normals.slice(i * 3, i * 3 + 3).map(Math.abs)
+    const expected = n[1] >= n[0] && n[1] >= n[2] ? [p[0], p[2]] : n[0] >= n[2] ? [p[2], p[1]] : [p[0], p[1]]
+    near(mesh.uvs[2 * i], expected[0] / tile)
+    near(mesh.uvs[2 * i + 1], expected[1] / tile)
+  }
+}
+const box = V.texturedBoxMesh(2, 3, 4)
+uvCheck('textured box', box)
+checkMesh('textured box', box, [0, 0, 0])
+assert.equal(box.positions.length / 3, 24)
+assert.equal(box.indices.length, 36)
+for (let f = 0; f < 6; f++) {
+  const base = f * 4
+  for (const [a, b] of [[base, base + 1], [base + 1, base + 2], [base + 2, base + 3], [base + 3, base]]) {
+    const distance = Math.hypot(...[0, 1, 2].map(k => box.positions[a * 3 + k] - box.positions[b * 3 + k]))
+    const uvDistance = Math.hypot(box.uvs[a * 2] - box.uvs[b * 2], box.uvs[a * 2 + 1] - box.uvs[b * 2 + 1])
+    near(distance / tile, uvDistance)
+  }
+}
+const floor = V.texturedPlaneMesh(7, 5)
+uvCheck('textured floor', floor)
+assert.equal(floor.positions.length / 3, 4)
+for (let i = 0; i < 4; i++) {
+  near(floor.uvs[i * 2], floor.positions[i * 3] / tile)
+  near(floor.uvs[i * 2 + 1], floor.positions[i * 3 + 2] / tile)
+  assert.deepEqual(floor.normals.slice(i * 3, i * 3 + 3), [0, 1, 0])
+}
+for (let t = 0; t < floor.indices.length; t += 3) {
+  const [a, b, c] = floor.indices.slice(t, t + 3).map(i => floor.positions.slice(i * 3, i * 3 + 3))
+  assert.ok((b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]) > 0)
+}
+for (const segments of [3, 8, 32, 57]) {
+  const r = 0.7, h = 2.3, mesh = V.texturedCylinderMesh(r, h, segments), row = segments + 1
+  uvCheck('textured cylinder ' + segments, mesh)
+  checkMesh('textured cylinder ' + segments, mesh, [0, 0, 0])
+  assert.equal(mesh.indices.length, segments * 12)
+  for (let j = 0; j < 2; j++) {
+    for (let i = 0; i <= segments; i++) {
+      near(mesh.uvs[2 * (j * row + i)], 2 * Math.PI * r * i / segments / tile)
+      near(mesh.uvs[2 * (j * row + i) + 1], j * h / tile)
+    }
+    for (let k = 0; k < 3; k++) near(mesh.positions[3 * j * row + k], mesh.positions[3 * (j * row + segments) + k])
+  }
+  for (let i = 2 * row; i < mesh.positions.length / 3; i++) {
+    near(mesh.uvs[i * 2], mesh.positions[i * 3] / tile)
+    near(mesh.uvs[i * 2 + 1], mesh.positions[i * 3 + 2] / tile)
+  }
+}
+for (const [lon, lat] of [[3, 2], [12, 6], [48, 24]]) {
+  const r = 0.7, mesh = V.texturedSphereMesh(r, lon, lat)
+  uvCheck('textured sphere', mesh)
+  checkMesh('textured sphere', mesh, [0, 0, 0])
+  assert.equal(mesh.indices.length, 6 * lon * (lat - 1))
+  for (let j = 0; j <= lat; j++) for (let i = 0; i <= lon; i++) {
+    const index = j * (lon + 1) + i
+    near(mesh.uvs[index * 2], 2 * Math.PI * r * i / lon / tile)
+    near(mesh.uvs[index * 2 + 1], Math.PI * r * j / lat / tile)
+  }
+}
+assert.equal(V.texturedCylinderMesh(1, 1).indices.length, 32 * 12)
+assert.equal(V.texturedSphereMesh(1).positions.length / 3, 49 * 25)
+console.log('shapes-check ok: star ' + starParts.length + ' pieces; texture UV counts, winding, normals, metre scales, caps and sphere arcs')

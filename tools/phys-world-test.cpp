@@ -27,6 +27,15 @@ void Check(bool ok, const char *what)
 }
 
 constexpr float kDt = 1.0f / 60.0f;
+constexpr int kRec = vphys::PhysWorld::kContactRecord;
+
+// A contact record [a, b, speed, px, py, pz] between bodies x and y, either way round.
+bool Pair(const float *r, int x, int y)
+{
+    float fx = static_cast<float>(x), fy = static_cast<float>(y);
+    return (r[0] == fx && r[1] == fy) || (r[0] == fy && r[1] == fx);
+}
+bool Has(const float *r, int x) { return r[0] == static_cast<float>(x) || r[1] == static_cast<float>(x); }
 
 // A floor whose top face is y = 0.
 int Floor(vphys::PhysWorld &w)
@@ -94,7 +103,7 @@ void TestContacts()
     int f = Floor(w);
     int b = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
     w.setPose(b, 0, 1, 0, 0, 0, 0, 1);
-    float all[3 * 64];
+    float all[kRec * 64];
     int total = 0;
     float speed = 0;
     bool pair = false;
@@ -102,10 +111,10 @@ void TestContacts()
         w.step(kDt, 1);
         int n = w.drainContacts(all, 64);
         for (int k = 0; k < n; k++) {
+            const float *r = all + k * kRec;
             total++;
-            speed = std::max(speed, all[k * 3 + 2]);
-            pair = pair || (all[k * 3] == static_cast<float>(b) && all[k * 3 + 1] == static_cast<float>(f)) ||
-                   (all[k * 3] == static_cast<float>(f) && all[k * 3 + 1] == static_cast<float>(b));
+            speed = std::max(speed, r[2]);
+            pair = pair || Pair(r, b, f);
         }
     }
     std::printf("      %d contacts, max approach %.2f m/s (free fall from 0.95 m: 4.32)\n", total, speed);
@@ -145,12 +154,12 @@ float RunWall(vphys::PhysWorld &w, const std::vector<int> &ids, float seconds, i
         w.readPose(b, p);
         start.insert(start.end(), p, p + 3);
     }
-    float buf[3 * 1024];
+    static float buf[kRec * 1024];
     for (int i = 0; i < static_cast<int>(seconds * 60); i++) {
         w.step(kDt, 1);
         int n = w.drainContacts(buf, 1024);
         for (int k = 0; k < n; k++) {
-            *hard += buf[k * 3 + 2] > 1.0f ? 1 : 0;
+            *hard += buf[k * kRec + 2] > 1.0f ? 1 : 0;
         }
     }
     float most = 0;
@@ -488,7 +497,7 @@ void TestDrainBounded()
     w.setVelocity(ball, 0, 0, -8, 0, 0, 0);
     const int cap = 256;
     const int guard = 64;
-    std::vector<float> out(static_cast<size_t>(cap) * 3 + guard, -12345.0f);
+    std::vector<float> out(static_cast<size_t>(cap) * kRec + guard, -12345.0f);
     int most = 0;
     bool intact = true;
     uint32_t droppedBefore = w.droppedContacts();
@@ -496,7 +505,7 @@ void TestDrainBounded()
         w.step(kDt, 1);
         int n = w.drainContacts(out.data(), cap);
         most = std::max(most, n);
-        for (int k = cap * 3; k < cap * 3 + guard; k++) {
+        for (int k = cap * kRec; k < cap * kRec + guard; k++) {
             if (out[static_cast<size_t>(k)] != -12345.0f) {
                 intact = false;
             }
@@ -985,10 +994,290 @@ void TestCharacter()
     }
 }
 
+// ---- shots, blasts, watched bodies
+
+// Run before the rest: whether Jolt calls OnContactAdded for a hit its continuous collision (LinearCast) finds, and
+// whether a 30 m/s projectile stops at a wall 2 cm thick. A discrete body of the same size is printed for comparison.
+void TestLinearCastContact()
+{
+    for (int kind : {static_cast<int>(vphys::kProjectile), static_cast<int>(vphys::kDynamic)}) {
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        int wall = w.addBox(0.01f, 1, 1, vphys::kStatic);  // its face towards the shot at x = 1.99
+        w.setPose(wall, 2, 1, 0, 0, 0, 0, 1);
+        int p = w.addSphere(0.03f, kind);
+        w.setPose(p, 0, 1, 0, 0, 0, 0, 1);
+        w.setVelocity(p, 30, 0, 0, 0, 0, 0);
+        float buf[kRec * 64];
+        int records = 0, first = -1;
+        float speed = 0, at[3] = {0, 0, 0}, most = -1e9f, pose[7];
+        for (int s = 0; s < 60; s++) {
+            w.step(kDt, 1);
+            int n = w.drainContacts(buf, 64);
+            for (int k = 0; k < n; k++) {
+                const float *r = buf + k * kRec;
+                if (Pair(r, p, wall)) {
+                    records++;
+                    if (first < 0) {
+                        first = s;
+                        speed = r[2];
+                        std::copy(r + 3, r + 6, at);
+                    }
+                }
+            }
+            w.readPose(p, pose);
+            most = std::max(most, pose[0]);
+        }
+        std::printf("      %s 3 cm sphere at 30 m/s into a 2 cm wall: %d contact begin(s), first at step %d, %.1f m/s at "
+                    "(%.3f, %.3f, %.3f); furthest x %.3f\n", kind == vphys::kProjectile ? "LinearCast" : "discrete",
+                    records, first, speed, at[0], at[1], at[2], most);
+        if (kind == vphys::kProjectile) {
+            Check(records >= 1, "LinearCast: Jolt reports OnContactAdded for a 30 m/s projectile hitting a 2 cm wall");
+            Check(records == 1, "LinearCast: the hit begins once (the CCD contact is cached, not re-added next step)");
+            Check(speed > 25 && std::fabs(at[0] - 1.99f) < 0.02f, "LinearCast: at the shot's speed, on the wall's face");
+            Check(most < 1.99f, "LinearCast: the projectile does not pass through the wall");
+        }
+    }
+}
+
+void TestProjectile()
+{
+    {
+        // Out of the bound: stopped where it left, asleep, not sent home, reported once; not waited for in flight.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        w.setBound(-5, 3, 3);
+        int p = w.addSphere(0.03f, vphys::kProjectile);
+        w.setPose(p, 0, 1, 0, 0, 0, 0, 1);
+        w.setVelocity(p, 30, 0, 0, 0, 0, 0);
+        Check(w.watched(p), "projectile: watched from the start");
+        bool counted = false, stopped = false;
+        int stopStep = -1, listedAfter = 0;
+        float stopPose[7] = {0}, pose[7];
+        std::vector<float> awake(8 * 64);
+        for (int s = 0; s < 120; s++) {
+            w.step(kDt, 1);
+            counted = counted || w.awakeDynamic() != 0;
+            int n = w.readAwake(awake.data(), 64);
+            bool listed = false;
+            for (int k = 0; k < n; k++) { listed = listed || awake[k * 8] == static_cast<float>(p); }
+            w.readPose(p, pose);
+            if (!stopped && pose[0] > 3) {
+                stopped = true;
+                stopStep = s;
+                std::copy(pose, pose + 7, stopPose);
+                Check(listed, "projectile: its stop is reported by readAwake");
+            } else if (stopped) {
+                listedAfter += listed ? 1 : 0;
+            }
+        }
+        float v[6];
+        w.readVelocity(p, v, 6);
+        std::printf("      projectile left the bound at step %d, x = %.3f y = %.5f; now x = %.3f, reported %d times after\n",
+                    stopStep, stopPose[0], stopPose[1], pose[0], listedAfter);
+        Check(stopped && std::fabs(stopPose[1] - 1) < 1e-4f, "projectile: flies straight without gravity until it leaves");
+        Check(std::equal(pose, pose + 7, stopPose) && pose[0] > 3, "projectile: stays where it left the bound, not at home");
+        Check(v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0 && v[4] == 0 && v[5] == 0, "projectile: stopped dead");
+        Check(listedAfter == 0, "projectile: asleep after its stop (reported once)");
+        Check(!counted, "projectile: never counted by awakeDynamic");
+        // Its index reused by an ordinary body: not watched, not a projectile.
+        w.remove(p);
+        int q = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+        Check(q == p && !w.watched(q) && w.awakeDynamic() == 1, "projectile: a reused index inherits nothing");
+        w.watch(q, 1);
+        Check(w.watched(q), "watch: any body can be watched");
+        w.reset();
+        int r = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+        Check(!w.watched(r), "watch: reset forgets it");
+    }
+    {
+        // No gravity until it touches something, then it falls.
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        Floor(w);
+        int block = w.addBox(0.2f, 0.5f, 0.5f, vphys::kStatic);
+        w.setPose(block, 2, 0.5f, 0, 0, 0, 0, 1);
+        int p = w.addSphere(0.03f, vphys::kProjectile);
+        w.setPose(p, 0, 0.5f, 0, 0, 0, 0, 1);
+        w.setVelocity(p, 5, 0, 0, 0, 0, 0);
+        float pose[7], before = 0;
+        bool hit = false;
+        float buf[kRec * 64];
+        for (int s = 0; s < 150; s++) {
+            w.step(kDt, 1);
+            int n = w.drainContacts(buf, 64);
+            for (int k = 0; k < n; k++) { hit = hit || Pair(buf + k * kRec, p, block); }
+            if (s == 15) {
+                w.readPose(p, pose);
+                before = pose[1];
+            }
+        }
+        w.readPose(p, pose);
+        std::printf("      projectile without arc: y = %.4f in flight, %.4f 2 s later\n", before, pose[1]);
+        Check(std::fabs(before - 0.5f) < 1e-4f, "projectile: no gravity before it touches anything");
+        Check(hit && pose[1] < 0.1f, "projectile: hits the block, then falls to the floor");
+    }
+    {
+        vphys::PhysWorld w;
+        w.init(64, 0);
+        int p = w.addSphere(0.03f, vphys::kProjectileArc);
+        w.setPose(p, 0, 10, 0, 0, 0, 0, 1);
+        w.setVelocity(p, 5, 0, 0, 0, 0, 0);
+        for (int s = 0; s < 30; s++) {
+            w.step(kDt, 1);
+        }
+        float v[3];
+        w.readVelocity(p, v);
+        std::printf("      projectile with arc: vy = %.2f after 0.5 s\n", v[1]);
+        Check(v[1] < -4 && w.watched(p), "projectile with arc: falls from the start, watched");
+    }
+}
+
+// Contact records carry the world contact point: a box dropped on the floor touches it at y = 0, under the box.
+void TestContactPoint()
+{
+    vphys::PhysWorld w;
+    w.init(64, 0);
+    int f = Floor(w);
+    int b = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    w.setPose(b, 0.3f, 0.5f, -0.2f, 0, 0, 0, 1);
+    std::vector<float> buf(kRec * 64 + 8, -12345.0f);
+    bool found = false;
+    float at[3] = {0, 0, 0};
+    for (int s = 0; s < 90 && !found; s++) {
+        w.step(kDt, 1);
+        int n = w.drainContacts(buf.data(), 64);
+        for (int k = 0; k < n && !found; k++) {
+            if (Pair(buf.data() + k * kRec, b, f)) {
+                found = true;
+                std::copy(buf.data() + k * kRec + 3, buf.data() + k * kRec + 6, at);
+            }
+        }
+    }
+    std::printf("      box on the floor: contact at (%.4f, %.4f, %.4f)\n", at[0], at[1], at[2]);
+    Check(found && std::fabs(at[1]) < 0.01f, "contact point: on the floor plane");
+    Check(std::fabs(at[0] - 0.3f) < 0.06f && std::fabs(at[2] + 0.2f) < 0.06f, "contact point: under the box");
+}
+
+// A wall collapsing fills the contact buffer between drains; a watched body's contact still finds room in the reserve,
+// an ordinary one landing at the same moment does not.
+void TestWatchReserve()
+{
+    // Four of TestWall's walls (one collapse begins some 650 contacts), built awake so they slump by themselves too,
+    // each hit by a ball.
+    vphys::PhysWorld w;
+    w.init(1024, 0);
+    Floor(w);
+    for (int wall = 0; wall < 4; wall++) {
+        float z = -3 + 2.0f * wall;
+        for (int row = 0; row < 10; row++) {
+            for (int col = 0; col < 10; col++) {
+                int c = w.addBox(0.049f, 0.049f, 0.049f, vphys::kDynamic);
+                w.setPose(c, (col - 4.5f) * 0.1f, 0.05f + row * 0.1f, z, 0, 0, 0, 1);
+                w.setMaterial(c, 0.2f, 0.3f, 0.6f);
+            }
+        }
+        int ball = w.addSphere(0.1f, vphys::kDynamic);
+        w.setPose(ball, 0, 0.3f, z + 1.0f, 0, 0, 0, 1);
+        w.setMaterial(ball, 3, 0.3f, 0.6f);
+        w.setVelocity(ball, 0, 0.5f, -8, 0, 0, 0);
+    }
+    int steps = 0;
+    while (steps < 600 && (steps < 60 || w.droppedContacts() == 0)) {  // the balls are in the walls by then
+        w.step(kDt, 1);  // not drained: the buffer fills
+        steps++;
+    }
+    Check(w.droppedContacts() > 0, "reserve: a collapse not drained fills the buffer of ordinary contacts");
+    int watchedBox = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    w.setPose(watchedBox, 5, 0.3f, 8, 0, 0, 0, 1);
+    w.watch(watchedBox, 1);
+    int plainBox = w.addBox(0.05f, 0.05f, 0.05f, vphys::kDynamic);
+    w.setPose(plainBox, -5, 0.3f, 8, 0, 0, 0, 1);
+    for (int s = 0; s < 60; s++) {
+        w.step(kDt, 1);
+    }
+    std::vector<float> buf(kRec * 1024 + 8, -12345.0f);
+    int n = w.drainContacts(buf.data(), 1024);
+    bool watchedSeen = false, plainSeen = false;
+    for (int k = 0; k < n; k++) {
+        watchedSeen = watchedSeen || Has(buf.data() + k * kRec, watchedBox);
+        plainSeen = plainSeen || Has(buf.data() + k * kRec, plainBox);
+    }
+    std::printf("      reserve: buffer full after %d steps, %d records drained, %u dropped\n", steps, n,
+                w.droppedContacts());
+    Check(n >= 960 && n <= 1024 && buf[kRec * 1024] == -12345.0f, "reserve: 960 ordinary records, never more than 1024");
+    Check(watchedSeen, "reserve: the watched body's landing is recorded during the collapse");
+    Check(!plainSeen, "reserve: an ordinary body's landing at the same time is dropped");
+}
+
+void TestAngular()
+{
+    vphys::PhysWorld w;
+    w.init(64, 0);
+    w.setGravity(0);
+    int b = w.addBox(0.1f, 0.1f, 0.1f, vphys::kDynamic);
+    w.setPose(b, 0, 1, 0, 0, 0, 0, 1);
+    w.setVelocity(b, 1, 2, 3, 0.5f, -1, 2);
+    float v[6];
+    Check(w.readVelocity(b, v, 6) && v[0] == 1 && v[1] == 2 && v[2] == 3 && v[3] == 0.5f && v[4] == -1 && v[5] == 2,
+          "angular: readVelocity with 6 floats gives the set linear and angular velocity");
+    float s3[4] = {-7, -7, -7, -7};
+    Check(w.readVelocity(b, s3, 3) && s3[0] == 1 && s3[2] == 3 && s3[3] == -7, "angular: 3 floats get exactly 3");
+    float s5[6] = {-7, -7, -7, -7, -7, -7};
+    Check(w.readVelocity(b, s5, 5) && s5[2] == 3 && s5[3] == -7 && s5[4] == -7, "angular: 5 floats get 3 too");
+    float s2[3] = {-7, -7, -7};
+    Check(!w.readVelocity(b, s2, 2) && s2[0] == -7 && s2[1] == -7, "angular: under 3 floats nothing is written");
+}
+
+void TestExplode()
+{
+    vphys::PhysWorld w;
+    w.init(64, 0);
+    w.setGravity(0);
+    auto box = [&](float x, float y, float z, int kind) {
+        int i = w.addBox(0.05f, 0.05f, 0.05f, kind);
+        w.setPose(i, x, y, z, 0, 0, 0, 1);
+        return i;
+    };
+    int a = box(1, 0, 0, vphys::kDynamic);
+    int heavy = w.addSphere(0.1f, vphys::kDynamic);
+    w.setPose(heavy, 0, 2, 0, 0, 0, 0, 1);
+    w.setMaterial(heavy, 5, 0.3f, 0.5f);
+    int centre = box(0, 0, 0, vphys::kDynamic);
+    int far = box(5, 0, 0, vphys::kDynamic);
+    int wall = box(0, -1, 0, vphys::kStatic);
+    int walker = box(0, 0, -1.5f, vphys::kCharacter);
+    int shot = w.addSphere(0.03f, vphys::kProjectile);
+    w.setPose(shot, -1, 0, 0, 0, 0, 0, 1);
+    for (int i : {a, heavy, centre, far}) {
+        w.sleep(i);
+    }
+    Check(w.explode(0, 0, 0, 0, 6) == 0, "explode: no radius, nothing pushed");
+    int n = w.explode(0, 0, 0, 3, 6);
+    auto vel = [&](int i, float x, float y, float z) {
+        float v[3];
+        return w.readVelocity(i, v) && std::fabs(v[0] - x) < 1e-3f && std::fabs(v[1] - y) < 1e-3f &&
+               std::fabs(v[2] - z) < 1e-3f;
+    };
+    std::printf("      explode: %d bodies pushed, %d dynamic awake\n", n, w.awakeDynamic());
+    Check(n == 5, "explode: returns the bodies within the radius (dynamic, character and projectile; not static)");
+    Check(vel(a, 4, 0, 0), "explode: 1 m out of 3, strength 6: 4 m/s away");
+    Check(vel(heavy, 0, 2, 0), "explode: the change is in velocity, whatever the mass (5 kg, 2 m: 2 m/s)");
+    Check(vel(centre, 0, 6, 0), "explode: one at the centre goes straight up");
+    Check(vel(walker, 0, 0, -3) && vel(shot, -4, 0, 0), "explode: a character and a projectile are pushed too");
+    Check(vel(far, 0, 0, 0) && vel(wall, 0, 0, 0), "explode: outside the radius, and static bodies, untouched");
+    Check(w.awakeDynamic() == 3, "explode: the sleeping bodies it pushed are awake");
+    w.step(kDt, 1);
+    float p[7];
+    w.readPose(a, p);
+    Check(p[0] > 1.05f, "explode: and they move on the next step");
+}
+
 }  // namespace
 
 int main()
 {
+    TestLinearCastContact();
     TestRest();
     TestBound();
     TestContacts();
@@ -1001,6 +1290,11 @@ int main()
     TestParts();
     TestRolling();
     TestCharacter();
+    TestProjectile();
+    TestContactPoint();
+    TestWatchReserve();
+    TestAngular();
+    TestExplode();
     std::printf(g_failures ? "%d FAILED\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

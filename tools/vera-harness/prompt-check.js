@@ -157,7 +157,7 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
   const deep=load(path.join(base,'DeepSeekEngine.ets'));
   const chat=load(path.join(base,'VeraChat.ets'));
   const repairMod=load(path.join(base,'VeraRepair.ets'));
-  const settings=load(path.join(base,'SettingsStore.ets')).settings;
+  const {settings,MODE_DEEPSEEK,MODE_SERVER,MODE_LOCAL}=load(path.join(base,'SettingsStore.ets'));
   const {OperationController,throwIfCancelled,cancellationError}=load(path.join(base,'OperationCancellation.ets'));
   settings.getApiKey=()=> 'host-test-key';settings.hasApiKey=()=>true;
   settings.getModel=()=> 'test-model';settings.getBaseUrl=()=> 'https://host-test.invalid';settings.isDeepSeek=()=>true;
@@ -212,22 +212,27 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
   function page(localEngine={stop(){},generate(request){return {text:example,inputTokens:1,outputTokens:1,request}}}){
     const src=read('entry/src/main/ets/pages/GeneratePage.ets');
     const icons=read('entry/src/main/ets/components/IconPicker.ets');
+    const preview=ts.createSourceFile('VeraPreview.ts',read('entry/src/main/ets/components/VeraPreview.ets'),ts.ScriptTarget.Latest,true);
+    const controller=preview.statements.find(node=>ts.isClassDeclaration(node)&&node.name.text==='VeraPreviewController');
+    assert(controller,'Preview controller class');
     const prefix=icons.slice(0,icons.indexOf('@Component')).replace(/^import .*$/gm,'').replace(/^export /gm,'')+'\n'+src.slice(0,src.indexOf('@Component')).replace(/^import .*$/gm,'');
-    const code=prefix+'\nclass Controller { saveIcon = DEFAULT_APP_ICON; '+['beginOperation','resetRunMetrics','startFresh','startNew','doServerGenerate','aboutToDisappear','hostContext','callModel','runAttempt','doRefine','traceEnd','closeRun','doGenerate','tryRoute','traceAgent','showAgent','settleQuestion','askPerson','startAttemptOne','tryStructuralEdit','refineWithModel','stopGeneration','originLabel','measuredTotal','addMetricUsage','metricWork','collectMetricSideCalls','beginMetricAttempt','recordMetricResult','finishMetrics','acceptRequest','copyMetrics','prepareRequest','currentBase','ratePerMillion','modeLabel','hasResult','doSave','confirmName','cancelName','afterSave','close','commitSave','versionCount','isSaved'].map(n=>method(src,n)).join('\n')+' } module.exports=Controller;';
+    const code=prefix+'\n'+controller.getText(preview).replace(/^export /,'')+'\nclass Controller { saveIcon = DEFAULT_APP_ICON; previewController = new VeraPreviewController(); '+['beginOperation','resetRunMetrics','startFresh','startNew','openWhole','setFullscreen','doServerGenerate','aboutToDisappear','hostContext','callModel','runAttempt','doRefine','traceEnd','closeRun','doGenerate','tryRoute','traceAgent','showAgent','settleQuestion','askPerson','startAttemptOne','tryStructuralEdit','refineWithModel','stopGeneration','originLabel','measuredTotal','addMetricUsage','metricWork','collectMetricSideCalls','beginMetricAttempt','recordMetricResult','finishMetrics','acceptRequest','copyMetrics','modelRequestHistory','prepareRequest','currentBase','ratePerMillion','modeLabel','hasResult','doSave','confirmName','cancelName','afterSave','close','commitSave','keepWidget','versionCount','isSaved'].map(n=>method(src,n)).join('\n')+' } module.exports=Controller;';
     const compiled=ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020},reportDiagnostics:true});
     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'Extracted generation controller syntax');
     const versions=[],projects=[],toasts=[],scrollEdges=[];
     const globals={AppRouteParams:load(path.join(base,'AppNavigation.ets')).AppRouteParams,
-      ...load(path.join(base,'AppName.ets')),refreshForms:()=>{},
+      ...load(path.join(base,'AppName.ets')),withoutWidgetRequests:load(path.join(base,'ProjectText.ets')).withoutWidgetRequests,
+      veraStateStamp:load(path.join(base,'VeraStateStamp.ets')).veraStateStamp,hasWidgetFunction:load(path.join(base,'WidgetStatus.ets')).hasWidgetFunction,refreshForms:()=>{},
       store:{createProject(name,icon){const project={id:'project-'+(projects.length+1),name,icon};projects.push(project);return project;},
         createVersion(projectId,source,vbc2,note,prompt,origin,composition,lastPrompt,parentVersionId,metrics){const version={id:'version-'+(versions.length+1),projectId,source,vbc2,note,prompt,origin,composition,lastPrompt,parentVersionId,metrics};versions.push(version);return version;},
-        listVersions:projectId=>versions.filter(version=>version.projectId===projectId)},
+        listVersions:projectId=>versions.filter(version=>version.projectId===projectId),
+        getVersion:(projectId,versionId)=>versions.find(version=>version.projectId===projectId&&version.id===versionId)||null},
       animateTo:(options,update)=>update(),Curve:{EaseInOut:0},Edge:{Top:'top'},ensureCapabilities:async()=>{},logStep:()=>{},logMark:()=>{},trace:(name,fields)=>{traces.push({name,fields});},
       OperationController,throwIfCancelled,http,surfaceRouteEnabled:()=>false,drawsSurface:()=>false,
       composeEnabled:()=>side.compose,composePlanEnabled:()=>false,templateSelectEnabled:()=>true,
       buildScreen:(...a)=>tpl.build(...a),RouteRequest:route.RouteRequest,OUTCOME_AGENT:route.OUTCOME_AGENT,OUTCOME_CANCELLED:route.OUTCOME_CANCELLED,
-      AgentRequest:agent.AgentRequest,appAgentHost:(status,preview,cancelled,language,surfaceGuide,cancellation)=>Object.assign(new agentHost.AgentHost(),{status,preview,language,surfaceGuide,cancellation,cancelled:()=>cancelled()||cancellation.isCancelled()}),traceCompile:()=>{},...(({addStage,appMs,yourMs,WHO_MODEL,WHO_PHONE})=>({addStage,appMs,yourMs,WHO_MODEL,WHO_PHONE}))(load(path.join(base,'RunStages.ets'))),...(({serviceNotes,serviceTrouble,resetServiceHealth})=>({serviceNotes,serviceTrouble,resetServiceHealth}))(load(path.join(base,'ServiceHealth.ets'))),...(({toolCalls,resetToolLog})=>({toolCalls,resetToolLog}))(load(path.join(base,'ToolLog.ets'))),UI_SELECT_FULL:selection.UI_SELECT_FULL,UI_SELECT_PROMPT:selection.UI_SELECT_PROMPT,settings,deepseek:deep.deepseek,DEEPSEEK_GENERATION_MAX_TOKENS:deep.DEEPSEEK_GENERATION_MAX_TOKENS,
-      GenerateRequest:llama.GenerateRequest,GenerateResult:llama.GenerateResult,compileVeraSource:compiler.compileVeraSource,CompileError:compiler.CompileError,
+      AgentRequest:agent.AgentRequest,appAgentHost:(status,preview,cancelled,language,surfaceGuide,cancellation)=>Object.assign(new agentHost.AgentHost(),{status,preview,language,surfaceGuide,cancellation,cancelled:()=>cancelled()||cancellation.isCancelled()}),traceCompile:()=>{},...(({addStage,appMs,yourMs,WHO_MODEL,WHO_PHONE})=>({addStage,appMs,yourMs,WHO_MODEL,WHO_PHONE}))(load(path.join(base,'RunStages.ets'))),...(({serviceNotes,serviceTrouble,resetServiceHealth})=>({serviceNotes,serviceTrouble,resetServiceHealth}))(load(path.join(base,'ServiceHealth.ets'))),...(({toolCalls,resetToolLog})=>({toolCalls,resetToolLog}))(load(path.join(base,'ToolLog.ets'))),UI_SELECT_FULL:selection.UI_SELECT_FULL,UI_SELECT_PROMPT:selection.UI_SELECT_PROMPT,settings,MODE_DEEPSEEK,MODE_SERVER,MODE_LOCAL,deepseek:deep.deepseek,DEEPSEEK_GENERATION_MAX_TOKENS:deep.DEEPSEEK_GENERATION_MAX_TOKENS,
+      GenerateRequest:llama.GenerateRequest,GenerateResult:llama.GenerateResult,compileVeraSource:compiler.compileVeraSource,CompileError:compiler.CompileError,appUsesWidgetError:compiler.appUsesWidgetError,
       repairPrompt:repairMod.repairPrompt,applyRepair:repairMod.applyRepair,smokeRun:load(path.join(base,'VeraSmoke.ets')).smokeRun,
       selectUiForPrompt:(...a)=>side.selectUi(...a),describeCatalogForPrompt:()=>'',UI_TOOL_NOTE:'',
       compositionFromJson:j=>j.length>0?{}:null,compositionToJson:()=>'EDITED-RECORD',editComposition:(...a)=>side.edit(...a),selectEdit:()=>null,
@@ -728,6 +733,33 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     assert.equal(requests[2].messages[1].content,brokenExample);assert(/complete replacement/i.test(requests[2].messages.at(-1).content));
     return {editAttempts:2,fallbackAttempts:3};
   });
+  for(const [stage,diagnostic] of [
+    ['compile','2:3 E2028 arithmetic operands must have identical types'],
+    ['runtime','2:3 R0001 The program compiled, but stopped when the program starts: division by zero'],
+    ['play','2:1 P0011 The program plays, but the player "player" hardly moves with the stick held']
+  ]){
+    for(const byEdit of [true,false]){
+      run('Repair prompt: '+stage+' validation, '+(byEdit?'edits':'replacement'),()=>{
+        const goal='Preserve the requested behavior.';
+        const src='function init(): number {\n  return 0;\n}';
+        const prompt=repairMod.repairPrompt(goal,diagnostic,byEdit,src);
+        assert(prompt.startsWith(goal+'\n\nThe program above is your previous attempt and it failed validation:\n'));
+        assert(prompt.includes(repairMod.quoteDiagnostics(src,diagnostic)+'\n\n'));
+        assert(prompt.includes(diagnostic));assert(prompt.includes('    2 |   return 0;'));
+        assert(prompt.includes('Repair the failed source against these diagnostics. Preserve requested behavior and compatible state field names and types.'));
+        if(byEdit){
+          assert(prompt.includes('Answer with edits only, not the whole program.'));
+          for(const mark of ['<<<<<<< SEARCH','=======','>>>>>>> REPLACE'])assert(prompt.includes(mark));
+          assert(!prompt.includes('Return the complete replacement program'));
+        }else{
+          assert(prompt.includes('Return the complete replacement program as source only, not a patch or continuation.'));
+          assert(!prompt.includes('<<<<<<< SEARCH'));
+          assert(prompt.includes('If output was truncated, shorten optional content while preserving required behavior.'));
+        }
+        return {stage,format:byEdit?'edits':'replacement',diagnosticPreserved:true};
+      });
+    }
+  }
   run('Repair diagnostics quote the line they point at, with a caret under the column',()=>{
     const src='let a = 1\nlet b = "x"\nlet c = a + b';
     const q=repairMod.quoteDiagnostics(src,'3:13 E2028 arithmetic operands must have identical types\nnot a located diagnostic');
@@ -771,7 +803,7 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     assert.equal(parsed.before,'Here is an editable split.');assert.equal(parsed.after,'Each person pays 52.47.');
     const partial=chat.parseReply('Here is the split.\n<<app: '+description);assert.equal(partial.describing,true);assert.equal(partial.appDescription,'');
     const sent=requests.at(-1).messages[0].content;
-    assert(sent.includes('<<app:'));assert(/visual preferences|visual direction|style preferences/i.test(sent));assert.equal(requests.at(-1).thinking.type,'disabled');assert.equal(requests.at(-1).max_tokens,1024);return {completeMarker:true,partialMarkerHeld:true};
+    assert(sent.includes('<<app:'));assert(/visual preferences|visual direction|style preferences/i.test(sent));assert.equal(requests.at(-1).thinking.type,'disabled');assert.equal(requests.at(-1).max_tokens,4096);return {completeMarker:true,partialMarkerHeld:true};
   });
   const revision=cp.execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
   const scope=['entry/src/main/resources/rawfile/vera-skill.txt','entry/src/main/resources/rawfile/vera-widget.txt','entry/src/main/ets/vera/VeraChat.ets','entry/src/main/ets/vera/DeepSeekEngine.ets','entry/src/main/ets/pages/GeneratePage.ets','docs/prompt-evaluation.md'];

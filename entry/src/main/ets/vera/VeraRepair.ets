@@ -72,10 +72,7 @@ export function quoteDiagnostics(source: string, diagnostics: string): string {
  * lines they point at in `failedSource`, and how to answer.
  */
 export function repairPrompt(userPrompt: string, diagnostics: string, byEdit: boolean, failedSource: string = ''): string {
-  // A runtime error from the first run before serving (VeraSmoke) is repaired the same way as a compile error.
-  let ran = diagnostics.indexOf('The program compiled, but') >= 0
-  let head = userPrompt + '\n\nThe program above is your previous attempt and it ' +
-    (ran ? 'compiled, but failed when it ran' : 'failed to compile') + ':\n' +
+  let head = userPrompt + '\n\nThe program above is your previous attempt and it failed validation:\n' +
     quoteDiagnostics(failedSource, diagnostics) + '\n\n'
   if (byEdit) {
     return head + 'Repair the failed source against these diagnostics. Preserve requested behavior and compatible state field names and types. ' + EDIT_RULES

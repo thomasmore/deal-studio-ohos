@@ -19,7 +19,11 @@ export const SHAPE_MS: number = 0.004
 
 /** A ui.Surface frame (frame handler and draw together) may take this much: 60 a second leaves room for the rest. */
 export const SURFACE_FRAME_BUDGET_MS: number = 12
-/** A ui.World's build and event handler, run on a state change, may take this much together: the frame they land in. */
+/**
+ * A ui.World's build and event handler, run on a state change, may take this much together: the frame they land in.
+ * Counted in VM steps only: scene.split cuts its pieces in the host's own code (VeraShapes.ets), outside the VM, so a
+ * build that splits is not charged for the cutting here.
+ */
 export const WORLD_BUILD_BUDGET_MS: number = 8
 
 /** The repair code for a frame or a build too slow for the phone. */

@@ -19,6 +19,24 @@ function init(): AppState {
   return {throws: 0, read: 0, round: 0, moved: 0, picked: ""};
 }
 
+// The id of body i in this round: build makes the bodies with it, and view finds which was picked with it.
+function bodyId(round: number, i: number): string {
+  return "r" + ui.numberToString(round) + "-" + ui.numberToString(i);
+}
+
+// What the picked body is, in words: the name kept beside it, found by its exact id, never read out of the id.
+function pickedName(state: AppState): string {
+  let names: string[] = ["the cube", "the cylinder", "the ball"];
+  let i: number = 0;
+  while (i < 3) {
+    if (state.picked === bodyId(state.round, i)) {
+      return names[i];
+    }
+    i = i + 1;
+  }
+  return "";
+}
+
 function build(state: AppState): scene.Thing[] {
   let things: scene.Thing[] = [];
   things.push(scene.camera(0, 0.9, 1.4, 0, 0.05, 0, true));
@@ -31,7 +49,7 @@ function build(state: AppState): scene.Thing[] {
   let colours: string[] = ["accent", "warning", "#22c55e"];
   let i: number = 0;
   while (i < 3) {
-    let id: string = "r" + ui.numberToString(state.round) + "-" + ui.numberToString(i);
+    let id: string = bodyId(state.round, i);
     let x: number = (i - 1) * 0.3;
     let body: scene.Thing = scene.box(id, x, 0.05, 0, 0.1, 0.1, 0.1, colours[i]);
     if (i === 1) {
@@ -81,8 +99,10 @@ function view(state: AppState): ui.View {
   } else if (state.throws > 0) {
     result = ui.numberToString(state.moved) + " of 3 moved";
   }
-  if (state.picked !== "") {
-    result = result + " - picked " + state.picked;
+  let picked: string = pickedName(state);
+  if (picked !== "") {
+    // Say what was picked, not its id.
+    result = result + " - " + picked + " picked";
   }
   return ui.AppTheme("clean", "", [
     ui.Column("default", [

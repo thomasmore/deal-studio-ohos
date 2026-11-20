@@ -30,8 +30,39 @@ function walker(id: string, colour: string): scene.Thing {
   return scene.group(id, 0, 0, 0, parts);
 }
 
+// What every id in this round starts with: build makes the ids with it, and the names below match them exactly.
+function prefix(state: AppState): string {
+  return "r" + ui.numberToString(state.round) + "-";
+}
+
+// Say who and where in words, by the exact ids build makes, not read out of the ids.
+function whoCame(state: AppState, id: string): string {
+  let r: string = prefix(state);
+  if (id === r + "walker") {
+    return "the walker";
+  }
+  if (id === r + "roamer") {
+    return "the ball";
+  }
+  if (id === r + "me") {
+    return "you";
+  }
+  return "something";
+}
+
+function whereCame(state: AppState, id: string): string {
+  let r: string = prefix(state);
+  if (id === r + "gate") {
+    return "the gate";
+  }
+  if (id === r + "spring") {
+    return "the spring";
+  }
+  return "a circle";
+}
+
 function build(state: AppState): scene.Thing[] {
-  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let r: string = prefix(state);
   let things: scene.Thing[] = [];
   things.push(scene.sky("#9fd0f0", 0));
   things.push(scene.floor("#6aa84f"));
@@ -52,7 +83,7 @@ function onWorld(state: AppState, e: scene.Event): AppState {
     return {jumps: state.jumps + 1, pace: state.pace, round: state.round, entered: state.entered, last: state.last};
   }
   if (e.kind === "enter") {
-    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: e.body + " at " + e.other};
+    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: whoCame(state, e.body) + " at " + whereCame(state, e.other)};
   }
   return state;
 }

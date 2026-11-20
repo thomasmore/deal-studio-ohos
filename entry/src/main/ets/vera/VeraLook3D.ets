@@ -375,12 +375,24 @@ export class CameraPose {
   orbit: boolean = false
 }
 
-/** A sphere [cx, cy, cz, r] round everything in the world wherever its orbits take it, the table included; null for an empty world. */
+/**
+ * Whether a body is left out of framing: a shot (scene.shoot) or a body made from another (scene.from, a piece of a broken
+ * one) comes and goes while the world is played, and neither should move the camera or resize the floor.
+ */
+export function framedOut(b: BodySpec): boolean {
+  return b.shot !== null || b.from !== null
+}
+
+/**
+ * A sphere [cx, cy, cz, r] round everything in the world wherever its orbits take it, the table included; null for an empty
+ * world. Shots and pieces (framedOut) are not counted.
+ */
 export function worldBounds(spec: WorldSpec): number[] | null {
   let byId = new Map<string, BodySpec>()
   for (let b of spec.bodies) { byId.set(b.id, b) }
   let spheres: number[][] = []
   for (let b of spec.bodies) {
+    if (framedOut(b)) { continue }
     let half = Math.max(Math.sqrt(b.dims[0] * b.dims[0] + b.dims[1] * b.dims[1] + b.dims[2] * b.dims[2]) / 2,
       b.rings.length === 2 ? b.rings[1] : 0)
     // An orbiting body may be anywhere on a ring round its centre, which may itself be anywhere on one: the chain's root
@@ -465,7 +477,7 @@ const FIT_RING_POINTS: number = 24
 /**
  * Points everything in the world stays inside wherever its orbits take it: the corners of a box round each body, a ring
  * of points round the centre of each orbiting chain (orbits are level), the corners of the table's parts. Loose bodies
- * count where they start.
+ * count where they start; shots and pieces (framedOut) not at all.
  */
 export function worldFitPoints(spec: WorldSpec): number[][] {
   let byId = new Map<string, BodySpec>()
@@ -477,6 +489,7 @@ export function worldFitPoints(spec: WorldSpec): number[][] {
     }
   }
   for (let b of spec.bodies) {
+    if (framedOut(b)) { continue }
     let half = Math.max(Math.sqrt(b.dims[0] * b.dims[0] + b.dims[1] * b.dims[1] + b.dims[2] * b.dims[2]) / 2,
       b.rings.length === 2 ? b.rings[1] : 0)
     let at: BodySpec = b
@@ -642,6 +655,35 @@ export function projectPoint(pose: CameraPose, width: number, height: number, p:
   let ny = dot3(d, basis[2]) / (depth * tanHalf)
   let nx = dot3(d, basis[1]) / (depth * tanHalf * (width / height))
   return [(nx + 1) / 2 * width, (1 - ny) / 2 * height, depth]
+}
+
+/**
+ * The ray from the eye through (x, y) vp from the top left of a box width by height: [eye, dir], dir a unit vector. The
+ * inverse of projectPoint: a point eye + t * dir (t > 0) lands back on (x, y).
+ */
+export function screenRay(pose: CameraPose, width: number, height: number, x: number, y: number): number[][] {
+  let basis = cameraBasis(pose)
+  let eye = [pose.eye[0], pose.eye[1], pose.eye[2]]
+  if (width <= 0 || height <= 0) { return [eye, basis[0]] }
+  let tanHalf = Math.tan(pose.fov / 2)
+  let nx = (2 * x / width - 1) * tanHalf * (width / height)
+  let ny = (1 - 2 * y / height) * tanHalf
+  let f = basis[0]
+  let r = basis[1]
+  let u = basis[2]
+  return [eye, norm3([f[0] + r[0] * nx + u[0] * ny, f[1] + r[1] * nx + u[1] * ny, f[2] + r[2] * nx + u[2] * ny])]
+}
+
+/** A copy of a camera pose: what the stick steers by while it is held (StickFrame). */
+export function copyPose(pose: CameraPose): CameraPose {
+  let c = new CameraPose()
+  c.eye = [pose.eye[0], pose.eye[1], pose.eye[2]]
+  c.look = [pose.look[0], pose.look[1], pose.look[2]]
+  c.near = pose.near
+  c.far = pose.far
+  c.fov = pose.fov
+  c.orbit = pose.orbit
+  return c
 }
 
 /** Metres one vp covers at this depth in a box this tall. */

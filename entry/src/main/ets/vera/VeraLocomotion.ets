@@ -9,7 +9,7 @@
  */
 
 import { BodySpec, ZoneSpec, FollowSpec, headingDeg } from './VeraScene'
-import { CameraPose, orbitEye, quatXYZ, followOffset, followLook, followPlanes } from './VeraLook3D'
+import { CameraPose, orbitEye, quatXYZ, followOffset, followLook, followPlanes, floorDirection, copyPose } from './VeraLook3D'
 
 const DEG: number = Math.PI / 180
 
@@ -167,18 +167,42 @@ export class ZoneWatch {
 
 /** How quickly the follow camera catches up with its body: it closes 1 - e^(-dt / FOLLOW_LAG_S) of the gap a frame. */
 export const FOLLOW_LAG_S: number = 0.25
+/** How quickly it swings round behind the player that walks: 1 - e^(-dt / FOLLOW_TURN_S) of the yaw gap a frame. */
+export const FOLLOW_TURN_S: number = 0.6
+/** After a drag turns it, it is left where the person put it this long before it swings behind the player again. */
+export const FOLLOW_HOLD_MS: number = 1500
+/** A yaw gap (degrees) under which the camera counts as behind the player. */
+export const FOLLOW_BEHIND_DEG: number = 2
+
+/** The yaw (radians, as orbitEye measures it: atan2(x, z)) of a flat offset. */
+function offsetYaw(x: number, z: number): number {
+  return Math.atan2(x, z)
+}
+
+/** The short way from angle a to angle b, radians (-pi .. pi). */
+function turnRad(a: number, b: number): number {
+  let d = (b - a) % (2 * Math.PI)
+  if (d > Math.PI) { d -= 2 * Math.PI }
+  if (d < -Math.PI) { d += 2 * Math.PI }
+  return d
+}
 
 /**
  * The camera following a body. It stands behind the body (the way it faced when it was first followed) and above it,
  * looks a little above its centre, and catches up with it smoothly; a drag turns it round the body and a pinch brings it
- * nearer, both kept from then on. It does not turn to stay behind the body by itself: the stick pushes the body the way
- * it is pushed on the screen, and a camera that swung round with the body would turn that way under the person's thumb.
+ * nearer, both kept from then on. While the player walks the camera also swings round, by its yaw alone (turnBehind),
+ * to stand behind it again, keeping its distance and its height -- except for FOLLOW_HOLD_MS after a drag, so the person's
+ * own turn is not undone at once. A camera that swings round under a held stick would turn the push with it (the stick
+ * pushes the way it points on the screen) and walk the player in a circle; so the stick steers by the camera as it was
+ * when the push began (StickFrame), not as it is now.
  */
 export class Follower {
   /** eye - look, as the person last left it. */
   offset: number[] = [0, 0, 0]
   look: number[] = [0, 0, 0]
   ready: boolean = false
+  /** How much longer (ms) a drag holds the camera where the person turned it. */
+  holdMs: number = 0
 
   /** Put the camera at once behind the body at target (its heading in degrees), for follow. */
   snap(pose: CameraPose, target: number[], heading: number, follow: FollowSpec): void {
@@ -209,12 +233,48 @@ export class Follower {
     return Math.hypot(want[0] - this.look[0], want[1] - this.look[1], want[2] - this.look[2]) > eps
   }
 
-  /** A drag: turned yaw radians round the body and tilted pitch, never below the ground (minPitch). */
+  /**
+   * A drag: turned yaw radians round the body and tilted pitch, never below the ground (minPitch). It holds the camera
+   * there for FOLLOW_HOLD_MS (turnBehind waits).
+   */
   turn(pose: CameraPose, yaw: number, pitch: number, minPitch: number): void {
     let eye = orbitEye([this.look[0] + this.offset[0], this.look[1] + this.offset[1], this.look[2] + this.offset[2]],
       this.look, yaw, pitch, minPitch, 1.45)
     this.offset = [eye[0] - this.look[0], eye[1] - this.look[1], eye[2] - this.look[2]]
+    this.holdMs = FOLLOW_HOLD_MS
     this.write(pose)
+  }
+
+  /** How far (degrees, -180 .. 180) the camera's yaw is from behind a body facing heading (degrees). */
+  yawGap(heading: number): number {
+    // Behind a body facing a is -(cos a, -sin a) along the ground, as followOffset puts it.
+    let a = heading * DEG
+    return turnRad(offsetYaw(this.offset[0], this.offset[2]), offsetYaw(-Math.cos(a), Math.sin(a))) / DEG
+  }
+
+  /** Whether turnBehind would turn it now: the body walks and no drag holds it. */
+  turning(moving: boolean): boolean {
+    return this.ready && moving && this.holdMs <= 0
+  }
+
+  /**
+   * dt seconds on, the followed body facing heading (degrees): while it moves, and no drag in the last FOLLOW_HOLD_MS holds
+   * it, the camera's yaw round it eases towards behind it, its distance along the ground and its height kept. Every call
+   * counts the hold down, moving or not. Whether it turned (and the pose was written).
+   */
+  turnBehind(pose: CameraPose, heading: number, dt: number, moving: boolean): boolean {
+    let step = Math.max(0, dt)
+    this.holdMs = Math.max(0, this.holdMs - step * 1000)
+    if (!this.turning(moving)) { return false }
+    let flat = Math.hypot(this.offset[0], this.offset[2])
+    if (flat < 1e-9) { return false }
+    let gap = this.yawGap(heading) * Math.PI / 180
+    if (Math.abs(gap) < 1e-5) { return false }
+    let k = 1 - Math.exp(-step / FOLLOW_TURN_S)
+    let yaw = offsetYaw(this.offset[0], this.offset[2]) + gap * k
+    this.offset = [flat * Math.sin(yaw), this.offset[1], flat * Math.cos(yaw)]
+    this.write(pose)
+    return true
   }
 
   /** The pose's eye taken as the camera's new distance (a pinch). */
@@ -227,6 +287,39 @@ export class Follower {
     pose.eye = [this.look[0] + this.offset[0], this.look[1] + this.offset[1], this.look[2] + this.offset[2]]
     pose.orbit = true
     followPlanes(pose)
+  }
+}
+
+/**
+ * The frame the stick steers by. The stick pushes the way it points on the screen, but the screen turns under the thumb
+ * when the follow camera swings round behind the player; so while the stick is held its frame is the camera as it was when
+ * the push began (or when a drag last turned the camera, which is the person turning it on purpose), and it is let go when
+ * the push returns to nothing.
+ */
+export class StickFrame {
+  pose: CameraPose | null = null
+
+  /** The stick pushed (push > 0) or let go, the camera being at pose now: a push that begins takes the camera's frame. */
+  push(pose: CameraPose | null, push: number): void {
+    if (push <= 0) {
+      this.pose = null
+    } else if (this.pose === null && pose !== null) {
+      this.pose = copyPose(pose)
+    }
+  }
+
+  /** The camera turned on purpose (a drag, a new framing): a held stick steers by it from now on. */
+  refresh(pose: CameraPose | null): void {
+    if (this.pose !== null && pose !== null) { this.pose = copyPose(pose) }
+  }
+
+  /** The direction on the floor of a push dx right and dy down: by the held frame, else by the camera at pose. */
+  direction(pose: CameraPose, dx: number, dy: number): number[] {
+    return floorDirection(this.pose !== null ? this.pose : pose, dx, dy)
+  }
+
+  reset(): void {
+    this.pose = null
   }
 }
 

@@ -1,0 +1,157 @@
+{
+  "phase": 0,
+  "date": "2026-11-18",
+  "branch": "cortex/world-interaction",
+  "entry": "hdc shell aa start -a EntryAbility -b com.vera.probe.dyn --ps worldSpike 1",
+  "status": "API and performance probes passed; quantitative screenshot checks passed (not human visual inspection)",
+  "scope": {
+    "models": "Five locally authored synthetic GLB fixtures, 15352 bytes total; no downloaded asset pack",
+    "lighting": "Product directional sun and ambient, shadows disabled for particle baseline",
+    "modelOwnership": "Loaded source scenes retained until spike destruction",
+    "timings": "CPU / promise resolution; not GPU completion or first visible frame",
+    "memory": "Process PSS/RSS in KB; includes async scene/renderer startup and is not attributable asset memory",
+    "visual": "Pixel analysis: all four panels have 256/256 alternating checker-center samples and 15 transitions per row/column; five projected model/clone pairs have 97.34-99.82% nonbackground coverage; cyan cube alpha fitted 0.34969 against requested 0.35, RGB RMSE 0.066/255. Image input unavailable: not human visual inspection or exhaustive material fidelity validation."
+  },
+  "textures": [
+    { "size": 256, "uri": "file://", "pixelMapMs": 23.61, "pngMs": 6.25, "imageMs": 1.33, "totalMs": 31.20, "api": "OK" },
+    { "size": 256, "uri": "absolute path", "pixelMapMs": 1.39, "pngMs": 61.41, "imageMs": 1.14, "totalMs": 63.94, "api": "OK" },
+    { "size": 512, "uri": "file://", "pixelMapMs": 1.56, "pngMs": 15.11, "imageMs": 1.83, "totalMs": 18.50, "api": "OK" },
+    { "size": 512, "uri": "absolute path", "pixelMapMs": 1.72, "pngMs": 14.35, "imageMs": 2.39, "totalMs": 18.47, "api": "OK" }
+  ],
+  "models": [
+    { "fixture": 0, "loadMs": 1.88, "importMs": 0.40, "cloneMs": 0.36, "clone": "OK", "pssBeforeKb": 131324, "pssAfterKb": 131887 },
+    { "fixture": 1, "loadMs": 1.70, "importMs": 0.33, "cloneMs": 0.33, "clone": "OK", "pssBeforeKb": 132079, "pssAfterKb": 132199 },
+    { "fixture": 2, "loadMs": 1.64, "importMs": 0.36, "cloneMs": 0.31, "clone": "OK", "pssBeforeKb": 132219, "pssAfterKb": 132267 },
+    { "fixture": 3, "loadMs": 1.97, "importMs": 0.83, "cloneMs": 0.67, "clone": "OK", "pssBeforeKb": 132670, "pssAfterKb": 133773 },
+    { "fixture": 4, "loadMs": 5.57, "importMs": 0.52, "cloneMs": 0.67, "clone": "OK", "pssBeforeKb": 138583, "pssAfterKb": 138759 }
+  ],
+  "memory": {
+    "empty": { "pssKb": 106406, "rssKb": 195708, "privateDirtyKb": 4956, "sharedDirtyKb": 8256 },
+    "textures": { "pssKb": 131029, "rssKb": 226988, "privateDirtyKb": 5248, "sharedDirtyKb": 8360 },
+    "fiveModelsAndClones": { "pssKb": 138759, "rssKb": 234880, "privateDirtyKb": 5252, "sharedDirtyKb": 8388 }
+  },
+  "particles": {
+    "pool": 256,
+    "creationMs": 1037.12,
+    "samplingSecondsPerStage": 8,
+    "stages": [
+      { "count": 0, "frames": 480, "callbackFps": 59.99, "frameP50Ms": 16.59, "frameP95Ms": 17.09, "writeMs": 0.006 },
+      { "count": 64, "frames": 482, "callbackFps": 60.24, "frameP50Ms": 16.61, "frameP95Ms": 18.10, "writeMs": 2.126, "usPerNode": 33.21 },
+      { "count": 128, "frames": 483, "callbackFps": 60.24, "frameP50Ms": 16.58, "frameP95Ms": 18.26, "writeMs": 3.597, "usPerNode": 28.10 },
+      { "count": 256, "frames": 481, "callbackFps": 60.07, "frameP50Ms": 16.59, "frameP95Ms": 16.97, "writeMs": 5.750, "usPerNode": 22.46 }
+    ],
+    "renderService": { "screenFps": 60.49, "p50Ms": 16.60, "p95Ms": 16.90, "timestamps": 384, "scope": "Screen-wide compositor timestamps, not isolated scene GPU" },
+    "notTested": "256 particles together with 300 physics bodies; reserved for phase 2"
+  },
+  "artifacts": {
+    "screenshot": "/tmp/opencode/screenCap_128669346707.png",
+    "onPhoneLog": "{filesDir}/world-spike.txt",
+    "onPhonePngs": "{filesDir}/vera/tex/spike-*.png"
+  },
+  "verification": {
+    "projectBuild": "./update-phone.sh: Status ok, Diagnostics 0; in-place identity and first installation time preserved",
+    "host": "world-spike-check 44/44; scene/world/interaction/world-play/shapes checks passed; fixture --check passed; git diff --check passed",
+    "standaloneLint": "arkts-lint reported ok but Scan Phase Skipped; not a meaningful clean scan",
+    "standaloneTypecheck": "arkts-check uses incompatible static ArkTS 2 configuration: three compile failures and two wrapper UnicodeDecodeError crashes; full dynamic-ArkTS project build passed"
+  },
+  "nextGate": {
+    "phase1": "API and pixel repetition checks passed; proceed with procedural textures",
+    "phase2": "Baseline CPU cost about 5.75 ms/frame for 256 updates; alpha blending quantitatively confirmed for tested overlaps; measure 300-body combined load in phase 2",
+    "phase3": "Synthetic rawfile GLB load/import/clone API and instance pixel-presence checks passed; approve concrete pack and license before download, then repeat material/load/memory checks on real assets"
+  },
+  "committed": false,
+  "retirement": {
+    "date": "2026-11-19",
+    "status": "Retired exploratory product entry, controller tail, page, five packaged fixtures and obsolete mocked harness; historical measurements above are unchanged, not rerun results.",
+    "entry": "worldSpike launch flag and route removed; use product ui.World and the retained texture/particle/model suites",
+    "hashAlgorithm": "SHA-256 over exact pre-removal bytes, captured with Python hashlib before deletion",
+    "renderer": {
+      "path": "entry/src/main/ets/components/VeraWorld3D.ets",
+      "beforeBytes": 129754,
+      "beforeSha256": "182d9bbcc4a6c07ee058a234677c47e95f24f0b0dea880fd2dd19fcacdc75c3d",
+      "removedSlice": "From the newline immediately before function spikeNow(): number { through EOF; includes WorldSpikeBox",
+      "removedBytes": 16794,
+      "removedSha256": "b8abbcc471cda586baa997a1dd5dd69ee10089ce87c8b61c58cdf8e19afe6f72",
+      "otherRemoval": "Only the systemDateTime and hidebug import lines",
+      "preservedBytes": 112851,
+      "preservedSha256": "730a5c333366cde81bfd6bfe1e0b6351d59026aa8301853bf18d94e53eff54eb",
+      "preservedScope": "All phase 1-3 product code, including literal rawfile descriptor and native recovery fixes, byte-for-byte apart from the two retired imports"
+    },
+    "removedFiles": [
+      {
+        "path": "entry/src/main/ets/pages/WorldSpikePage.ets",
+        "bytes": 7331,
+        "sha256": "2ac6aac53443d0fca3ff89f2f6d6a74fab59601dbf5f3114b7a25c14125dba20"
+      },
+      {
+        "path": "tools/vera-harness/world-spike-check.js",
+        "bytes": 38754,
+        "sha256": "f8408a210e92d7b4a38ece4d310dce5d3a86dd7e01f2b291bed3f267252690c9"
+      },
+      {
+        "path": "entry/src/main/resources/rawfile/world-spike-0.glb",
+        "bytes": 1712,
+        "sha256": "86de1075c7c2331528a7bc2800263e6bf92fe7f7838204f4d1f26fa9d883ced8"
+      },
+      {
+        "path": "entry/src/main/resources/rawfile/world-spike-1.glb",
+        "bytes": 1544,
+        "sha256": "24ef36222c67267fe751aaa91be07afbbd42084f4914a24667856690293affd0"
+      },
+      {
+        "path": "entry/src/main/resources/rawfile/world-spike-2.glb",
+        "bytes": 3112,
+        "sha256": "3a6711ce2f6c49465ed0c885896b1dce1681ab9407e6f212f36197cf78d4e2ea"
+      },
+      {
+        "path": "entry/src/main/resources/rawfile/world-spike-3.glb",
+        "bytes": 5052,
+        "sha256": "574ebe562d0cd70c03811d68ef2c707b191a03232c44e57588accfd0f35345c9"
+      },
+      {
+        "path": "entry/src/main/resources/rawfile/world-spike-4.glb",
+        "bytes": 3932,
+        "sha256": "3a93ac9b2fad857b0e0035d31bb3a430b332e4a2ddced53b76d72cc3a3a69ea4"
+      }
+    ],
+    "retainedGenerator": {
+      "path": "tools/world-spike-fixtures.py",
+      "beforeBytes": 19854,
+      "beforeSha256": "70a41ee0232d4ba78f52730cc91ab61602073c8b3487152e5ac29a2350e38d49",
+      "usage": "Default or --check: deterministic in-memory validation with no writes. --output HOST_TMP_DIR: explicit host temporary output only. --check HOST_DIR: validate explicit existing host fixtures. No product auto-output."
+    },
+    "validationScope": "Host-only cleanup verification; no build, phone operation or new device-performance claim. Historical /tmp and phone artifact paths above may no longer exist. Hashes identify the retired snapshot but do not archive its source.",
+    "hostVerification": {
+      "typescriptModule": "<home>/agent-kit-sdk/command_line_tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js",
+      "typescriptVersion": "4.9.5",
+      "passedSuites": [
+        "tools/vera-harness/texture-check.js",
+        "tools/vera-harness/texture-renderer-check.js (48/48)",
+        "tools/vera-harness/texture-cache-check.js (8/8)",
+        "tools/vera-harness/particles-check.js",
+        "tools/vera-harness/particles-renderer-check.js (58/58)",
+        "tools/vera-harness/models-check.js (36 models)",
+        "tools/vera-harness/models-renderer-check.js (28/28, including no-spike packaging)",
+        "tools/vera-harness/scene-check.js",
+        "tools/vera-harness/world-check.js",
+        "tools/vera-harness/shapes-check.js",
+        "tools/vera-harness/interaction-check.js",
+        "tools/vera-harness/world-play-check.js",
+        "tools/vera-harness/locomotion-check.js",
+        "tools/vera-harness/motion-check.js"
+      ],
+      "passedCommands": [
+        "python3 tools/model-catalog.py --check",
+        "python3 tools/world-spike-fixtures.py",
+        "python3 tools/world-spike-fixtures.py --check",
+        "ruff check --no-cache tools/world-spike-fixtures.py",
+        "node --check tools/vera-harness/models-renderer-check.js",
+        "git diff --check"
+      ],
+      "additionalChecks": "Python unittest.mock verified zero fixture reads/writes for default and bare --check, explicit temporary output/check round-trip, corrupt fixture rejection, symlink output rejection, repository/non-temporary/missing-directory rejection, and reproduced all five retired fixture hashes. The preserved renderer hash and absence of all seven retired files were verified after cleanup.",
+      "unrelatedFailure": "tools/vera-harness/widget-launch-check.js stops at line 326: expects veraRun=1 in unchanged WidgetCard.ets, which uses launchMode=runLatest; not changed by this cleanup.",
+      "typecheckAttempt": "tsc --noEmit -p tools/vera-harness/tsconfig.json fails TS2307 at tools/vera-harness/src/VeraSdkIndex.ts:26: cannot resolve ../../../entry/src/main/ets/vera/VeraIntentRegistry. No unrelated source changes made.",
+      "notRun": "Native ArkTS lint/typecheck, build, phone operations and commit; host renderer transpilation is not a native ArkTS typecheck."
+    }
+  }
+}

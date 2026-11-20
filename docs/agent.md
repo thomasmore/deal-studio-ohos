@@ -51,6 +51,72 @@ with 8-9 ms of program and painting per frame. The designs and the text on scree
 request's language. Frames of the host runs are drawn with `tools/vera-harness/gfx-run.js`. Host check:
 `tools/vera-harness/surface-route-check.js`.
 
+### Solid things in 3D: the world route
+
+When the request explicitly asks for 3D, the same classifier selects `engine: "world"` and a travel kind
+(`none`, `self`, `steered`, `both`). The writer receives `rawfile/vera-world-skill.txt` and the generated
+`std/scene` catalogue, builds one `ui.World`, and is checked by `VeraWorldPlay.ets` rather than the surface play.
+`build(state)` describes the world only when state changes; the host handles physics, motion and effects, not a
+program frame loop. `SCENE_FUNCTIONS` in `VeraScene.ets` is the API table; the pure texture, particle and model
+modules supply their catalogues to the compiler, runtime checks and prompt.
+
+- **Textures.** `scene.paint(thing, pattern, color2)` keeps the first colour and adds a second. The 11 material patterns
+  are `wood`, `planks`, `brick`, `tiles`, `stone`, `grass`, `sand`, `metal`, `marble`, `checker`, `fabric`
+  (`VeraTextures.ets`). They work on primitives, individual group parts, groups, tables and floors; painting a whole
+  group replaces its parts' paint but keeps their first colours. Existing sphere-only patterns remain sphere-only.
+  UVs repeat a tile per metre rather than stretching it across a face. The renderer generates 256×256 PNGs in
+  `{filesDir}/vera/tex`, keyed by pattern, colours and seed. Disk cleanup targets 256 managed PNGs, skips active
+  readers/writers, and leaves unmanaged files, directories and symlinks untouched; it is not a hard cap during active use.
+- **Particles.** `scene.burst(id, trigger, x, y, z, kind, color)` supports `sparks`, `smoke`, `dust`, `debris`,
+  `confetti` (`VeraParticles.ets`). Initial trigger 0 is silent; every change, including back to 0, emits once.
+  Changing the position, kind or colour alone does not emit. These are host-animated visual effects, not bodies,
+  and work without physics. Blasts already emit debris and smoke, shots striking bodies emit contact sparks,
+  and hard watched knocks emit dust: do not duplicate them with explicit bursts. Each world keeps at most
+  256 particles and 16 active bursts, evicting oldest bursts when either limit would be exceeded.
+  Without a Canvas backdrop, material alpha is source colour alpha × lifetime fade. With an explicit sky
+  (even without stars), stars, trails or stationary glow halos, all five kinds use the phase-2 shrinking-cube
+  fallback: size × cube-root(clamp(effective alpha, 0, 1)), material alpha 1 for positive alpha, hidden at zero.
+  RGB is unchanged; low-alpha colours make smaller opaque cubes, not translucent ones. Imported BLEND/unlit
+  materials retain their no-shadow configuration. The next frame handles backdrop changes in either direction.
+  This avoids the confirmed native-to-Canvas sRGB/premultiplication boundary fault until a platform fix; it is
+  not a global alpha fix, and changing to TEXTURE does not fix that boundary.
+- **Models.** `scene.model(id, name, x, y, z, size)` selects one of 36 static CC0 models from Kenney Racing Kit 2.0.
+  Exact names and appearance descriptions come from `MODEL_CATALOG` in `VeraModels.ets`, generated alongside
+  `rawfile/models/models.json`; the prompt lists that catalogue, not a second handwritten list. Prefer a matching
+  model to rebuilding it from primitives. `size` is the largest side in metres, scaled uniformly; `y` is the support
+  bottom, not the centre, and x/z the support midpoint. The host recentres the imported bounds and converts source
+  forward +z to body forward +x: do not add a compensating 90-degree turn. Models keep their own materials and have
+  no independently animated parts. Motion wrappers, `mark` and `rings` work; `paint`, `glow`, group-part use and
+  `split` are rejected. Physics uses one convex hull of at most 64 points: visible openings, such as a garage's
+  doorway or a gantry, are filled for collision. Use primitives for passable structures or things that must break.
+  `turn` pivots about the converted centre without regrounding; path/wander retain that centre height and add their
+  heading. `from` takes the converted centre offset in the parent's frame; orbit uses its centre body's height.
+
+The model provenance is a **pinned public extracted-file mirror**, `Tiddybub/3d-assets` at
+`11ff7082e566a6278553bf7623980cb93dd41e27`, not an acquired or hashed official ZIP. `models.json` records
+source/output hashes and conversion metadata; `LICENSE.txt` and `SHA256SUMS` accompany the assets.
+`tools/model-catalog.py --check` verifies local hashes, transformed bounds, convex-hull containment and budgets
+(100 KB per GLB, 3 MB for the set). Reproduction from source additionally needs the pinned extracted inputs.
+
+Two play diagnostics are deliberately narrower than a visual or physics proof:
+
+- **P0020, texture readability:** projected bounding boxes at the initial camera/orbit pose and a 12×12 ground-ray
+  sample estimate screen coverage. It reports only when painted area is at least 256 square points and half of the
+  measured area, but less than a quarter of that paint is readable. Body readability needs a 24-point shorter side
+  and a 4-point metre tile; ground tiles need 16 square points. It does not inspect rendered pixels, occlusion,
+  contrast or every later camera view, and can miss a tiny painted decoration on a mostly unpainted scene.
+- **P0021, model grounding:** with a floor or table, checks static models without from/shot/aim/orbit/path/wander
+  against the rotated hull bottom and support contact patches (floor tolerance 0.02 m). Loose/moving models and
+  worlds without floor/table are outside this check; contact is not a proof of stable balance or exact visible-mesh fit.
+
+Host verification commands and fixtures are in `tools/vera-harness/README.md`. The exploratory phase-0 `worldSpike`
+launch flag, routes, page, controller tail, packaged synthetic GLBs and obsolete mocked harness were retired on
+2026-11-19. Historical measurements and pre-removal SHA-256 provenance remain in
+`results/world-spike-phase0-2026-11-18.json`; the fixture generator is host-only and writes nothing by default.
+The product renderer and phase 1–3 suites remain. Host checks do not establish all 36 models working on-device,
+particle alpha blending or model shadows on-device, or native-memory behaviour; what the phone runs of 2026-11-18/19
+did establish, and what they left open, is summarised in `docs/world-3d-verification.md`.
+
 ### A scene inside a screen
 
 A screen of forms and lists with one drawn, moving or touched picture among them is the agent's, with the picture as a

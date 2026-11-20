@@ -1197,7 +1197,8 @@ export struct VeraPreview {
     for (let node of found) {
       let box = this.worlds.get(node)
       if (box === undefined) {
-        box = new WorldBox()
+        let context = this.getUIContext().getHostContext()
+        box = new WorldBox(context !== undefined ? context.filesDir : '')
         this.worlds.set(node, box)
       }
       if (node.label.length === 0 || this.error.length > 0) { continue }
@@ -1265,10 +1266,18 @@ export struct VeraPreview {
     let writeMs = 0
     let stepMs = 0
     let contacts = 0
+    let particles = 0
+    let emitted = 0
+    let particleMs = 0
     for (let box of this.worlds.values()) {
       writeMs += box.writeMs
       stepMs += box.stepMs
       contacts = Math.max(contacts, box.mostContacts)
+      particles += box.particleCount()
+      emitted += box.particlesEmitted
+      particleMs += box.particleMs
+      box.particlesEmitted = 0
+      box.particleMs = 0
       box.writeMs = 0
       box.stepMs = 0
       box.mostContacts = 0
@@ -1276,7 +1285,8 @@ export struct VeraPreview {
     }
     console.info('VERA-WORLD fps=' + (this.worldFrames * 1000 / (now - this.worldReportAt)).toFixed(1) +
       ' bodies=' + bodies.toString() + ' awake=' + awake.toString() + ' writeMs=' + (writeMs / this.worldFrames).toFixed(2) +
-      ' stepMs=' + (stepMs / this.worldFrames).toFixed(2) + ' contacts=' + contacts.toString())
+      ' stepMs=' + (stepMs / this.worldFrames).toFixed(2) + ' contacts=' + contacts.toString() +
+      ' particles=' + particles.toString() + ' emitted=' + emitted.toString() + ' particleMs=' + (particleMs / this.worldFrames).toFixed(2))
     this.worldReportAt = now
     this.worldFrames = 0
   }
@@ -1304,9 +1314,9 @@ export struct VeraPreview {
       }
       console.info('VERA-WORLD event ' + e.kind + ' body=' + e.body + ' other=' + e.other + ' speed=' + e.speed.toFixed(2) +
         ' values=' + e.values.join(',') + (e.kind === 'settled' ? ' kick=' + e.kick.toString() : ''))
-      // A knock is frequent and changes little: it is saved with the next settle, tap or save, not on its own.
-      this.dispatchFieldAction(node.action, sceneEventValue(e.kind, e.body, e.other, e.x, e.y, e.z, e.speed, e.bodies, e.values),
-        e.kind !== 'hit', node)
+      // A knock (hit, struck) is frequent and changes little: it is saved with the next settle, tap or save, not on its own.
+      this.dispatchFieldAction(node.action, sceneEventValue(e.kind, e.body, e.other, e.x, e.y, e.z, e.speed, e.bodies, e.values,
+        [e.dx, e.dy, e.dz]), e.kind !== 'hit' && e.kind !== 'struck', node)
     }
   }
 
@@ -1779,8 +1789,8 @@ export struct VeraPreview {
   }
 
   /**
-   * The stick over a world with a player (scene.player), bottom left, and its action button bottom right when the player
-   * has one: the host's, drawn the same in every program. The stick is its own touch target, so a thumb on it steers
+   * The stick over a world with a player (scene.player), bottom left, and its buttons bottom right, one over the other,
+   * when the player has them (action, then fire): the host's, drawn the same in every program. The stick is its own touch target, so a thumb on it steers
    * while another finger turns the camera; the knob follows the thumb, and lifting lets go.
    */
   @Builder
@@ -1815,17 +1825,19 @@ export struct VeraPreview {
         // The thumb's drag is the stick's: the page must not scroll under it, nor the world take it for a camera turn.
         .gesture(PanGesture({ distance: 1 }))
         .onGestureJudgeBegin((_info: GestureInfo, _event: BaseGestureEvent) => GestureJudgeResult.CONTINUE)
-        if (this.drawnWorld(node).action.length > 0) {
-          Button(this.drawnWorld(node).action)
-            .fontSize(16)
-            .fontWeight(600)
-            .fontColor(this.t().ink)
-            .backgroundColor(this.t().surface)
-            .opacity(0.92)
-            .height(56)
-            .padding({ left: 22, right: 22 })
-            .onClick(() => { this.worldAction(node) })
-            .hitTestBehavior(HitTestMode.Block)
+        if (this.drawnWorld(node).action.length > 0 || this.drawnWorld(node).fire.length > 0) {
+          // The player's buttons, one over the other: the action's, then the second (fire) under it, nearer the thumb.
+          Column({ space: 12 }) {
+            if (this.drawnWorld(node).action.length > 0) {
+              this.worldButton(node, false)
+            }
+            if (this.drawnWorld(node).fire.length > 0) {
+              this.worldButton(node, true)
+            }
+          }
+          .alignItems(HorizontalAlign.End)
+          // As the row round it: the gap between the buttons passes a finger through to the world.
+          .hitTestBehavior(HitTestMode.None)
         }
       }
       .width('100%')
@@ -1841,6 +1853,24 @@ export struct VeraPreview {
     .height('100%')
     .justifyContent(FlexAlign.End)
     .hitTestBehavior(HitTestMode.None)
+  }
+
+  /**
+   * One of the player's buttons over a world, the action's or (second) the fire one; pressed, it sends "action" with its
+   * label. The label is read here, not passed in, so a new one is drawn.
+   */
+  @Builder
+  worldButton(node: LiveNode, second: boolean) {
+    Button(second ? this.drawnWorld(node).fire : this.drawnWorld(node).action)
+      .fontSize(16)
+      .fontWeight(600)
+      .fontColor(this.t().ink)
+      .backgroundColor(this.t().surface)
+      .opacity(0.92)
+      .height(56)
+      .padding({ left: 22, right: 22 })
+      .onClick(() => { this.worldAction(node, second ? this.drawnWorld(node).fire : this.drawnWorld(node).action) })
+      .hitTestBehavior(HitTestMode.Block)
   }
 
   /** A thumb on the stick: where it is from the stick's centre, as a share of how far the knob can go, steers the player. */
@@ -1859,16 +1889,21 @@ export struct VeraPreview {
     }
   }
 
-  /** The player's button: the event "action" to the world's handler, with where the player is. */
-  private worldAction(node: LiveNode): void {
+  /**
+   * A player's button: the event "action" to the world's handler, with where the player is, the way it faces (dx, dy,
+   * dz) and the button's label in other.
+   */
+  private worldAction(node: LiveNode, label: string): void {
     let box = this.worlds.get(node)
     if (box === undefined || this.previewOnly || node.action.length === 0) { return }
     let player = playerOf(box.appliedSpec())
     if (player === null) { return }
     let at = box.playerAt()
     let p = at !== null ? at : player.position
-    console.info('VERA-WORLD event action body=' + player.id)
-    this.dispatchFieldAction(node.action, sceneEventValue('action', player.id, '', p[0], p[1], p[2], 0, [], []), true, node)
+    console.info('VERA-WORLD event action body=' + player.id + ' button=' + label)
+    box.noteInput('action')
+    this.dispatchFieldAction(node.action, sceneEventValue('action', player.id, label, p[0], p[1], p[2], 0, [], [],
+      box.playerFacing()), true, node)
   }
 
   /** The corner button of a world: full screen, or back to the normal screen from it. */
@@ -1984,8 +2019,10 @@ export struct VeraPreview {
       }
       // Logged once the ray is cast: before it, the body is not known yet.
       console.info('VERA-WORLD event tap body=' + pick.body + (pick.part.length > 0 ? ' part=' + pick.part : ''))
-      // A group's tap tells the part in other.
-      this.dispatchFieldAction(action, sceneEventValue('tap', pick.body, pick.part, pick.x, pick.y, pick.z, 0, [], []), true, node)
+      // A group's tap tells the part in other; dx, dy, dz are the ray through the finger.
+      tapped.noteInput('tap')
+      this.dispatchFieldAction(action, sceneEventValue('tap', pick.body, pick.part, pick.x, pick.y, pick.z, 0, [], [],
+        [pick.dx, pick.dy, pick.dz]), true, node)
     }).catch((e: Error) => {
       console.warn('VERA-WORLD pick failed: ' + e.message)
     })

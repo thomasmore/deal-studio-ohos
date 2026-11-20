@@ -1,0 +1,79 @@
+@jsonable
+class AppState {
+  kind: number;
+  bursts: number;
+}
+
+function init(): AppState {
+  return {kind: 0, bursts: 0};
+}
+
+function burstKind(state: AppState): string {
+  if (state.kind === 1) {
+    return "smoke";
+  }
+  if (state.kind === 2) {
+    return "dust";
+  }
+  if (state.kind === 3) {
+    return "debris";
+  }
+  if (state.kind === 4) {
+    return "confetti";
+  }
+  return "sparks";
+}
+
+function burstColor(state: AppState): string {
+  if (state.kind === 1) {
+    return "#b5c5dd";
+  }
+  if (state.kind === 2) {
+    return "#d2ae7e";
+  }
+  if (state.kind === 3) {
+    return "#e08752";
+  }
+  if (state.kind === 4) {
+    return "#e568d1";
+  }
+  return "#ffd166";
+}
+
+function build(state: AppState): scene.Thing[] {
+  let things: scene.Thing[] = [];
+  things.push(scene.camera(0, 3.2, 5.6, 0, 1.1, 0, true));
+  things.push(scene.sky("#172438", 0));
+  things.push(scene.floor("#34445a"));
+  things.push(scene.cylinder("pedestal", 0, 0.3, 0, 0.8, 0.6, "#62758e"));
+  things.push(scene.burst("sampleEffect", state.bursts, 0, 1.1, 0, burstKind(state), burstColor(state)));
+  return things;
+}
+
+function onKind(state: AppState, value: number): AppState {
+  return {kind: value, bursts: state.bursts + 1};
+}
+
+function onBurst(state: AppState, value: number): AppState {
+  return {kind: state.kind, bursts: state.bursts + 1};
+}
+
+function view(state: AppState): ui.View {
+  return ui.AppTheme("clean", "", [
+    ui.Column("default", [
+      ui.Header("default", "Phase 2: burst sampler", "", "Static scene; no physics or ticker", ""),
+      ui.World("fill", 0, "build", ""),
+      ui.Text("body", burstKind(state) + " / burst " + ui.numberToString(state.bursts)),
+      ui.ActionBar("spread", [
+        ui.Button("secondary", "Sparks", "onKind", 0, true),
+        ui.Button("secondary", "Smoke", "onKind", 1, true),
+        ui.Button("secondary", "Dust", "onKind", 2, true)
+      ]),
+      ui.ActionBar("spread", [
+        ui.Button("secondary", "Debris", "onKind", 3, true),
+        ui.Button("secondary", "Confetti", "onKind", 4, true),
+        ui.Button("primary", "Burst", "onBurst", 0, true)
+      ])
+    ])
+  ]);
+}

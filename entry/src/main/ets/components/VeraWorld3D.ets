@@ -26,24 +26,31 @@
  */
 
 import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, GeometryDefinition, CubeGeometry, SphereGeometry, CylinderGeometry,
-  PlaneGeometry, Material, MaterialType, MetallicRoughnessMaterial, UnlitMaterial, Vec2, Vec3, Vec4, Quaternion, Node, Geometry,
+  PlaneGeometry, Material, MaterialType, MetallicRoughnessMaterial, UnlitMaterial, Vec2, Vec3, Vec4, Quaternion, Node, NodeType, Geometry,
   MeshResource, EnvironmentBackgroundType, PostProcessSettings, RaycastResult, RaycastParameters, Color, SpotLight, CustomGeometry,
-  PrimitiveTopology } from '@kit.ArkGraphics3D'
-import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, diffWorld, orbitPositions, MotionCarry, travelPace } from '../vera/VeraScene'
+  PrimitiveTopology, SamplerAddressMode, SamplerFilter, Image as SceneImage, Sampler } from '@kit.ArkGraphics3D'
+import { image } from '@kit.ImageKit'
+import { fileIo as fs } from '@kit.CoreFileKit'
+import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, SceneFrom, BlastSpec, diffWorld, diffTriggers,
+  orbitPositions, MotionCarry, travelPace, burstsForDiff } from '../vera/VeraScene'
+import { ParticlePool, ParticleBurst, MAX_PARTICLES, MAX_BURSTS } from '../vera/VeraParticles'
+import { ModelSpec, modelSpec, modelShape } from '../vera/VeraModels'
 import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
-import { prismMesh, hullMesh } from '../vera/VeraShapes'
-import { PhysEngine, WorldSim, SimEvent, enterEvent } from '../vera/VeraPhysics'
-import { Follower, ZoneWatch, swingTurn, hasSwing, yawOf } from '../vera/VeraLocomotion'
+import { prismMesh, hullMesh, texturedBoxMesh, texturedCylinderMesh, texturedSphereMesh, texturedPlaneMesh } from '../vera/VeraShapes'
+import { texturePixels, textureKey, texturePattern, textureRoughness } from '../vera/VeraTextures'
+import { PhysEngine, WorldSim, SimEvent, enterEvent, resolveFrom } from '../vera/VeraPhysics'
+import { Follower, StickFrame, ZoneWatch, swingTurn, hasSwing, yawOf, FOLLOW_BEHIND_DEG } from '../vera/VeraLocomotion'
 import { physInit, physReset, physSetGravity, physSetBound, physAddBox, physAddSphere, physAddCylinder, physAddParts, physRemove, physSetPose,
   physSetMaterial, physSetVelocity, physSleep, physMoveKinematic, physDrive, physStep, physStepBegin, physStepEnd, physReadAwake, physReadPose, physReadVelocity,
-  physDrainContacts, physAwakeDynamic } from 'libphys.so'
+  physDrainContacts, physAwakeDynamic, physWatch, physExplode } from 'libphys.so'
 import { ResolvedTheme } from '../vera/VeraTheme'
 import { LOOK_SUN_INTENSITY, LOOK_SUN_POSITION, LOOK_SUN_TARGET, sunFor, LOOK_SHADOWS, LOOK_AMBIENT, LOOK_FOV, LOOK_FLOOR_ROLE,
   LOOK_TABLE_ROLE, LOOK_PIP_ROLE, LOOK_BACKGROUND_ROLE, TABLE_TOP_THICKNESS, PIP_RADIUS, lookLinear, lookColorKey, quatXYZ,
   lookAtQuat, CameraPose, worldCamera, orbitEye, pinchDistance, zoomPose, worldBounds, tableParts, floorSize, pipLayout, floorColor, worldGlows,
   floorGain, floorBaseLinear, linearHex, FLOOR_ROUGHNESS, FLOOR_METALLIC, FLOOR_SPECULAR, projectPoint, metresPerVp, floorDirection,
   GLOW_AMBIENT, GLOW_SPOTS, GLOW_SPOT_INNER, GLOW_SPOT_OUTER, TRAIL_POINTS, glowCandela, worldBackgroundRgba, isDarkRgba,
-  worldHasBackdrop, starField, worldTrails, worldSuns, lookRgba, srgbToLinear, followTarget, followPlanes } from '../vera/VeraLook3D'
+  worldHasBackdrop, starField, worldTrails, worldSuns, lookRgba, srgbToLinear, followTarget, followPlanes, screenRay,
+  framedOut } from '../vera/VeraLook3D'
 
 /** A SurfaceMesh as the kit's geometry: its colours turned from sRGB to the linear values a vertex colour is. */
 function customGeometry(m: SurfaceMesh): CustomGeometry {
@@ -60,8 +67,93 @@ function customGeometry(m: SurfaceMesh): CustomGeometry {
   g.vertices = vertices
   g.normals = normals
   g.colors = colors
+  if (m.uvs.length > 0) {
+    let uvs: Vec2[] = []
+    for (let i = 0; i < m.uvs.length; i += 2) { uvs.push({ x: m.uvs[i], y: m.uvs[i + 1] }) }
+    g.uvs = uvs
+  }
   g.indices = m.indices
   return g
+}
+
+const TEXTURE_SIZE: number = 256
+const TEXTURE_WRITES: Map<string, Promise<string>> = new Map<string, Promise<string>>()
+const TEXTURE_READERS: Map<string, number> = new Map<string, number>()
+const TEXTURE_DISK_KEEP: number = 256
+const TEXTURE_FILE: RegExp = /^tex_v2_256_(wood|planks|brick|tiles|stone|grass|sand|metal|marble|checker|fabric|plain)_[0-9a-f]{48}_[0-9a-f]{48}_[0-9a-f]{1,8}\.png$/
+
+class TextureDiskEntry {
+  path: string
+  time: number
+  constructor(path: string, time: number) { this.path = path; this.time = time }
+}
+
+function trimTextures(dir: string): void {
+  try {
+    let entries: TextureDiskEntry[] = []
+    for (let name of fs.listFileSync(dir)) {
+      if (!TEXTURE_FILE.test(name)) { continue }
+      let path = dir + '/' + name
+      let stat = fs.lstatSync(path)
+      if (stat.isFile() && !stat.isSymbolicLink()) { entries.push(new TextureDiskEntry(path, stat.mtime)) }
+    }
+    entries.sort((a: TextureDiskEntry, b: TextureDiskEntry): number => a.time - b.time || a.path.localeCompare(b.path))
+    let excess = entries.length - TEXTURE_DISK_KEEP
+    for (let entry of entries) {
+      if (excess <= 0) { break }
+      if (TEXTURE_READERS.has(entry.path) || TEXTURE_WRITES.has(entry.path)) { continue }
+      fs.unlinkSync(entry.path)
+      excess--
+    }
+  } catch (e) { console.warn('VERA-WORLD texture disk cleanup failed: ' + (e as Error).message) }
+}
+
+let textureSerial: number = 0
+
+function legacyPaint(b: BodySpec): boolean {
+  return b.shape === 'sphere' && b.pattern.length > 0 && !texturePattern(b.pattern)
+}
+
+async function writeTexture(path: string, dir: string, pattern: string, c1: number[], c2: number[], seed: number): Promise<string> {
+  try { fs.mkdirSync(dir, true) } catch (e) {
+    if (!fs.statSync(dir).isDirectory()) { throw e as Error }
+  }
+  if (fs.accessSync(path)) {
+    let stat = fs.statSync(path)
+    if (stat.isFile() && stat.size > 0) { return path }
+  }
+  let temporary = path + '.' + Date.now().toString() + '-' + (++textureSerial).toString() + '.tmp'
+  let pixelMap: image.PixelMap | null = null
+  let packer: image.ImagePacker | null = null
+  try {
+    let pixels = texturePixels(pattern, c1, c2, seed, TEXTURE_SIZE)
+    pixelMap = await image.createPixelMap(pixels.buffer, {
+      size: { width: TEXTURE_SIZE, height: TEXTURE_SIZE }, pixelFormat: image.PixelMapFormat.RGBA_8888, srcPixelFormat: image.PixelMapFormat.RGBA_8888, editable: false
+    })
+    packer = image.createImagePacker()
+    let file = fs.openSync(temporary, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC)
+    try { await packer.packToFile(pixelMap, file.fd, { format: 'image/png', quality: 100 }) }
+    finally { fs.closeSync(file) }
+    fs.renameSync(temporary, path)
+    return path
+  } finally {
+    try { if (fs.accessSync(temporary)) { fs.unlinkSync(temporary) } }
+    finally {
+      try { if (pixelMap !== null) { await pixelMap.release() } }
+      finally { if (packer !== null) { await packer.release() } }
+    }
+  }
+}
+
+function textureFile(filesDir: string, key: string, pattern: string, c1: number[], c2: number[], seed: number): Promise<string> {
+  if (filesDir.length === 0) { return Promise.reject(new Error('Texture storage is unavailable: filesDir is empty')) }
+  let dir = filesDir + '/vera/tex'
+  let path = dir + '/' + key + '.png'
+  let known = TEXTURE_WRITES.get(path)
+  if (known !== undefined) { return known }
+  let made = writeTexture(path, dir, pattern, c1, c2, seed).finally(() => { TEXTURE_WRITES.delete(path) })
+  TEXTURE_WRITES.set(path, made)
+  return made
 }
 
 /**
@@ -130,8 +222,17 @@ const DRAG_SLOP_VP: number = 8
 /** A swipe's speed is the finger's over the last this many ms, in m/s at the body's distance, at most SWIPE_MAX. */
 const SWIPE_WINDOW_MS: number = 100
 const SWIPE_MAX: number = 10
-/** Events waiting for the caller beyond this drop their oldest hit (a settle is never dropped). */
+/**
+ * Events waiting for the caller beyond this drop their oldest hit, else their oldest struck; a settle or an entry into a
+ * zone is never dropped.
+ */
 const EVENT_QUEUE: number = 64
+/** A tap on nothing tells a point this far (m) along the ray. */
+const TAP_MISS_M: number = 40
+/** The follow camera swings behind the player only while it goes faster than this (m/s). */
+const FOLLOW_TURN_SPEED: number = 0.3
+/** How often (ms) VERA-WORLD sums up the struck events told. */
+const STRUCK_LOG_MS: number = 2000
 const PHYSICS_MISSING: string = 'Physics is not available in this build: bodies stay where they are put.'
 
 /** The native physics behind the PhysEngine interface WorldSim drives. */
@@ -173,8 +274,13 @@ class NativePhys implements PhysEngine {
   readAwake(out: Float32Array): number { return physReadAwake(out) }
   readPose(i: number, out: Float32Array): number { return physReadPose(i, out) }
   readVelocity(i: number, out: Float32Array): number { return physReadVelocity(i, out) }
+  /** Records of 6 floats [a, b, speed, px, py, pz]; WorldSim sizes the array (CONTACT_CAP records). */
   drainContacts(out: Float32Array): number { return physDrainContacts(out) }
   awakeDynamic(): number { return physAwakeDynamic() }
+  watch(i: number, on: number): void { physWatch(i, on) }
+  explode(cx: number, cy: number, cz: number, radius: number, strength: number): number {
+    return physExplode(cx, cy, cz, radius, strength)
+  }
 }
 
 /** The one native engine, made on first use; its thread count once known (0: this build has no physics). */
@@ -251,7 +357,10 @@ const PACE_EASE: number = 6
 /** A follow camera that moved less than this (m) in a frame is not written again: the backdrop repaints with it. */
 const FOLLOW_EPS: number = 0.0005
 
-/** What a tap hit: the body's id ("" for empty space, the table or the floor) and where, in metres. */
+/**
+ * What a tap hit: the body's id ("" for empty space, the table or the floor) and where, in metres -- on nothing at all,
+ * TAP_MISS_M along the ray -- and the ray's direction from the eye through the finger, a unit dx, dy, dz.
+ */
 export class WorldPick {
   body: string = ''
   /** For a group, the id of the part hit; '' otherwise. */
@@ -259,6 +368,11 @@ export class WorldPick {
   x: number = 0
   y: number = 0
   z: number = 0
+  dx: number = 0
+  dy: number = 0
+  dz: number = 0
+  /** Whether the ray met anything (a body, the table, the floor): if not, x, y, z are along the ray. */
+  met: boolean = false
 }
 
 /**
@@ -274,6 +388,7 @@ export class WorldGesture {
 }
 
 class BodyNode {
+  ready: boolean = false
   spec: BodySpec
   node: Node
   names: string[] = []
@@ -340,6 +455,7 @@ export class WorldBox {
   private shown: boolean = false
   private retireTimer: number = -1
   private running: boolean = false
+  private renderDirty: boolean = false
   /** The latest spec asked for, the one being applied (frames place its orbits), and the one fully applied. */
   private wanted: WorldSpec | null = null
   private wantedTheme: ResolvedTheme | null = null
@@ -350,11 +466,53 @@ export class WorldBox {
   private applied: WorldSpec | null = null
   private appliedTheme: ResolvedTheme | null = null
   private bodies: Map<string, BodyNode> = new Map<string, BodyNode>()
+  /**
+   * During an apply: the parents of the bodies it makes with scene.from, as their nodes stood when it began,
+   * [px, py, pz, qx, qy, qz, qw] and no velocity (resolveFrom's form): where those bodies go without physics.
+   */
+  private fromParents: Map<string, number[]> = new Map<string, number[]>()
+  /**
+   * Bodies made from another (scene.from) that are built again in this apply (a new mark, the theme) and stood somewhere
+   * already: their pose as it is now, so they are built again there rather than placed from their parent a second time
+   * -- a parent that is gone (the body it broke from) would leave only its build pose, and the pieces would jump.
+   */
+  private keptFrom: Map<string, number[]> = new Map<string, number[]>()
   /** Node name -> body id, pips included, for a raycast hit. */
   private byName: Map<string, string> = new Map<string, string>()
   /** Node name -> part id, for a raycast that hits a part of a group. */
   private partByName: Map<string, string> = new Map<string, string>()
   private materials: Map<string, Promise<Material>> = new Map<string, Promise<Material>>()
+  private images: Map<string, Promise<SceneImage>> = new Map<string, Promise<SceneImage>>()
+  private modelSources: Map<string, Promise<Scene>> = new Map<string, Promise<Scene>>()
+  private loadedModels: Set<Scene> = new Set<Scene>()
+  private resolvedMaterials: Map<string, Material> = new Map<string, Material>()
+  private resolvedImages: Map<string, SceneImage> = new Map<string, SceneImage>()
+  /**
+   * Which material each painted node holds, by the node's name: names are unique (a prefix and the serial), and a name is
+   * a string -- the kit's `.parent` and `.children` need not hand back the wrapper a node was painted through, so an
+   * identity test could miss a removed node's parts and keep their materials from being swept for good.
+   */
+  private materialBindings: Map<string, Material> = new Map<string, Material>()
+  private groundMaterials: Set<Material> = new Set<Material>()
+  private textureSamplers: Set<Sampler> = new Set<Sampler>()
+  private resourcePending: number = 0
+  private particlePool: ParticlePool = new ParticlePool()
+  private particleSource: Promise<Scene> | null = null
+  private particleSourceScene: Scene | null = null
+  private particleNodes: Node[] = []
+  private particleMaterials: UnlitMaterial[] = []
+  private particlePending: ParticleBurst[] = []
+  /** Blasts apply() accepted that no physics apply has taken yet (applyOne), oldest first, the newest MAX_BURSTS. */
+  private pendingBlasts: BlastSpec[] = []
+  private particleQueuedAt: number[] = []
+  private particlePreparing: Promise<void> | null = null
+  private particleReady: boolean = false
+  private particleWarmWanted: boolean = false
+  private particleVisible: number = 0
+  private particleColors: Map<string, number[]> = new Map<string, number[]>()
+  particleMs: number = 0
+  particlesEmitted: number = 0
+  private filesDir: string
   private tableNodes: Node[] = []
   private floorNodes: Node[] = []
   private serial: number = 0
@@ -395,32 +553,69 @@ export class WorldBox {
    */
   @Trace hasPlayer: boolean = false
   @Trace action: string = ''
+  /** The second button's label (scene.player's fire), '' for none. */
+  @Trace fire: string = ''
   @Trace knobX: number = 0
   @Trace knobY: number = 0
   /** How far the stick is pushed (0..1) and which way on the screen, right and down. */
   private push: number = 0
   private pushX: number = 0
   private pushY: number = 0
+  /** The camera frame the held stick steers by (StickFrame): the camera as it was when the push began. */
+  private stickFrame: StickFrame = new StickFrame()
   /** The camera following a body (scene.follow, or the player), and whether it has still to catch up. */
   private follower: Follower = new Follower()
   private followBehind: boolean = false
+  /** When the person last tapped or pressed a button (Date.now(), 0 for none since a shot appeared), and which. */
+  private inputAt: number = 0
+  private inputKind: string = ''
+  /** struck events told since VERA-WORLD last summed them up, the bodies they named, and when it did. */
+  private struckCount: number = 0
+  private struckPairs: number = 0
+  private struckLogAt: number = 0
   /** Which bodies are in which zones, and the zones' rings. */
   private zoneWatch: ZoneWatch = new ZoneWatch()
   private zoneNodes: Node[] = []
   /** Seconds since VERA-WORLD last said where the player is. */
   private playerLogS: number = 0
 
+  constructor(filesDir: string = '') {
+    this.filesDir = filesDir
+  }
+
+  private checkAlive(): void {
+    if (this.destroyed || this.retired) { throw new Error('World is retired') }
+  }
+
   /** Show this world (with this theme) as soon as what is being applied now is done. */
   apply(spec: WorldSpec, theme: ResolvedTheme): void {
     if (this.destroyed || this.retired) { return }
+    // Every trigger edge accepted here goes off once, its particles and its push alike: the bursts are queued now, the
+    // blasts wait for the physics of the apply that takes them (applyOne), however many states that apply coalesces. The
+    // first world a box is given has no edges: its triggers are ones the state already had -- restored on reopen, or the
+    // box made again -- and setting them off again would scatter what the state left standing.
+    let base = this.wanted !== null ? this.wanted : this.applied
+    let requests: ParticleBurst[] = []
+    if (base !== null) {
+      let edges = diffTriggers(base, spec)
+      requests = burstsForDiff(edges)
+      for (let x of edges.blast) { this.pendingBlasts.push(x) }
+      if (this.pendingBlasts.length > MAX_BURSTS) { this.pendingBlasts.splice(0, this.pendingBlasts.length - MAX_BURSTS) }
+    }
     this.wanted = spec
     this.wantedTheme = theme
+    if (!this.particleReady && (spec.bursts.length > 0 || spec.blasts.length > 0 ||
+      spec.bodies.some((b: BodySpec): boolean => b.target || b.shot !== null))) { this.particleWarmWanted = true }
+    this.queueBursts(requests)
+    this.startParticles()
     this.pump()
   }
 
   /** Whether the display loop should run for this world: something in what it shows, or is about to, orbits or spins. */
   needsFrames(): boolean {
     if (this.destroyed || this.retired) { return false }
+    if (this.particleWarmWanted || this.particlePreparing !== null || this.particlePending.length > 0 ||
+      this.particlePool.needsFrames() || this.particleVisible > 0) { return true }
     if (hasKinematic(this.wanted) || this.showingMoves || this.swinging || this.events.length > 0) { return true }
     if (this.push > 0 || this.followBehind) { return true }
     if (this.sim !== null && this.sim.needsFrames()) { return true }
@@ -443,13 +638,14 @@ export class WorldBox {
    * advance, so the events can go to the program (and its changes be applied) in between without waiting on one.
    */
   frame(elapsedMs: number): void {
-    if (this.destroyed) { return }
+    if (this.destroyed || this.retired) { return }
     this.timeS += elapsedMs / 1000
     this.frameMs = elapsedMs
     this.writeKinematic()
     let sim = this.sim
     if (sim !== null) {
       sim.collect()
+      this.queueBursts(sim.takeBursts())
       this.stepMs += sim.stepMs
       this.awake = sim.awake
       this.mostContacts = Math.max(this.mostContacts, sim.mostContacts)
@@ -459,15 +655,220 @@ export class WorldBox {
         if (e.kind === 'settled') {
           console.info('VERA-WORLD settled kick=' + e.kick.toString() + ' values=' + e.values.join(',') + ' afterMs=' +
             (Date.now() - this.kickWallAt).toString() + ' simMs=' + e.afterMs.toString())
+        } else if (e.kind === 'struck') {
+          this.struckCount++
+          this.struckPairs += e.bodies.length
         }
         this.queue(e)
       }
+      this.logStruck()
     }
     let dt = Math.min(0.1, Math.max(0, elapsedMs / 1000))
     this.writeSwing(dt)
     this.writeFollow(dt)
     this.watchZones()
     this.logPlayer(dt)
+    try { this.writeParticles(dt) } catch (e) {
+      this.particlePending = []
+      this.particleQueuedAt = []
+      this.particlePool.clear()
+      for (let i = 0; i < this.particleNodes.length; i++) {
+        try { this.particleNodes[i].visible = false; this.particleNodes[i].scale = v3(0, 0, 0) } catch (hideError) {}
+      }
+      this.particleVisible = 0
+      this.note = 'Particle rendering failed: ' + (e as Error).message
+      console.error('VERA-WORLD particles failed: ' + (e as Error).message)
+    }
+  }
+
+  particleCount(): number {
+    return this.particlePool.particleCount()
+  }
+
+  private queueBursts(requests: ParticleBurst[]): void {
+    if (this.destroyed || this.retired || requests.length === 0) { return }
+    let queuedAt = Date.now()
+    for (let request of requests) {
+      this.particlePending.push(request)
+      this.particleQueuedAt.push(queuedAt)
+      if (this.particlePending.length > MAX_BURSTS) {
+        this.particlePending.shift()
+        this.particleQueuedAt.shift()
+      }
+    }
+    if (this.note.startsWith('Particle rendering failed:')) { this.note = '' }
+    if (!this.particleReady) { this.particleWarmWanted = true }
+    this.startParticles()
+  }
+
+  private startParticles(): void {
+    if (this.destroyed || this.retired || this.rf === null || this.options === null || !this.particleWarmWanted ||
+      this.particleReady || this.particlePreparing !== null) { return }
+    this.particlePreparing = this.prepareParticles().catch((e: Error) => {
+      this.particleWarmWanted = false
+      this.particlePending = []
+      this.particleQueuedAt = []
+      this.particlePool.clear()
+      if (!this.destroyed && !this.retired) {
+        this.note = 'Particle rendering failed: ' + e.message
+        console.error('VERA-WORLD particles failed: ' + e.message)
+      }
+    }).finally(() => { this.particlePreparing = null })
+  }
+
+  private async prepareParticles(): Promise<void> {
+    let start = Date.now()
+    let initial = this.particleNodes.length
+    let added = 0
+    try {
+      this.checkAlive()
+      while (this.particleNodes.length < MAX_PARTICLES) {
+        this.checkAlive()
+        let count = Math.min(8, MAX_PARTICLES - this.particleNodes.length, 16 - this.particleNodes.length % 16)
+        let tasks: Promise<void>[] = []
+        let errors: Error[] = []
+        for (let i = 0; i < count; i++) {
+          tasks.push(this.prepareParticle().then((): void => { added++ }).catch((e: Error): void => { errors.push(e) }))
+        }
+        await Promise.all(tasks)
+        if (errors.length > 0) { throw errors[0] }
+        this.checkAlive()
+        if (this.particleNodes.length % 16 === 0 && this.particleNodes.length < MAX_PARTICLES) {
+          await nextFrame()
+          this.checkAlive()
+        }
+      }
+      this.particleReady = true
+      this.particleWarmWanted = false
+    } finally {
+      console.info('VERA-WORLD-PARTICLES prep status=' + (this.destroyed || this.retired ? 'retired' : this.particleReady ? 'ready' : 'failed') +
+        ' initial=' + initial.toString() + ' added=' + added.toString() + ' count=' + this.particleNodes.length.toString() +
+        ' totalMs=' + Math.max(0, Date.now() - start).toString())
+    }
+  }
+
+  private loadParticleSource(): Promise<Scene> {
+    this.checkAlive()
+    if (this.particleSource !== null) { return this.particleSource }
+    let made: Promise<Scene> = Scene.load($rawfile('vera-particle.glb')).then((source: Scene): Scene => {
+      if (this.destroyed || this.retired) {
+        this.disposeModelSource(source)
+        this.checkAlive()
+      }
+      if (source === null || source.root === null || source.root.children.count() === 0) {
+        if (source !== null) { this.disposeModelSource(source) }
+        throw new Error('Empty particle source')
+      }
+      this.particleSourceScene = source
+      return source
+    }).catch((e: Error): Scene => {
+      if (this.particleSource === made) { this.particleSource = null }
+      throw e
+    })
+    this.particleSource = made
+    return made
+  }
+
+  private particleGeometry(root: Node): Geometry {
+    let pending: Node[] = [root]
+    let geometry: Geometry | null = null
+    let visited = 0
+    while (pending.length > 0) {
+      let node = pending.pop() as Node
+      if (++visited > 32) { throw new Error('Invalid particle hierarchy') }
+      if (node.nodeType === NodeType.GEOMETRY) {
+        if (geometry !== null) { throw new Error('Multiple particle geometries') }
+        geometry = node as Geometry
+      }
+      for (let i = 0; i < node.children.count(); i++) {
+        let child = node.children.get(i)
+        if (child !== null) { pending.push(child) }
+      }
+    }
+    if (geometry === null) { throw new Error('Missing particle cube') }
+    return geometry
+  }
+
+  private async prepareParticle(): Promise<void> {
+    this.checkAlive()
+    let source = await this.loadParticleSource()
+    this.checkAlive()
+    let rf = this.rf as SceneResourceFactory
+    let name = 'particle' + (++this.serial).toString()
+    let node: Node | null = null
+    try {
+      node = await rf.createNode({ name: name })
+      this.checkAlive()
+      node.visible = false
+      node.scale = v3(0, 0, 0)
+      let imported = (this.scene as Scene).importScene(name + ':asset', source, node)
+      if (imported === null) { throw new Error('Empty particle import') }
+      let geometry = this.particleGeometry(imported)
+      geometry.name = name + ':cube'
+      if (geometry.mesh.subMeshes.length !== 1) { throw new Error('Invalid particle mesh') }
+      let material = geometry.mesh.subMeshes[0].material
+      if (material === null || material.materialType !== MaterialType.UNLIT) { throw new Error('Invalid particle material') }
+      let unlit = material as UnlitMaterial
+      unlit.baseColor.factor = vec4([1, 1, 1, 0])
+      this.particleNodes.push(node)
+      this.particleMaterials.push(unlit)
+    } catch (e) {
+      if (!this.destroyed && node !== null) { this.removeNode(node) }
+      throw e as Error
+    }
+  }
+
+  private writeParticles(dt: number): void {
+    if (!this.particleReady || (this.particlePending.length === 0 && !this.particlePool.needsFrames() && this.particleVisible === 0)) { return }
+    let theme = this.appliedTheme !== null ? this.appliedTheme : this.wantedTheme
+    if (theme === null) { return }
+    let start = Date.now()
+    let pending = this.particlePending
+    let queuedAt = this.particleQueuedAt
+    this.particlePending = []
+    this.particleQueuedAt = []
+    if (pending.length > 0) {
+      let oldestAge = 0
+      for (let at of queuedAt) { oldestAge = Math.max(oldestAge, start - at) }
+      console.info('VERA-WORLD-PARTICLES emit requests=' + pending.length.toString() + ' oldestQueuedMs=' + oldestAge.toString())
+    }
+    for (let request of pending) {
+      this.particlePool.emit(request)
+      this.particlesEmitted++
+    }
+    let spec = this.showing
+    let floorY: number | null = spec !== null && (spec.floor !== null || spec.table !== null) ? 0 : null
+    this.particlePool.advance(dt, floorY)
+    let poses = this.particlePool.poses()
+    for (let i = 0; i < poses.length; i++) {
+      let pose = poses[i]
+      let node = this.particleNodes[i]
+      // With a backdrop the particle is hidden while it is written and shown only once its colour is (below): a node
+      // half written -- the new position with the old colour -- is not shown for a frame.
+      if (this.backdropOn) { node.visible = false }
+      node.position = v3(pose.position[0], pose.position[1], pose.position[2])
+      let color = this.particleColors.get(pose.color)
+      if (color === undefined) {
+        color = lookLinear(theme, pose.color, 'accent')
+        if (this.particleColors.size >= MAX_PARTICLES) { this.particleColors.clear() }
+        this.particleColors.set(pose.color, color)
+      }
+      let alpha = color[3] * pose.alpha
+      let size = this.backdropOn ? pose.sizeM * Math.cbrt(Math.max(0, Math.min(1, alpha))) : pose.sizeM
+      node.scale = v3(size, size, size)
+      if (!(alpha > 0)) { node.visible = false }
+      let materialAlpha = this.backdropOn ? (alpha > 0 ? 1 : 0) : alpha
+      this.particleMaterials[i].baseColor.factor = vec4([color[0], color[1], color[2], materialAlpha])
+      if (alpha > 0) { node.visible = true }
+    }
+    for (let i = poses.length; i < this.particleVisible; i++) {
+      this.particleNodes[i].visible = false
+      this.particleNodes[i].scale = v3(0, 0, 0)
+    }
+    this.particleVisible = poses.length
+    let cost = Date.now() - start
+    this.particleMs += cost
+    this.writeMs += cost
   }
 
   /**
@@ -482,10 +883,15 @@ export class WorldBox {
     this.pushX = dx
     this.pushY = dy
     this.push = Math.min(1, n / STICK_TRAVEL)
+    // A push that begins takes the camera's frame and keeps it while it is held (StickFrame); let go, it is dropped.
+    this.stickFrame.push(this.pose, this.push)
     this.steer()
   }
 
-  /** The stick's push given to the sim, along the floor as the camera sees it now (called again as the camera turns). */
+  /**
+   * The stick's push given to the sim, along the floor as the stick's frame sees it: the camera as it was when the push
+   * began or a drag last turned it, not as the follow camera swings round behind the player since.
+   */
   private steer(): void {
     let sim = this.sim
     let pose = this.pose
@@ -494,8 +900,39 @@ export class WorldBox {
       sim.setStick(0, 0, 0)
       return
     }
-    let d = floorDirection(pose, this.pushX, this.pushY)
+    this.stickFrame.push(pose, this.push)
+    let d = this.stickFrame.direction(pose, this.pushX, this.pushY)
     sim.setStick(d[0], d[2], this.push)
+  }
+
+  /** The way the player faces now, a unit [dx, 0, dz] along its +x; [1, 0, 0] without one. */
+  playerFacing(): number[] {
+    let p = playerOf(this.applied)
+    let entry = p !== null ? this.bodies.get(p.id) : undefined
+    if (entry === undefined) { return [1, 0, 0] }
+    // A heading of a degrees faces (cos a, -sin a) along the ground (headingDeg).
+    let a = yawOf(quatOf(entry.node)) * Math.PI / 180
+    return [Math.cos(a), 0, -Math.sin(a)]
+  }
+
+  /**
+   * The person tapped the world or pressed a player's button (kind): the next shot to appear is timed from now, for the
+   * VERA-WORLD line that says how long a shot takes to show.
+   */
+  noteInput(kind: string): void {
+    this.inputAt = Date.now()
+    this.inputKind = kind
+  }
+
+  /** Every STRUCK_LOG_MS while struck events come: how many, and how many bodies they named. */
+  private logStruck(): void {
+    if (this.struckCount === 0) { return }
+    let now = Date.now()
+    if (now - this.struckLogAt < STRUCK_LOG_MS) { return }
+    console.info('VERA-WORLD struck n=' + this.struckCount.toString() + ' pairs=' + this.struckPairs.toString())
+    this.struckLogAt = now
+    this.struckCount = 0
+    this.struckPairs = 0
   }
 
   /** The world as last fully applied (null before the first). */
@@ -551,7 +988,11 @@ export class WorldBox {
     })
   }
 
-  /** The follow camera catches up with its body; the stick's direction follows the camera. */
+  /**
+   * The follow camera catches up with its body and, when that is the player walking, swings round behind it
+   * (Follower.turnBehind). The held stick keeps the frame it began with (StickFrame), so the swing does not turn the
+   * push.
+   */
   private writeFollow(dt: number): void {
     let spec = this.applied
     let pose = this.pose
@@ -565,11 +1006,18 @@ export class WorldBox {
       this.followBehind = false
       return
     }
-    if (this.follower.step(pose, entry.pos, f, dt, FOLLOW_EPS)) {
+    let player = playerOf(spec)
+    let moving = player !== null && player.id === f.target && this.sim !== null &&
+      this.sim.playerSpeedNow() > FOLLOW_TURN_SPEED
+    let heading = yawOf(quatOf(entry.node))
+    let moved = this.follower.step(pose, entry.pos, f, dt, FOLLOW_EPS)
+    if (this.follower.turnBehind(pose, heading, dt, moving)) { moved = true }
+    if (moved) {
       this.writeCamera()
       if (this.push > 0) { this.steer() }
     }
-    this.followBehind = this.follower.behind(entry.pos, f)
+    this.followBehind = this.follower.behind(entry.pos, f) ||
+      (this.follower.turning(moving) && Math.abs(this.follower.yawGap(heading)) > FOLLOW_BEHIND_DEG)
   }
 
   /** Bodies that move, against the zones: each one that came into a zone is told as `enter`. */
@@ -626,13 +1074,16 @@ export class WorldBox {
     this.writeMs += Date.now() - t0
   }
 
+  /** An event for the caller; over EVENT_QUEUE the oldest hit goes, else the oldest struck, never anything else. */
   private queue(e: SimEvent): void {
     this.events.push(e)
     if (this.events.length <= EVENT_QUEUE) { return }
-    for (let i = 0; i < this.events.length; i++) {
-      if (this.events[i].kind === 'hit') {
-        this.events.splice(i, 1)
-        return
+    for (let kind of ['hit', 'struck']) {
+      for (let i = 0; i < this.events.length; i++) {
+        if (this.events[i].kind === kind) {
+          this.events.splice(i, 1)
+          return
+        }
       }
     }
   }
@@ -684,11 +1135,12 @@ export class WorldBox {
     // Dice thrown here draw from Math.random, so no two throws are alike (the host's checks seed them instead).
     let made = new WorldSim(engine, (): number => Math.random())
     made.reset()
-    // Only a trigger that changed in this apply throws. On the box's first apply (prev null) every non-zero trigger
-    // is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the dice by
-    // itself and overwrite the faces the state keeps.
+    // Only a trigger that changed in this apply throws or blasts. On the box's first apply (prev null) every non-zero
+    // trigger is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the
+    // dice by itself and overwrite the faces the state keeps. The blasts are the edges apply() accepted (none then).
     let full = diffWorld(null, next)
     full.kick = prev !== null ? diff.kick : []
+    full.blast = diff.blast
     made.apply(full, next)
     this.sim = made
     this.steer()
@@ -749,6 +1201,14 @@ export class WorldBox {
     this.retired = true
     this.wanted = null
     this.events = []
+    this.particlePending = []
+    this.particleQueuedAt = []
+    this.particleWarmWanted = false
+    this.particlePool.clear()
+    for (let i = 0; i < this.particleVisible; i++) {
+      try { this.particleNodes[i].visible = false; this.particleNodes[i].scale = v3(0, 0, 0) } catch (e) {}
+    }
+    this.particleVisible = 0
     this.releasePhysics()
     if (!this.shown) {
       this.destroy()
@@ -786,11 +1246,27 @@ export class WorldBox {
     this.byName.clear()
     this.partByName.clear()
     this.materials.clear()
+    this.images.clear()
+    this.resolvedMaterials.clear()
+    this.resolvedImages.clear()
+    this.materialBindings.clear()
+    this.groundMaterials.clear()
+    this.textureSamplers.clear()
+    this.particlePool.clear()
+    this.particlePending = []
+    this.particleQueuedAt = []
+    this.particleNodes = []
+    this.particleMaterials = []
+    this.particleColors.clear()
+    this.particleReady = false
+    this.particleWarmWanted = false
+    this.particleVisible = 0
     this.tableNodes = []
     this.floorNodes = []
     this.zoneNodes = []
     this.zoneWatch.reset()
     this.push = 0
+    this.stickFrame.reset()
     if (scene !== null) {
       try {
         scene.destroy()
@@ -798,6 +1274,12 @@ export class WorldBox {
         console.warn('VERA-WORLD scene destroy failed: ' + (e as Error).message)
       }
     }
+    if (this.particleSourceScene !== null) { this.disposeModelSource(this.particleSourceScene) }
+    this.particleSourceScene = null
+    this.particleSource = null
+    for (let source of this.loadedModels) { this.disposeModelSource(source) }
+    this.loadedModels.clear()
+    this.modelSources.clear()
   }
 
   // ---------------------------------------------------------------- touch
@@ -871,6 +1353,8 @@ export class WorldBox {
         pose.eye = orbitEye(pose.eye, pose.look, yaw, pitch, grounded ? 0.05 : -1.45, 1.45)
       }
       this.writeCamera()
+      // The person turned the camera: a held stick steers by the view as it is now.
+      this.stickFrame.refresh(pose)
       if (this.push > 0) { this.steer() }
     }
     this.lastX = x
@@ -985,13 +1469,35 @@ export class WorldBox {
 
   /**
    * What is under (x, y), in vp from the box's top left: the body the ray hits, else the body nearest on screen within
-   * TAP_SLOP_VP, else body "" with where the ray met the table or floor; null when there is no scene.
+   * TAP_SLOP_VP (at its centre), else body "" with where the ray met the table or floor, or TAP_MISS_M along the ray when
+   * it met nothing; always with the ray's direction. null when there is no scene.
    */
   async pick(x: number, y: number): Promise<WorldPick | null> {
     let pick = await this.raycast(x, y)
-    if (pick === null || pick.body.length > 0 || this.destroyed) { return pick }
+    if (pick === null || this.destroyed) { return pick }
+    let pose = this.pose
+    if (pose !== null) {
+      let ray = screenRay(pose, this.width, this.height, x, y)
+      pick.dx = ray[1][0]
+      pick.dy = ray[1][1]
+      pick.dz = ray[1][2]
+      if (!pick.met) {
+        pick.x = ray[0][0] + ray[1][0] * TAP_MISS_M
+        pick.y = ray[0][1] + ray[1][1] * TAP_MISS_M
+        pick.z = ray[0][2] + ray[1][2] * TAP_MISS_M
+      }
+    }
+    if (pick.body.length > 0) { return pick }
     let near = this.screenPick(x, y, TAP_SLOP_VP)
     let entry = this.bodies.get(near)
+    // When the ray met the floor or table, the nearest body on screen counts only if it stands in front of where the ray
+    // met it: a wide wall behind the place tapped covers half the screen by its size, and took every tap on the floor.
+    if (entry !== undefined && pick.met && pose !== null) {
+      let at = projectPoint(pose, this.width, this.height, [pick.x, pick.y, pick.z])
+      let seen = projectPoint(pose, this.width, this.height, entry.pos)
+      let half = Math.min(entry.spec.dims[0], entry.spec.dims[1], entry.spec.dims[2]) / 2
+      if (at !== null && seen !== null && seen[2] - half > at[2]) { entry = undefined }
+    }
     if (entry !== undefined) {
       pick.body = near
       pick.x = entry.pos[0]
@@ -1008,9 +1514,11 @@ export class WorldBox {
     let params: RaycastParameters = {}
     let hits: RaycastResult[] = await cam.raycast(at, params)
     if (this.destroyed) { return null }
+    hits = hits.filter((hit: RaycastResult): boolean => !hit.node.name.startsWith('particle'))
     let pick = new WorldPick()
     if (hits.length > 0) {
       let hit = hits[0]
+      pick.met = true
       pick.body = this.bodyOf(hit.node)
       pick.part = this.partOf(hit.node)
       pick.x = hit.hitPosition.x
@@ -1049,7 +1557,7 @@ export class WorldBox {
   private partOf(node: Node | null): string {
     let at: Node | null = node
     let steps = 0
-    while (at !== null && steps < 8) {
+    while (at !== null && steps < 256) {
       let id = this.partByName.get(at.name)
       if (id !== undefined) { return id }
       at = at.parent
@@ -1061,7 +1569,7 @@ export class WorldBox {
   private bodyOf(node: Node | null): string {
     let at: Node | null = node
     let steps = 0
-    while (at !== null && steps < 8) {
+    while (at !== null && steps < 256) {
       let id = this.byName.get(at.name)
       if (id !== undefined) { return id }
       at = at.parent
@@ -1078,9 +1586,16 @@ export class WorldBox {
     let failed = false
     this.run().catch((e: Error) => {
       failed = true
-      if (!this.destroyed) { console.error('VERA-WORLD apply failed: ' + e.message) }
+      this.particleWarmWanted = false
+      this.particlePending = []
+      this.particleQueuedAt = []
+      if (!this.destroyed && !this.retired) {
+        this.note = 'World rendering failed: ' + e.message
+        console.error('VERA-WORLD apply failed: ' + e.message)
+      }
     }).finally(() => {
       this.running = false
+      if (!failed) { this.sweepMaterials() }
       // A spec asked for between run() finishing and this callback found the box still running and only left itself in
       // `wanted`: apply it now rather than leave the world (and a throw's kick) behind until the next state change. Not
       // after a failure, which would only fail again, at once and for ever.
@@ -1093,8 +1608,8 @@ export class WorldBox {
 
   private async run(): Promise<void> {
     if (this.scene === null && !(await this.create())) { return }
-    while (!this.destroyed && this.wanted !== null && this.wantedTheme !== null &&
-        (this.wanted !== this.applied || this.wantedTheme !== this.appliedTheme)) {
+    while (!this.destroyed && !this.retired && this.wanted !== null && this.wantedTheme !== null &&
+        (this.renderDirty || this.wanted !== this.applied || this.wantedTheme !== this.appliedTheme)) {
       await this.applyOne(this.wanted as WorldSpec, this.wantedTheme as ResolvedTheme)
     }
   }
@@ -1102,7 +1617,7 @@ export class WorldBox {
   /** The scene, its camera, sun and environment: look B. False when the box was destroyed while they were made. */
   private async create(): Promise<boolean> {
     let scene = await Scene.load()
-    if (this.destroyed) {
+    if (this.destroyed || this.retired) {
       scene.destroy()
       return false
     }
@@ -1110,7 +1625,7 @@ export class WorldBox {
     let rf = scene.getResourceFactory()
     this.rf = rf
     let cam = await rf.createCamera({ name: 'cam' })
-    if (this.destroyed) { return false }
+    if (this.destroyed || this.retired) { return false }
     cam.enabled = true
     cam.fov = LOOK_FOV
     // {} and not null: null still tone-maps, and the colours would no longer be the theme's.
@@ -1118,7 +1633,7 @@ export class WorldBox {
     cam.postProcess = pp
     this.cam = cam
     let env = await rf.createEnvironment({ name: 'env' })
-    if (this.destroyed) { return false }
+    if (this.destroyed || this.retired) { return false }
     env.backgroundType = EnvironmentBackgroundType.BACKGROUND_NONE
     let amb: Vec4 = { x: LOOK_AMBIENT, y: LOOK_AMBIENT, z: LOOK_AMBIENT, w: 1 }
     env.indirectDiffuseFactor = amb
@@ -1126,7 +1641,7 @@ export class WorldBox {
     scene.environment = env
     this.env = env
     let light = await rf.createLight({ name: 'sun' }, LightType.DIRECTIONAL)
-    if (this.destroyed) { return false }
+    if (this.destroyed || this.retired) { return false }
     light.position = v3(LOOK_SUN_POSITION[0], LOOK_SUN_POSITION[1], LOOK_SUN_POSITION[2])
     light.rotation = quat(lookAtQuat(LOOK_SUN_POSITION, LOOK_SUN_TARGET, [0, 1, 0]))
     light.intensity = LOOK_SUN_INTENSITY
@@ -1134,16 +1649,51 @@ export class WorldBox {
     this.light = light
     let opt: SceneOptions = { scene: scene, modelType: ModelType.SURFACE }
     this.options = opt
+    this.startParticles()
+    return true
+  }
+
+  /** Whether the body nodes are exactly prev's bodies, each built from its spec and ready. */
+  private nodesShow(prev: WorldSpec | null): boolean {
+    if (prev === null || this.bodies.size !== prev.bodies.length) { return false }
+    for (let b of prev.bodies) {
+      let entry = this.bodies.get(b.id)
+      if (entry === undefined || !entry.ready || entry.spec !== b) { return false }
+    }
     return true
   }
 
   private async applyOne(next: WorldSpec, theme: ResolvedTheme): Promise<void> {
+    this.checkAlive()
+    if (this.note.startsWith('World rendering failed:') || this.note.startsWith('Texture loading failed:')) { this.note = '' }
+    this.renderDirty = true
     let prev = this.applied
     // A new period goes on from where each body is now, not from where the new period alone would put it.
     if (next !== prev) { this.carry.apply(next, this.timeS) }
     let diff: WorldDiff = diffWorld(prev, next)
     let themeChanged = theme !== this.appliedTheme
+    // The blasts are those apply() accepted, the same edges its particles were queued for; taken once the physics has
+    // them, so an apply that fails after this does not push them twice.
+    diff.blast = this.pendingBlasts
     this.applyPhysics(prev, diff, next)
+    this.pendingBlasts = []
+    // The nodes as they are: as prev has them when every body of prev is drawn, built and nothing else (no diff again).
+    let renderDiff = diff
+    if (!this.nodesShow(prev)) {
+      let live = new WorldSpec()
+      this.bodies.forEach((entry: BodyNode) => { live.bodies.push(entry.spec) })
+      renderDiff = diffWorld(live, next)
+    }
+    let rebuilding = new Set<string>(renderDiff.recreate.map((b: BodySpec): string => b.id))
+    for (let b of next.bodies) {
+      let entry = this.bodies.get(b.id)
+      if (entry !== undefined && !entry.ready && !rebuilding.has(b.id)) { renderDiff.recreate.push(b) }
+    }
+    diff.create = renderDiff.create
+    diff.recreate = renderDiff.recreate
+    diff.remove = renderDiff.remove
+    diff.material = renderDiff.material
+    diff.setPose = renderDiff.setPose
     let glows = worldGlows(next)
     let glowsChanged = glows !== this.glows
     let backdrop = worldHasBackdrop(next)
@@ -1152,7 +1702,7 @@ export class WorldBox {
     this.dark = isDarkRgba(worldBackgroundRgba(next, theme))
     if (glows && !this.spotsMade) {
       await this.makeSpots()
-      if (this.destroyed) { return }
+      this.checkAlive()
     }
     if (glowsChanged) {
       this.glows = glows
@@ -1164,50 +1714,80 @@ export class WorldBox {
     let player = playerOf(next)
     this.hasPlayer = player !== null
     this.action = player !== null ? (player.player as ScenePlayer).action : ''
+    this.fire = player !== null ? (player.player as ScenePlayer).fire : ''
     if (player === null && this.push > 0) { this.setStick(0, 0) }
     if (themeChanged) {
       // Materials are by the colour a role comes out as; a new theme makes them again.
-      this.materials.clear()
       this.writeBackground(theme)
     }
-    for (let id of diff.remove) { this.removeBody(id) }
+    // Bodies made from another (scene.from) start where that one is now. With physics the sim has placed them; without,
+    // they are placed from the parent's node here, read before anything is removed: a body broken into pieces in this
+    // same apply gives them where it stands. A parent removed for its pieces keeps its node until theirs exist, so the
+    // body does not blink out between.
+    this.fromParents.clear()
+    let removedFor = new Set<string>()
+    let goneIds = new Set<string>(diff.remove)
+    for (let b of diff.create.concat(diff.recreate)) {
+      if (b.from === null) { continue }
+      let parent = (b.from as SceneFrom).parent
+      let known = this.bodies.get(parent)
+      if (known !== undefined && !this.fromParents.has(parent)) {
+        this.fromParents.set(parent, [known.pos[0], known.pos[1], known.pos[2]].concat(quatOf(known.node), [0, 0, 0, 0, 0, 0]))
+      }
+      if (goneIds.has(parent)) { removedFor.add(parent) }
+    }
+    // A shot or a piece coming or going, or a body going to pieces, is play: it does not frame the world again.
+    let framing = 0
+    for (let id of diff.remove) {
+      let known = this.bodies.get(id)
+      if (known !== undefined && !framedOut(known.spec) && !removedFor.has(id)) { framing++ }
+    }
+    for (let id of diff.remove) { if (!removedFor.has(id)) { this.removeBody(id) } }
     let creating: BodySpec[] = []
+    this.keptFrom.clear()
     for (let b of diff.recreate) {
+      this.keepFrom(b)
       this.removeBody(b.id)
       creating.push(b)
     }
-    for (let b of diff.create) {
-      // Already here after an apply that failed half-way (applied was left at the spec before it): made again, not twice.
-      if (this.bodies.has(b.id)) { this.removeBody(b.id) }
-      creating.push(b)
+    for (let b of diff.create) { creating.push(b) }
+    let themeRebuilt = new Set<string>()
+    if (themeChanged) {
+      let rebuilding = new Set<string>(creating.map((b: BodySpec): string => b.id))
+      for (let b of next.bodies) {
+        if (!rebuilding.has(b.id) && (legacyPaint(b) || b.parts.some((p: BodySpec): boolean => legacyPaint(p)) ||
+          (b.model.length > 0 && (b.mark.length > 0 || b.rings.length > 0)))) {
+          this.keepFrom(b)
+          this.removeBody(b.id)
+          creating.push(b)
+          themeRebuilt.add(b.id)
+        }
+      }
     }
-    // Every body still here takes the spec it now has (orbits, spins and later physics read it).
     let fresh = new Set<string>()
     for (let b of creating) { fresh.add(b.id) }
-    for (let b of next.bodies) {
-      let known = this.bodies.get(b.id)
-      if (known !== undefined && !fresh.has(b.id)) { known.spec = b }
-    }
     let recolour: BodySpec[] = themeChanged ? next.bodies.filter((b: BodySpec): boolean => !fresh.has(b.id)) : diff.material
     for (let b of recolour) {
       let known = this.bodies.get(b.id)
       // A painted ball's colours are its mesh's (diffWorld makes it again when they change).
-      if (known === undefined || (b.shape === 'sphere' && b.pattern.length > 0)) { continue }
+      if (known === undefined || legacyPaint(b) || b.model.length > 0) { continue }
       if (known.parts.length > 0) {
         // A group: each part its own colour (a painted part's are its mesh's); the group's node itself draws nothing.
         for (let k = 0; k < known.parts.length && k < b.parts.length; k++) {
           // The parts as this spec has them: a new part colour is a material update, not a new group.
           let part = b.parts[k]
           known.partSpecs[k] = part
-          if (part.shape === 'sphere' && part.pattern.length > 0) { continue }
-          let partMaterial = await this.material(part.color, b.glow, theme, 'ink')
-          if (this.destroyed) { return }
+          if (legacyPaint(part)) { continue }
+          let partMaterial = await this.bodyMaterial(part, b.glow || part.glow, theme)
+          this.checkAlive()
+          known.ready = false
           this.paint(known.parts[k], partMaterial)
         }
         continue
       }
-      let material = await this.material(b.color, b.glow, theme, 'ink')
-      if (this.destroyed) { return }
+      let material = await this.bodyMaterial(b, b.glow, theme)
+      if (this.destroyed || this.retired) { return }
+      known.ready = false
       this.paint(known.node, material)
       if (themeChanged && known.pips.length > 0) {
         let pipMaterial = await this.material('', false, theme, LOOK_PIP_ROLE)
@@ -1219,34 +1799,52 @@ export class WorldBox {
       let known = this.bodies.get(b.id)
       if (known !== undefined) { this.place(known, b) }
     }
+    for (let b of next.bodies) {
+      let known = this.bodies.get(b.id)
+      if (known !== undefined && !fresh.has(b.id)) {
+        known.spec = b
+        known.ready = true
+      }
+    }
     if (diff.tableChanged || diff.floorChanged || themeChanged || glowsChanged) {
       await this.buildGround(next, theme, diff.tableChanged || themeChanged, diff.floorChanged || themeChanged || glowsChanged)
-      if (this.destroyed) { return }
+      this.checkAlive()
     }
     if (diff.zonesChanged || themeChanged) {
       await this.buildZones(next, theme)
-      if (this.destroyed) { return }
+      this.checkAlive()
     }
     // A follow camera is placed once, and again only for a new body to follow: bodies coming and going leave it be.
+    for (let b of creating) { if (!framedOut(b) && !themeRebuilt.has(b.id)) { framing++ } }
     let reframe = prev === null || diff.cameraChanged || (next.camera === null && next.follow === null &&
-      (creating.length > 0 || diff.remove.length > 0 || diff.setPose.length > 0 || diff.tableChanged))
+      (framing > 0 || diff.setPose.length > 0 || diff.tableChanged))
     if (reframe) { this.resetCamera(next) }
     for (let i = 0; i < creating.length; i += BATCH) {
       let batch = creating.slice(i, i + BATCH)
-      await Promise.all(batch.map((b: BodySpec): Promise<void> => this.createBody(b, theme)))
-      if (this.destroyed) { return }
+      let errors: Error[] = []
+      await Promise.all(batch.map((b: BodySpec): Promise<void> => this.createBody(b, theme).catch((e: Error): void => {
+        errors.push(e)
+      })))
+      if (errors.length > 0) { throw errors[0] }
+      this.checkAlive()
       this.writeKinematic()
       if (i + BATCH < creating.length) {
         await nextFrame()
-        if (this.destroyed) { return }
+        this.checkAlive()
       }
     }
+    // The pieces are on screen: the bodies they broke from go now.
+    removedFor.forEach((id: string) => { this.removeBody(id) })
+    this.fromParents.clear()
+    this.keptFrom.clear()
     this.applied = next
     this.appliedTheme = theme
+    if (themeChanged) { this.particleColors.clear() }
     this.writeKinematic()
     // A glowing body moved or came, a trail or the sky changed: the light and the backdrop follow the world as applied.
     if (this.glows) { this.writeLight() }
     if (this.backdropOn || backdropChanged || diff.backdropChanged || themeChanged) { this.paintBackdrop() }
+    this.renderDirty = false
   }
 
   private writeBackground(theme: ResolvedTheme): void {
@@ -1265,8 +1863,7 @@ export class WorldBox {
     let known = this.materials.get(key)
     if (known !== undefined) { return known }
     let made = this.makeMaterial(key, lookLinear(theme, color, fallbackRole), glow, false)
-    this.materials.set(key, made)
-    return made
+    return this.cacheMaterial(key, made)
   }
 
   /** The table's and the floor's: as material(), but shadows fall on it. */
@@ -1275,19 +1872,170 @@ export class WorldBox {
     let known = this.materials.get(key)
     if (known !== undefined) { return known }
     let made = this.makeMaterial(key, lookLinear(theme, color, fallbackRole), false, true)
-    this.materials.set(key, made)
+    return this.cacheMaterial(key, made)
+  }
+
+  private cacheMaterial(key: string, made: Promise<Material>): Promise<Material> {
+    this.resourcePending++
+    let cached: Promise<Material> = made.then((material: Material): Material => {
+      this.checkAlive()
+      this.resolvedMaterials.set(key, material)
+      return material
+    }).catch((e: Error): Material => {
+      if (this.materials.get(key) === cached) { this.materials.delete(key) }
+      throw e
+    }).finally(() => { this.resourcePending-- })
+    this.materials.set(key, cached)
+    return cached
+  }
+
+  private sweepMaterials(): void {
+    if (this.destroyed || this.retired || this.resourcePending > 0) { return }
+    let live = new Set<Material>()
+    this.materialBindings.forEach((material: Material) => { live.add(material) })
+    let unused: string[] = []
+    this.resolvedMaterials.forEach((material: Material, key: string) => {
+      if (!live.has(material)) { unused.push(key) }
+    })
+    for (let key of unused) {
+      let material = this.resolvedMaterials.get(key) as Material
+      let base = (material as MetallicRoughnessMaterial).baseColor
+      let texture = base.image
+      try {
+        if (texture !== undefined && texture !== null) { base.image = null }
+        material.destroy()
+        this.resolvedMaterials.delete(key)
+        this.materials.delete(key)
+      } catch (e) {
+        if (texture !== undefined && texture !== null) { base.image = texture }
+        console.warn('VERA-WORLD material cleanup failed: ' + (e as Error).message)
+      }
+    }
+    let groundGone: Material[] = []
+    this.groundMaterials.forEach((material: Material) => { if (!live.has(material)) { groundGone.push(material) } })
+    for (let material of groundGone) {
+      try { material.destroy(); this.groundMaterials.delete(material) }
+      catch (e) { console.warn('VERA-WORLD floor cleanup failed: ' + (e as Error).message) }
+    }
+    let images = new Set<SceneImage>()
+    let samplers = new Set<Sampler>()
+    this.resolvedMaterials.forEach((material: Material) => {
+      let base = (material as MetallicRoughnessMaterial).baseColor
+      if (base.image !== null && base.image !== undefined) { images.add(base.image) }
+      if (base.sampler !== undefined && base.sampler !== null) { samplers.add(base.sampler) }
+    })
+    let imageGone: string[] = []
+    this.resolvedImages.forEach((texture: SceneImage, key: string) => { if (!images.has(texture)) { imageGone.push(key) } })
+    for (let key of imageGone) {
+      try {
+        (this.resolvedImages.get(key) as SceneImage).destroy()
+        this.resolvedImages.delete(key)
+        this.images.delete(key)
+      } catch (e) { console.warn('VERA-WORLD image cleanup failed: ' + (e as Error).message) }
+    }
+    let samplerGone: Sampler[] = []
+    this.textureSamplers.forEach((sampler: Sampler) => { if (!samplers.has(sampler)) { samplerGone.push(sampler) } })
+    for (let sampler of samplerGone) { this.textureSamplers.delete(sampler) }
+  }
+
+  private textureImage(key: string, pattern: string, c1: number[], c2: number[], seed: number): Promise<SceneImage> {
+    let known = this.images.get(key)
+    if (known !== undefined) { return known }
+    let made: Promise<SceneImage> = this.loadTextureImage(key, pattern, c1, c2, seed).catch((e: Error): SceneImage => {
+      if (this.images.get(key) === made) { this.images.delete(key) }
+      if (!this.destroyed && !this.retired) { this.note = 'Texture loading failed: ' + e.message }
+      throw e
+    })
+    this.images.set(key, made)
     return made
   }
 
+  private async loadTextureImage(key: string, pattern: string, c1: number[], c2: number[], seed: number): Promise<SceneImage> {
+    this.checkAlive()
+    let dir = this.filesDir + '/vera/tex'
+    let fullPath = dir + '/' + key + '.png'
+    TEXTURE_READERS.set(fullPath, (TEXTURE_READERS.get(fullPath) || 0) + 1)
+    try {
+      let path = await textureFile(this.filesDir, key, pattern, c1, c2, seed)
+      this.checkAlive()
+      let rf = this.rf as SceneResourceFactory
+      let texture = await rf.createImage({ name: key, uri: 'file://' + path })
+      this.checkAlive()
+      this.resolvedImages.set(key, texture)
+      return texture
+    } finally {
+      let readers = (TEXTURE_READERS.get(fullPath) || 1) - 1
+      if (readers > 0) { TEXTURE_READERS.set(fullPath, readers) } else { TEXTURE_READERS.delete(fullPath) }
+      // Once the last load in flight is done (a world's textures load together), not after each: trimming lists and
+      // stats the whole directory on this thread, and a file still being read or written could not go anyway.
+      if (this.filesDir.length > 0 && TEXTURE_READERS.size === 0 && TEXTURE_WRITES.size === 0) { trimTextures(dir) }
+    }
+  }
+
+  private texturedMaterial(pattern: string, c1: number[], c2: number[], seed: number, glow: boolean,
+    receiver: boolean, gain: number = 1, floor: boolean = false): Promise<Material> {
+    let imageKey = textureKey(pattern, c1, c2, seed)
+    let key = 'texture:' + imageKey + ':' + glow.toString() + ':' + receiver.toString() + ':' + gain.toString() + ':' + floor.toString()
+    let known = this.materials.get(key)
+    if (known !== undefined) { return known }
+    return this.cacheMaterial(key, this.makeTexturedMaterial(key, imageKey, pattern, c1, c2, seed, glow, receiver, gain, floor))
+  }
+
+  private async makeTexturedMaterial(key: string, imageKey: string, pattern: string, c1: number[], c2: number[], seed: number,
+    glow: boolean, receiver: boolean, gain: number, floor: boolean): Promise<Material> {
+    this.checkAlive()
+    let rf = this.rf as SceneResourceFactory
+    let texture = await this.textureImage(imageKey, pattern, c1, c2, seed)
+    this.checkAlive()
+    let sampler = await rf.createSampler({ name: key + ':repeat' })
+    this.checkAlive()
+    this.textureSamplers.add(sampler)
+    sampler.addressModeU = SamplerAddressMode.REPEAT
+    sampler.addressModeV = SamplerAddressMode.REPEAT
+    sampler.minFilter = SamplerFilter.LINEAR
+    sampler.magFilter = SamplerFilter.LINEAR
+    if (glow) {
+      let m = await rf.createMaterial({ name: key }, MaterialType.UNLIT) as UnlitMaterial
+      this.checkAlive()
+      m.baseColor.factor = vec4([1, 1, 1, 1])
+      m.baseColor.image = texture
+      m.baseColor.sampler = sampler
+      return m
+    }
+    let m = await rf.createMaterial({ name: key }, MaterialType.METALLIC_ROUGHNESS) as MetallicRoughnessMaterial
+    this.checkAlive()
+    m.baseColor.factor = vec4([1 / gain, 1 / gain, 1 / gain, 1])
+    m.baseColor.image = texture
+    m.baseColor.sampler = sampler
+    m.material.factor = { x: m.material.factor.x, y: floor ? FLOOR_ROUGHNESS : textureRoughness(pattern),
+      z: FLOOR_METALLIC, w: m.material.factor.w }
+    if (floor) {
+      m.specular.factor = { x: m.specular.factor.x, y: m.specular.factor.y, z: m.specular.factor.z, w: FLOOR_SPECULAR }
+    }
+    if (receiver) { m.shadowReceiver = true }
+    return m
+  }
+
+  private bodyMaterial(b: BodySpec, glow: boolean, theme: ResolvedTheme): Promise<Material> {
+    if (legacyPaint(b)) { return this.vertexMaterial(glow) }
+    if (!texturePattern(b.pattern)) { return this.material(b.color, glow, theme, 'ink') }
+    let c1 = lookRgba(theme, b.color, 'ink')
+    let c2 = lookRgba(theme, b.color2.length > 0 ? b.color2 : b.color, 'ink')
+    return this.texturedMaterial(b.pattern, c1, c2, surfaceSeed(b.id), glow, false)
+  }
+
   private async makeMaterial(name: string, linear: number[], glow: boolean, receiver: boolean): Promise<Material> {
+    this.checkAlive()
     let rf = this.rf as SceneResourceFactory
     if (glow) {
       // A glowing body is drawn in its own colour whatever the light: unlit.
       let unlit = await rf.createMaterial({ name: name }, MaterialType.UNLIT) as UnlitMaterial
+      this.checkAlive()
       unlit.baseColor.factor = vec4(linear)
       return unlit
     }
     let m = await rf.createMaterial({ name: name }, MaterialType.METALLIC_ROUGHNESS) as MetallicRoughnessMaterial
+    this.checkAlive()
     m.baseColor.factor = vec4(linear)
     if (receiver) { m.shadowReceiver = true }
     return m
@@ -1295,25 +2043,79 @@ export class WorldBox {
 
   private paint(node: Node, material: Material): void {
     let subMeshes = (node as Geometry).mesh.subMeshes
-    if (subMeshes.length > 0) { subMeshes[0].material = material }
+    if (subMeshes.length > 0) {
+      subMeshes[0].material = material
+      this.materialBindings.set(node.name, material)
+    }
+  }
+
+  /**
+   * A node where its spec puts it. A body made from another (scene.from) is placed in that one's frame as it stood when
+   * the apply began (fromParents; where it was built for a piece whose parent is not there) and an aimed one turned to
+   * its point, as WorldSim does it -- which places a loose one itself, and createBody takes its pose from there.
+   */
+  private keepFrom(b: BodySpec): void {
+    if (b.from === null) { return }
+    let known = this.bodies.get(b.id)
+    if (known !== undefined) { this.keptFrom.set(b.id, [known.pos[0], known.pos[1], known.pos[2]].concat(quatOf(known.node))) }
   }
 
   private place(entry: BodyNode, b: BodySpec): void {
+    let kept = this.keptFrom.get(b.id)
+    if (kept !== undefined) {
+      entry.node.position = v3(kept[0], kept[1], kept[2])
+      entry.node.rotation = quat([kept[3], kept[4], kept[5], kept[6]])
+      entry.pos = [kept[0], kept[1], kept[2]]
+      return
+    }
+    if (b.from !== null || b.aim.length === 3) {
+      let parent: number[] | null = null
+      if (b.from !== null) {
+        let f = b.from as SceneFrom
+        let live = this.fromParents.get(f.parent)
+        if (live !== undefined) {
+          parent = live
+        } else if (f.base.length === 6) {
+          let q = quatXYZ(f.base[3], f.base[4], f.base[5])
+          parent = [f.base[0], f.base[1], f.base[2], q[0], q[1], q[2], q[3], 0, 0, 0, 0, 0, 0]
+        }
+      }
+      let at = resolveFrom(parent, b.position, b.rotation, b.aim, 0, 0)[0]
+      entry.node.position = v3(at[0], at[1], at[2])
+      entry.node.rotation = quat([at[3], at[4], at[5], at[6]])
+      entry.pos = [at[0], at[1], at[2]]
+      return
+    }
     entry.node.position = v3(b.position[0], b.position[1], b.position[2])
     entry.node.rotation = quat(quatXYZ(b.rotation[0], b.rotation[1], b.rotation[2]))
     entry.pos = [b.position[0], b.position[1], b.position[2]]
   }
 
+  /** A shot's node is on screen: how long after the tap or button press before it, once per press. */
+  private noteShown(b: BodySpec): void {
+    if (b.shot === null || this.inputAt === 0) { return }
+    console.info('VERA-WORLD shot shown id=' + b.id + ' ms=' + (Date.now() - this.inputAt).toString() + ' after=' + this.inputKind)
+    this.inputAt = 0
+  }
+
   /** A node of its own mesh. Meshes are not shared: the material is set on the mesh, and that is only proven per node. */
   private async node(rf: SceneResourceFactory, name: string, geometry: GeometryDefinition, material: Material): Promise<Geometry> {
+    this.checkAlive()
     let mesh: MeshResource = await rf.createMesh({ name: name + 'm' }, geometry)
+    this.checkAlive()
     let node = await rf.createGeometry({ name: name }, mesh)
-    node.mesh.subMeshes[0].material = material
+    this.checkAlive()
+    this.paint(node, material)
     return node
   }
 
   private shapeOf(b: BodySpec): GeometryDefinition {
     if (b.shape === 'shape' || b.shape === 'hull') { return shapedGeometry(b) }
+    if (texturePattern(b.pattern)) {
+      if (b.shape === 'sphere') { return customGeometry(texturedSphereMesh(b.dims[0] / 2, 48, 24)) }
+      if (b.shape === 'cylinder') { return customGeometry(texturedCylinderMesh(b.dims[0] / 2, b.dims[1], 32)) }
+      return customGeometry(texturedBoxMesh(b.dims[0], b.dims[1], b.dims[2]))
+    }
     if (b.shape === 'sphere') {
       let s = new SphereGeometry()
       s.radius = b.dims[0] / 2
@@ -1332,22 +2134,105 @@ export class WorldBox {
     return box
   }
 
+  private modelSource(spec: ModelSpec): Promise<Scene> {
+    this.checkAlive()
+    let known = this.modelSources.get(spec.name)
+    if (known !== undefined) {
+      console.info('VERA-WORLD-MODEL name=' + spec.name + ' cache=hit')
+      return known
+    }
+    let start = Date.now()
+    let resource = $rawfile('models/treeSmall.glb')
+    resource.params = [spec.file]
+    let made: Promise<Scene> = Scene.load(resource).then((source: Scene): Scene => {
+      if (this.destroyed || this.retired) {
+        this.disposeModelSource(source)
+        this.checkAlive()
+      }
+      let root = source.root
+      if (root === null || root.children.count() === 0) {
+        this.disposeModelSource(source)
+        throw new Error('Empty model source: ' + spec.name)
+      }
+      this.loadedModels.add(source)
+      console.info('VERA-WORLD-MODEL name=' + spec.name + ' cache=miss loadMs=' + Math.max(0, Date.now() - start).toString())
+      return source
+    }).catch((e: Error): Scene => {
+      if (this.modelSources.get(spec.name) === made) { this.modelSources.delete(spec.name) }
+      throw e
+    })
+    this.modelSources.set(spec.name, made)
+    return made
+  }
+
+  private disposeModelSource(source: Scene): void {
+    try { source.destroy() }
+    catch (e) { console.warn('VERA-WORLD-MODEL source cleanup failed: ' + (e as Error).message) }
+  }
+
+  private async createModel(rf: SceneResourceFactory, b: BodySpec, theme: ResolvedTheme): Promise<void> {
+    this.checkAlive()
+    let spec = modelSpec(b.model)
+    let shape = modelShape(b.model, Math.max(b.dims[0], b.dims[1], b.dims[2]))
+    if (spec === null || shape === null) { throw new Error('Unknown model: ' + b.model) }
+    let source = await this.modelSource(spec)
+    this.checkAlive()
+    let scene = this.scene as Scene
+    let name = 'b' + (++this.serial).toString()
+    let parent: Node | null = null
+    let entry: BodyNode | null = null
+    try {
+      parent = await rf.createNode({ name: name })
+      this.checkAlive()
+      let start = Date.now()
+      let imported = scene.importScene(name + ':model', source, parent)
+      imported.position = v3(shape.offset[0], shape.offset[1], shape.offset[2])
+      imported.scale = v3(shape.scale, shape.scale, shape.scale)
+      imported.rotation = quat(quatXYZ(0, shape.yawDeg, 0))
+      console.info('VERA-WORLD-MODEL name=' + spec.name + ' importMs=' + Math.max(0, Date.now() - start).toString())
+      entry = new BodyNode(b, parent)
+      this.place(entry, b)
+      let at = b.motion === 'loose' && this.sim !== null ? this.sim.poseOf(b.id) : null
+      if (at !== null) {
+        parent.position = v3(at[0], at[1], at[2])
+        parent.rotation = quat([at[3], at[4], at[5], at[6]])
+        entry.pos = [at[0], at[1], at[2]]
+      }
+      entry.names.push(name)
+      this.bodies.set(b.id, entry)
+      this.byName.set(name, b.id)
+      await this.addMarks(rf, entry, b, theme)
+      this.checkAlive()
+      this.noteShown(b)
+      entry.ready = true
+    } catch (e) {
+      if (!this.destroyed && parent !== null) {
+        if (entry !== null && this.bodies.get(b.id) === entry) { this.removeBody(b.id) }
+        else { this.removeNode(parent) }
+      }
+      throw e as Error
+    }
+  }
+
   private async createBody(b: BodySpec, theme: ResolvedTheme): Promise<void> {
     let rf = this.rf
     if (rf === null || this.destroyed) { return }
+    if (b.model.length > 0) {
+      await this.createModel(rf, b, theme)
+      return
+    }
     if (b.shape === 'group') {
       await this.createGroup(rf, b, theme)
       return
     }
     this.serial++
     let name = 'b' + this.serial.toString()
-    // A painted ball carries its colours in its vertices, under a white material; anything else is one colour.
-    let painted = b.shape === 'sphere' && b.pattern.length > 0
-    let material = painted ? await this.vertexMaterial(b.glow) : await this.material(b.color, b.glow, theme, 'ink')
-    if (this.destroyed) { return }
+    let painted = legacyPaint(b)
+    let material = await this.bodyMaterial(b, b.glow, theme)
+    this.checkAlive()
     let geometry: GeometryDefinition = painted ? paintedGeometry(b, theme) : this.shapeOf(b)
     let node = await this.node(rf, name, geometry, material)
-    if (this.destroyed) { return }
+    this.checkAlive()
     let entry = new BodyNode(b, node)
     this.place(entry, b)
     // A loose body may have moved in the physics while its node was being made.
@@ -1360,8 +2245,11 @@ export class WorldBox {
     entry.names.push(name)
     this.bodies.set(b.id, entry)
     this.byName.set(name, b.id)
+    this.noteShown(b)
     if (b.isDie) { await this.addPips(rf, entry, theme) }
     await this.addMarks(rf, entry, b, theme)
+    this.checkAlive()
+    entry.ready = true
   }
 
   /**
@@ -1372,7 +2260,7 @@ export class WorldBox {
     this.serial++
     let name = 'b' + this.serial.toString()
     let parent = await rf.createNode({ name: name })
-    if (this.destroyed) { return }
+    this.checkAlive()
     let entry = new BodyNode(b, parent)
     this.place(entry, b)
     let at = b.motion === 'loose' && this.sim !== null ? this.sim.poseOf(b.id) : null
@@ -1385,13 +2273,13 @@ export class WorldBox {
     this.bodies.set(b.id, entry)
     this.byName.set(name, b.id)
     for (let p of b.parts) {
-      let painted = p.shape === 'sphere' && p.pattern.length > 0
-      let material = painted ? await this.vertexMaterial(b.glow) : await this.material(p.color, b.glow, theme, 'ink')
-      if (this.destroyed) { return }
+      let painted = legacyPaint(p)
+      let material = await this.bodyMaterial(p, b.glow || p.glow, theme)
+      this.checkAlive()
       this.serial++
       let partName = 'b' + this.serial.toString()
       let node = await this.node(rf, partName, painted ? paintedGeometry(p, theme) : this.shapeOf(p), material)
-      if (this.destroyed) { return }
+      this.checkAlive()
       if (this.bodies.get(b.id) !== entry) {
         this.removeNode(node)
         return
@@ -1405,7 +2293,10 @@ export class WorldBox {
       this.byName.set(partName, b.id)
       this.partByName.set(partName, p.id)
     }
+    this.noteShown(b)
     await this.addMarks(rf, entry, b, theme)
+    this.checkAlive()
+    entry.ready = true
   }
 
   /** A body's rings and selection mark, as rings under its node. */
@@ -1440,8 +2331,7 @@ export class WorldBox {
     let known = this.materials.get(key)
     if (known !== undefined) { return known }
     let made = this.makeMaterial(key, [1, 1, 1, 1], unlit, false)
-    this.materials.set(key, made)
-    return made
+    return this.cacheMaterial(key, made)
   }
 
   /** Small dark spheres on the die's faces, children of it, so they turn with it. Faces as pipLayout. */
@@ -1458,10 +2348,18 @@ export class WorldBox {
       s.segmentCount = 12
       made.push(this.node(rf, 'p' + this.serial.toString(), s, material))
     }
-    let pips = await Promise.all(made)
-    if (this.destroyed || this.bodies.get(entry.spec.id) !== entry) { return }
+    let errors: Error[] = []
+    let pips = await Promise.all(made.map((task: Promise<Geometry>): Promise<Geometry | null> =>
+      task.catch((e: Error): null => { errors.push(e); return null })))
+    if (errors.length > 0 || this.destroyed || this.retired || this.bodies.get(entry.spec.id) !== entry) {
+      if (!this.destroyed) {
+        for (let pip of pips) { if (pip !== null) { this.removeNode(pip) } }
+      }
+      if (errors.length > 0) { throw errors[0] }
+      return
+    }
     for (let i = 0; i < pips.length; i++) {
-      let pip = pips[i]
+      let pip = pips[i] as Geometry
       pip.position = v3(layout[i][1], layout[i][2], layout[i][3])
       entry.node.children.append(pip)
       entry.pips.push(pip)
@@ -1482,13 +2380,28 @@ export class WorldBox {
   }
 
   private removeNode(node: Node): void {
+    // The names in the node's own subtree, walked down from it: the cost is that subtree, not every binding in the world.
+    let dropped: string[] = []
+    let walk: Node[] = [node]
+    while (walk.length > 0) {
+      let at = walk.pop() as Node
+      if (this.materialBindings.has(at.name)) { dropped.push(at.name) }
+      let n = at.children.count()
+      for (let i = 0; i < n; i++) {
+        let child = at.children.get(i)
+        if (child !== null) { walk.push(child) }
+      }
+    }
     let root = this.scene !== null ? this.scene.root : null
+    let detached = false
     try {
-      if (root !== null) { root.children.remove(node) }
+      if (root !== null) { root.children.remove(node); detached = true }
       node.destroy()
+      detached = true
     } catch (e) {
       console.warn('VERA-WORLD remove failed: ' + (e as Error).message)
     }
+    if (detached) { for (let bound of dropped) { this.materialBindings.delete(bound) } }
   }
 
   /** The table (top and walls) and the floor, made again when they change. Shadows fall on the table, and on the floor through its shadow layer. */
@@ -1500,15 +2413,20 @@ export class WorldBox {
       this.tableNodes = []
       let tableSpec = spec.table
       if (tableSpec !== null) {
-        let material = await this.groundMaterial(tableSpec.color, theme, LOOK_TABLE_ROLE)
-        if (this.destroyed) { return }
+        let textured = texturePattern(tableSpec.pattern)
+        let c1 = lookRgba(theme, tableSpec.color, LOOK_TABLE_ROLE)
+        let c2 = lookRgba(theme, tableSpec.color2.length > 0 ? tableSpec.color2 : tableSpec.color, LOOK_TABLE_ROLE)
+        let material = textured ? await this.texturedMaterial(tableSpec.pattern, c1, c2, surfaceSeed('table'), false, true) :
+          await this.groundMaterial(tableSpec.color, theme, LOOK_TABLE_ROLE)
+        this.checkAlive()
         let parts = tableParts(tableSpec)
         for (let part of parts) {
           this.serial++
           let box = new CubeGeometry()
           box.size = v3(part[3], part[4], part[5])
-          let node = await this.node(rf, 't' + this.serial.toString(), box, material)
-          if (this.destroyed) { return }
+          let geometry: GeometryDefinition = textured ? customGeometry(texturedBoxMesh(part[3], part[4], part[5])) : box
+          let node = await this.node(rf, 't' + this.serial.toString(), geometry, material)
+          this.checkAlive()
           node.position = v3(part[0], part[1], part[2])
           this.tableNodes.push(node)
         }
@@ -1519,15 +2437,20 @@ export class WorldBox {
       this.floorNodes = []
       let floorSpec = spec.floor
       if (floorSpec !== null) {
-        let material = await this.floorMaterial(floorSpec.color, theme)
-        if (this.destroyed) { return }
+        let textured = texturePattern(floorSpec.pattern)
+        let c1 = lookRgba(theme, floorColor(theme, floorSpec.color), LOOK_FLOOR_ROLE)
+        let c2 = lookRgba(theme, floorSpec.color2.length > 0 ? floorSpec.color2 : floorColor(theme, floorSpec.color), LOOK_FLOOR_ROLE)
+        let material = textured ? await this.texturedMaterial(floorSpec.pattern, c1, c2, surfaceSeed('floor'), false, true,
+          floorGain(this.glows), true) : await this.floorMaterial(floorSpec.color, theme)
+        this.checkAlive()
         let plane = new PlaneGeometry()
         let size = floorSize(spec)
         let extent: Vec2 = { x: size, y: size }
         plane.size = extent
         this.serial++
-        let node = await this.node(rf, 'f' + this.serial.toString(), plane, material)
-        if (this.destroyed) { return }
+        let geometry: GeometryDefinition = textured ? customGeometry(texturedPlaneMesh(size, size)) : plane
+        let node = await this.node(rf, 'f' + this.serial.toString(), geometry, material)
+        this.checkAlive()
         // Under a table the floor is where the table's top slab ends, so the two never fight over y = 0.
         let floorY = spec.table !== null ? -TABLE_TOP_THICKNESS : 0
         node.position = v3(0, floorY, 0)
@@ -1547,6 +2470,7 @@ export class WorldBox {
     console.info('VERA-WORLD floor lit gain=' + gain.toString() + ' base=' + linearHex(base) + ' target=' + floorColor(theme, color))
     this.serial++
     let m = await rf.createMaterial({ name: 'floor' + this.serial.toString() }, MaterialType.METALLIC_ROUGHNESS) as MetallicRoughnessMaterial
+    this.checkAlive()
     m.baseColor.factor = vec4(base)
     // material.factor: y roughness, z metallic, w reflectance (SceneResources.d.ts); specular.factor.w is the specular intensity.
     let mat: Vec4 = { x: m.material.factor.x, y: FLOOR_ROUGHNESS, z: FLOOR_METALLIC, w: m.material.factor.w }
@@ -1554,6 +2478,7 @@ export class WorldBox {
     let spec: Vec4 = { x: m.specular.factor.x, y: m.specular.factor.y, z: m.specular.factor.z, w: FLOOR_SPECULAR }
     m.specular.factor = spec
     m.shadowReceiver = true
+    this.groundMaterials.add(m)
     return m
   }
 
@@ -1579,6 +2504,8 @@ export class WorldBox {
     this.worldRadius = bounds !== null ? bounds[3] : 1
     if (spec.follow !== null) { this.worldRadius = Math.max(this.worldRadius, this.framed * 2) }
     this.writeCamera()
+    // The view was put somewhere new: a held stick steers by it from now on.
+    this.stickFrame.refresh(pose)
     if (this.push > 0) { this.steer() }
   }
 
