@@ -11,7 +11,7 @@
  */
 
 import { WorldSpec, BodySpec, WorldDiff, SceneKick, TableSpec, ScenePlayer, SceneFrom, SceneShot, orbitPositions,
-  topFace, particleRequest, samePhysicalBody } from './VeraScene'
+  topFace, particleRequest, samePhysicalBody, sameCollisionShape } from './VeraScene'
 import { PlayerDrive, ZoneEnter, yawOf, PLAYER_STOP } from './VeraLocomotion'
 import { pointBounds, partBounds, PartRecords, PART_RECORD, addPartRecords, turnPoint } from './VeraShapes'
 import { tableParts, quatXYZ, TABLE_TOP_THICKNESS } from './VeraLook3D'
@@ -443,6 +443,9 @@ export class FakePhys implements PhysEngine {
     b.awake = true
     b.still = 0
     b.awakeFor = 0
+    // A shot stopped at the bound and knocked moves again, and is stopped again if it is still outside (as the native
+    // engine stops one whenever it is active out there).
+    b.frozen = false
   }
 
   private extents(b: FakeBody): void {
@@ -815,6 +818,8 @@ class RecreatePlan {
   rebuilt: BodySpec[] = []
   /** Of those, loose ones that go on from their live state [pose, velocity]. */
   kept: Map<string, number[]> = new Map<string, number[]>()
+  /** Of the kept, those that collide as another shape now: never put to sleep where the old shape rested. */
+  reshaped: Set<string> = new Set<string>()
 }
 
 /** The kicks of one apply (giveKicks): the bodies kicked, and the throws to wait on, blasts' pushes added later. */
@@ -940,7 +945,7 @@ export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set
   }
   for (let b of spec.bodies) {
     if (b.motion === 'static') { holders.push(specBounds(b)) }
-    let at = standing !== null && b.motion === 'loose' && !kicked.has(b.id) ? standing.get(b.id) : undefined
+    let at = standing !== null && b.motion === 'loose' && !kicked.has(b.id) && b.aim.length !== 3 ? standing.get(b.id) : undefined
     if (at !== undefined) {
       let e = specBounds(b)
       let d = [at[0] - b.position[0], at[1] - b.position[1], at[2] - b.position[2]]
@@ -948,9 +953,10 @@ export function restingAtStart(spec: WorldSpec, created: BodySpec[], kicked: Set
     }
   }
   let floorTop = spec.floor !== null ? (table !== null ? -TABLE_TOP_THICKNESS : 0) : NaN
-  // A piece (scene.from) or a shot is made moving where something else was: never put to sleep at the start.
+  // A piece (scene.from) or a shot is made moving where something else was: never put to sleep at the start. Nor is an
+  // aimed body, turned from the rotation its bounds here are worked out from: it settles by itself.
   let candidates: BodySpec[] = created.filter((b: BodySpec): boolean => b.motion === 'loose' && !kicked.has(b.id) &&
-    b.from === null && b.shot === null)
+    b.from === null && b.shot === null && b.aim.length !== 3)
   let bounds = new Map<string, number[]>()
   for (let b of candidates) { bounds.set(b.id, specBounds(b)) }
   // Bottom up, so a body can rest on one that was found resting just before it.
@@ -1165,7 +1171,7 @@ export class WorldSim {
   private one: Float32Array = new Float32Array(7)
   /** Ids of the bodies the last apply made with scene.from whose parent was nowhere: placed as if from nothing. */
   fromMissing: string[] = []
-  /** Where each body made from another or shot was made, [px, py, pz, qx, qy, qz, qw]: what knockedOver compares with. */
+  /** Where each body made from another, shot or aimed was made, [px, py, pz, qx, qy, qz, qw]: what knockedOver compares with. */
   private origin: Map<string, number[]> = new Map<string, number[]>()
   /** scene.target bodies, shots, and both (whose knocks are struck). */
   private targets: Set<string> = new Set<string>()
@@ -1325,15 +1331,12 @@ export class WorldSim {
     }
     this.fromMissing = []
     let plan = this.planRecreate(diff)
-    let parents = this.parentsNow(diff)
+    let parents = this.parentsNow(diff, plan)
     let created = this.replaceBodies(diff, plan, parents)
-    this.restoreKept(plan.kept, next)
+    this.restoreKept(plan, next)
     this.updateInPlace(diff, plan.inPlace)
     let throws = this.giveKicks(diff)
-    let unrested = this.inBlastReach(diff, next, throws.kicked)
-    for (let x of diff.blast) {
-      throws.thrown += this.engine.explode(x.x, x.y, x.z, x.radius, x.strength)
-    }
+    let unrested = this.giveBlasts(diff, next, throws)
     this.startResting(next, created, unrested)
     if (throws.thrown > 0) { this.beginThrow(throws.thrown) }
     this.spec = next
@@ -1375,18 +1378,20 @@ export class WorldSim {
       if (live === null) { continue }
       let pose = live.slice(0, 7)
       plan.kept.set(b.id, (b.player !== null ? uprightPose(pose) : pose).concat(live.slice(7)))
+      if (!sameCollisionShape(old, b)) { plan.reshaped.add(b.id) }
     }
     return plan
   }
 
   /**
-   * Bodies made from another (scene.from) start in their parent's frame as it is now: taken before anything is removed,
-   * so a body broken into pieces in this same apply gives them where it was, how it went and how it turned.
+   * Bodies made from another (scene.from) start in their parent's frame as it is now: taken before anything is removed
+   * or made again, so a body broken into pieces in this same apply gives them where it was, how it went and how it
+   * turned. Pieces made again without a live state of their own (planRecreate) are placed from it the same way.
    */
-  private parentsNow(diff: WorldDiff): Map<string, number[]> {
+  private parentsNow(diff: WorldDiff, plan: RecreatePlan): Map<string, number[]> {
     let parents = new Map<string, number[]>()
-    for (let b of diff.create) {
-      if (b.from === null) { continue }
+    for (let b of diff.create.concat(plan.rebuilt)) {
+      if (b.from === null || plan.kept.has(b.id)) { continue }
       let id = (b.from as SceneFrom).parent
       if (parents.has(id)) { continue }
       let live = this.liveState(id)
@@ -1424,16 +1429,19 @@ export class WorldSim {
     return created
   }
 
-  /** Bodies made again with a live state kept (planRecreate) go on from it. */
-  private restoreKept(kept: Map<string, number[]>, next: WorldSpec): void {
-    kept.forEach((at: number[], id: string) => {
+  /**
+   * Bodies made again with a live state kept (planRecreate) go on from it. One at rest sleeps there only if it has the
+   * shape it rested with: a body made smaller would hang above what held it, a bigger one sunk into it.
+   */
+  private restoreKept(plan: RecreatePlan, next: WorldSpec): void {
+    plan.kept.forEach((at: number[], id: string) => {
       let i = this.index.get(id)
       if (i === undefined) { return }
       this.engine.setPose(i, at[0], at[1], at[2], at[3], at[4], at[5], at[6])
       if (this.playerOf(next, id)) {
         // A character is woken where it stands, to settle on its feet; it keeps its velocity, never a tumble.
         this.engine.setVelocity(i, at[7], at[8], at[9], 0, 0, 0)
-      } else if (Math.hypot(at[7], at[8], at[9]) < 1e-3 && Math.hypot(at[10], at[11], at[12]) < 1e-3) {
+      } else if (!plan.reshaped.has(id) && Math.hypot(at[7], at[8], at[9]) < 1e-3 && Math.hypot(at[10], at[11], at[12]) < 1e-3) {
         this.engine.sleep(i)
       } else {
         this.engine.setVelocity(i, at[7], at[8], at[9], at[10], at[11], at[12])
@@ -1490,22 +1498,33 @@ export class WorldSim {
   }
 
   /**
-   * The bodies not to start resting: those kicked, and the loose ones a blast of this apply will push. A blast is a throw
-   * of whatever it pushes (settled is told once they have come to rest), and put to sleep after it (restingAtStart) a
-   * body made in this same apply would lose the push. Within the radius as the engine reckons it (the centre of mass,
-   * here the pose), so the two agree.
+   * The blasts of this apply go off; returns the bodies not to start resting: those kicked, and the loose ones a blast
+   * pushes (put to sleep after it by restingAtStart, a body made in this same apply would lose the push). A blast is a
+   * throw of the bodies settled waits on that it pushes -- not the player or a shot, which settled never tells, so a
+   * blast that reaches only them begins no throw. The player pushed is driven from that push and runs it out, as after
+   * a kick (drivePlayer). Within the radius as the engine reckons it (the centre of mass, here the pose), so the two
+   * agree.
    */
-  private inBlastReach(diff: WorldDiff, next: WorldSpec, kicked: Set<string>): Set<string> {
-    let unrested = new Set<string>(kicked)
+  private giveBlasts(diff: WorldDiff, next: WorldSpec, throws: ThrowResult): Set<string> {
+    let unrested = new Set<string>(throws.kicked)
     if (diff.blast.length === 0) { return unrested }
     for (let b of next.bodies) {
       if (b.motion !== 'loose') { continue }
       let live = this.liveState(b.id)
       if (live === null) { continue }
+      let reached = 0
       for (let x of diff.blast) {
-        if (Math.hypot(live[0] - x.x, live[1] - x.y, live[2] - x.z) < x.radius) { unrested.add(b.id); break }
+        if (Math.hypot(live[0] - x.x, live[1] - x.y, live[2] - x.z) < x.radius) { reached++ }
+      }
+      if (reached === 0) { continue }
+      unrested.add(b.id)
+      if (b.player !== null) {
+        this.playerKicked = b.id
+      } else if (b.shot === null) {
+        throws.thrown += reached
       }
     }
+    for (let x of diff.blast) { this.engine.explode(x.x, x.y, x.z, x.radius, x.strength) }
     return unrested
   }
 
@@ -1714,8 +1733,9 @@ export class WorldSim {
       let value = 0
       if (this.engine.readPose(i, this.one) === 1) {
         // A piece (scene.from) is not where anything was built: it counts as knocked.
+        let origin = this.origin.get(b.id)
         value = b.isDie ? topFace(this.one[3], this.one[4], this.one[5], this.one[6]) : b.from !== null ? 1
-          : (knockedOver(b, this.one) ? 1 : 0)
+          : (knockedOver(b, this.one, origin !== undefined ? origin : null) ? 1 : 0)
       }
       e.bodies.push(b.id)
       e.values.push(value)
@@ -1991,7 +2011,7 @@ export class WorldSim {
         let w = at[2]
         this.engine.setVelocity(i, v[0], v[1], v[2], w[0], w[1], w[2])
       }
-      if (b.from !== null || shot !== 0) { this.origin.set(b.id, pose) }
+      this.origin.set(b.id, pose)
     }
     if (b.target) { this.engine.watch(i, 1) }
   }

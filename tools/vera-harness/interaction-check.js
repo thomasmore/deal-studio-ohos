@@ -616,4 +616,95 @@ const fakeBody = (engine, sim, id) => engine.bodies[sim.index.get(id)]
   assert.equal(sim.restingCount, 1, 'a body out of reach of the blast still starts resting')
 }
 
+// A loose body at rest made again as another shape is not put to sleep where the old one rested: it settles from there.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const crate = size => world([call('floor', 'surface'), call('loose', call('box', 'r', 0, 0.5, 0, size, size, size, 'ink'), 1)])
+  const a = crate(1)
+  sim.apply(S.diffWorld(null, a), a)
+  assert.equal(fakeBody(fake, sim, 'r').awake, false, 'the crate starts resting')
+  const b = crate(0.4)
+  sim.apply(S.diffWorld(a, b), b)
+  near(sim.poseOf('r')[1], 0.5, 1e-6, 'made again where it was')
+  assert.equal(fakeBody(fake, sim, 'r').awake, true, 'but awake: asleep it would hang 0.3 m above the floor')
+  run(sim, 240)
+  near(sim.poseOf('r')[1], 0.2, 0.02, 'it comes down onto the floor')
+  // The same shape made again (a new mass) at rest stays asleep where it is.
+  const c = world([call('floor', 'surface'), call('loose', call('box', 'r', 0, 0.5, 0, 0.4, 0.4, 0.4, 'ink'), 3)])
+  sim.apply(S.diffWorld(b, c), c)
+  assert.equal(fakeBody(fake, sim, 'r').awake, false, 'a new mass alone keeps it asleep')
+}
+
+// An aimed body is built turned to its aim; settled compares it with that, not with its unaimed rotation.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const crate = call('aim', call('loose', call('box', 'c', 0, 0.25, 0, 0.5, 0.5, 0.5, 'ink'), 1), 0, 0.25, -5)
+  const a = world([call('floor', 'surface'), crate, call('die', 'd', 3, 0.15, 3, 0.3, 'white')])
+  sim.apply(S.diffWorld(null, a), a)
+  const b = world([call('floor', 'surface'), crate, call('kick', call('die', 'd', 3, 0.15, 3, 0.3, 'white'), 1, 0, 2, 0, 1)])
+  sim.apply(S.diffWorld(a, b), b)
+  const settled = run(sim, 600).filter(e => e.kind === 'settled')
+  assert.equal(settled.length, 1, 'the throw settles')
+  assert.equal(settled[0].values[settled[0].bodies.indexOf('c')], 0, 'the aimed crate nothing touched is not knocked over')
+}
+
+// A piece made again without a live pose of its own (the engine lost it: an apply that stopped half-way), whose parent
+// goes in the same apply, is placed from the parent as the physics had it.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const parent = call('loose', call('box', 'p', 0, 0.5, 0, 1, 1, 1, 'ink'), 1)
+  const piece = size => call('from', call('box', 'k', 1, 0, 0, size, size, size, 'ink'), 'p', 0)
+  const a = world([call('floor', 'surface'), parent, piece(0.2)])
+  sim.apply(S.diffWorld(null, a), a)
+  fake.setPose(sim.index.get('p'), 3, 0.5, 0, 0, 0, 0, 1)
+  fake.remove(sim.index.get('k')); sim.index.delete('k')
+  const b = world([call('floor', 'surface'), piece(0.3)])
+  const d = S.diffWorld(a, b)
+  assert.deepEqual(d.remove, ['p']); assert.deepEqual(d.recreate.map(x => x.id), ['k'])
+  sim.apply(d, b)
+  assert.deepEqual(sim.fromMissing, [], 'its parent, removed in this apply, is found')
+  nearAll(sim.poseOf('k').slice(0, 3), [4, 0.5, 0], 1e-6, 'one metre along the parent from where the physics had it')
+}
+
+// A blast that reaches only the player begins no throw (settled never tells the player), and the player runs out the push.
+{
+  const fake = new P.FakePhys()
+  const sim = new P.WorldSim(fake)
+  const scene = trigger => world([call('floor', 'surface'), call('blast', 'bang', trigger, 0, 0, 0, 3, 8),
+    call('player', call('box', 'me', 1, 0.5, 0, 0.5, 1, 0.5, 'ink'), 2, ''),
+    call('loose', call('box', 'far', 9, 0.25, 0, 0.5, 0.5, 0.5, 'ink'), 1)])
+  const a = scene(0)
+  sim.apply(S.diffWorld(null, a), a)
+  run(sim, 30)
+  const kicks = sim.kickSerial
+  const b = scene(1)
+  sim.apply(S.diffWorld(a, b), b)
+  assert.equal(sim.kickSerial, kicks, 'no throw for a push of the player alone')
+  assert.ok(velocity(fake, sim, 'me')[0] > 1, 'the player is pushed away')
+  run(sim, 2)
+  assert.ok(velocity(fake, sim, 'me')[0] > 1, 'and is not stopped by its own driving the next step')
+  assert.equal(run(sim, 300).filter(e => e.kind === 'settled').length, 0, 'nothing settles: nothing was thrown')
+}
+
+// FakePhys: a shot stopped at the bound and then knocked moves, and is stopped again while it is still outside.
+{
+  const fp = new P.FakePhys()
+  fp.setBound(-10, 20, 20)
+  const s = fp.addSphere(0.1, P.PHYS_PROJECTILE)
+  fp.setPose(s, 30, 1, 0, 0, 0, 0, 1)
+  fp.step(1 / 60, 1)
+  assert.equal(fp.bodies[s].frozen, true, 'outside the bound it stops')
+  fp.wake(fp.bodies[s])
+  fp.bodies[s].v = [1, 0, 0]
+  fp.step(1 / 60, 1)
+  assert.equal(fp.bodies[s].frozen, true, 'knocked, it is stopped again')
+  assert.equal(fp.awakeDynamic(), 0)
+  const out = new Float32Array(16)
+  fp.step(1 / 60, 1)
+  assert.equal(fp.readAwake(out), 0, 'and is no longer reported awake')
+}
+
 console.log('interaction-check ok')

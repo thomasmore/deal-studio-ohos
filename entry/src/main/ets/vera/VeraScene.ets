@@ -1487,9 +1487,13 @@ function partsKey(b: BodySpec): string {
  * material and the watch, which the engine changes in place.
  */
 export function samePhysicalBody(a: BodySpec, b: BodySpec): boolean {
+  return sameCollisionShape(a, b) && a.motion === b.motion && (a.player === null) === (b.player === null) && a.mass === b.mass
+}
+
+/** Whether a and b collide as the same shape: kind, model, size, points and parts where they sit. */
+export function sameCollisionShape(a: BodySpec, b: BodySpec): boolean {
   return a.shape === b.shape && a.model === b.model && a.isDie === b.isDie && sameNumbers(a.dims, b.dims) &&
-    sameNumbers(a.points, b.points) && physicalPartsKey(a) === physicalPartsKey(b) && a.motion === b.motion &&
-    (a.player === null) === (b.player === null) && a.mass === b.mass
+    sameNumbers(a.points, b.points) && physicalPartsKey(a) === physicalPartsKey(b)
 }
 
 function physicalPartsKey(b: BodySpec): string {
@@ -1593,6 +1597,21 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
   diff.tableChanged = !sameTable(prevTable, next.table)
   diff.floorChanged = !sameFloor(prevFloor, next.floor)
   diff.backdropChanged = backdropKey(prev) !== backdropKey(next)
+  triggerEdges(prev, next, diff)
+  return diff
+}
+
+/**
+ * Only the blasts and bursts whose trigger changed from prev to next (diffWorld's `blast` and `burst`), without comparing
+ * the bodies: what the renderer reads for every state it is given.
+ */
+export function diffTriggers(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
+  let diff = new WorldDiff()
+  triggerEdges(prev, next, diff)
+  return diff
+}
+
+function triggerEdges(prev: WorldSpec | null, next: WorldSpec, diff: WorldDiff): void {
   let blastsBefore = new Map<string, number>()
   if (prev !== null) { for (let x of prev.blasts) { blastsBefore.set(x.id, x.trigger) } }
   for (let x of next.blasts) {
@@ -1605,7 +1624,6 @@ export function diffWorld(prev: WorldSpec | null, next: WorldSpec): WorldDiff {
     let was = burstsBefore.get(x.id)
     if (was === undefined ? x.trigger !== 0 : was !== x.trigger) { diff.burst.push(x) }
   }
-  return diff
 }
 
 export function particleRequest(id: string, trigger: number, x: number, y: number, z: number, kind: string, color: string): ParticleBurst {

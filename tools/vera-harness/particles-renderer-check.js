@@ -285,9 +285,20 @@ function fixture() {
     if (error) throw error
     return value
   }
-  function newBox() {
+  // A box's first world has no trigger edges (its triggers are restored, not new: see WorldBox.apply). A box made here is
+  // one that was shown its first world with every trigger at zero, so a check's first non-zero trigger is a real edge;
+  // newBox(false) is a box as the app makes it.
+  function newBox(primed = true) {
     const box = new mod.exports.WorldBox('/mock-app/files')
     boxes.push(box)
+    if (primed) {
+      const apply = box.apply.bind(box)
+      box.apply = (spec, palette) => {
+        box.apply = apply
+        apply(untriggered(spec), palette)
+        apply(spec, palette)
+      }
+    }
     return box
   }
   return {calls, writes, scenes, resources, engine, timers, faults, loaded, logs, activity, until, settle, newBox,
@@ -299,8 +310,8 @@ function fixture() {
       gates.push(gate)
       return gate
     },
-    async create() {
-      const box = newBox()
+    async create(primed = true) {
+      const box = newBox(primed)
       assert.equal(await settle(box.create()), true)
       return box
     },
@@ -359,6 +370,12 @@ function assertPoses(box, expected, palette = theme) {
     assert.equal(node.visible, alpha > 0)
   })
   assert.ok(box.particleNodes.slice(expected.length).every(n => n.visible === false && n.scale.x === 0 && n.scale.y === 0 && n.scale.z === 0))
+}
+/** spec with each burst's and blast's trigger at zero. */
+function untriggered(spec) {
+  const zero = x => Object.assign(Object.create(Object.getPrototypeOf(x)), x, {trigger: 0})
+  return Object.assign(Object.create(Object.getPrototypeOf(spec)), spec,
+    {bursts: spec.bursts.map(zero), blasts: spec.blasts.map(zero)})
 }
 function expectedParticles(spec, prev = null) {
   return S.burstsForDiff(S.diffWorld(prev, spec)).flatMap(r => P.burstParticles(r.kind, r.seed, r.origin, r.color))
@@ -1012,6 +1029,35 @@ async function main() {
     assert.equal(f.count('phys:explode'), beforeReacquisition + 2, 'changed trigger on reacquisition is not suppressed')
     box.frame(0)
     assert.equal(box.particlesEmitted, 6)
+  })
+  await check('a box\'s first world sets off none of the triggers it already has; each later edge pushes and emits once', async f => {
+    const box = await f.create(false)
+    const loose = body('loose', {motion: 'loose', mass: 1, position: [0, 3, 0]})
+    const restored = world([burst(4)], [loose], {blasts: [blast(3)]})
+    await f.apply(box, restored)
+    await f.ready(box)
+    box.frame(16)
+    assert.ok(box.sim instanceof Physics.WorldSim)
+    assert.equal(f.count('phys:explode'), 0, 'a restored blast does not push again')
+    assert.equal(box.particlesEmitted, 0, 'nor do its particles or a restored burst play')
+    assert.equal(box.particlePending.length, 0)
+    // States given faster than they are applied: every accepted edge is one push and one debris-and-smoke.
+    const held = f.hold('geometry', name => !isParticle(name))
+    const moved = world([burst(4)], [loose, body('late')], {blasts: [blast(4)]})
+    box.apply(moved, theme)
+    await f.settle(held.entered.promise)
+    box.apply(world([burst(4)], [loose, body('late')], {blasts: [blast(5)]}), theme)
+    box.apply(world([burst(4)], [loose, body('late')], {blasts: [blast(6)]}), theme)
+    held.release.resolve()
+    await f.until(() => !box.running)
+    assert.equal(f.count('phys:explode'), 3, 'one push for each accepted edge')
+    box.frame(0)
+    assert.equal(box.particlesEmitted, 6, 'debris and smoke for each of them')
+    const fresh = await f.create(false)
+    await f.apply(fresh, world([], [loose], {blasts: [blast(0)]}))
+    await f.apply(fresh, world([], [loose], {blasts: [blast(1)]}))
+    fresh.frame(0)
+    assert.equal(f.count('phys:explode'), 4, 'a trigger that changes after the first world goes off')
   })
   for (const kind of ['sparks', 'dust']) {
     await check('real sim ' + kind + ' are drained before events and survive a handler removing their source', async f => {

@@ -31,8 +31,8 @@ import { Scene, Camera, Light, Environment, LightType, SceneResourceFactory, Geo
   PrimitiveTopology, SamplerAddressMode, SamplerFilter, Image as SceneImage, Sampler } from '@kit.ArkGraphics3D'
 import { image } from '@kit.ImageKit'
 import { fileIo as fs } from '@kit.CoreFileKit'
-import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, SceneFrom, diffWorld, orbitPositions, MotionCarry,
-  travelPace, burstsForDiff } from '../vera/VeraScene'
+import { WorldSpec, BodySpec, WorldDiff, FollowSpec, ScenePlayer, SceneFrom, BlastSpec, diffWorld, diffTriggers,
+  orbitPositions, MotionCarry, travelPace, burstsForDiff } from '../vera/VeraScene'
 import { ParticlePool, ParticleBurst, MAX_PARTICLES, MAX_BURSTS } from '../vera/VeraParticles'
 import { ModelSpec, modelSpec, modelShape } from '../vera/VeraModels'
 import { SurfaceMesh, paintedSphere, flatRing, surfaceSeed } from '../vera/VeraSurfaces'
@@ -502,6 +502,8 @@ export class WorldBox {
   private particleNodes: Node[] = []
   private particleMaterials: UnlitMaterial[] = []
   private particlePending: ParticleBurst[] = []
+  /** Blasts apply() accepted that no physics apply has taken yet (applyOne), oldest first, the newest MAX_BURSTS. */
+  private pendingBlasts: BlastSpec[] = []
   private particleQueuedAt: number[] = []
   private particlePreparing: Promise<void> | null = null
   private particleReady: boolean = false
@@ -588,7 +590,18 @@ export class WorldBox {
   /** Show this world (with this theme) as soon as what is being applied now is done. */
   apply(spec: WorldSpec, theme: ResolvedTheme): void {
     if (this.destroyed || this.retired) { return }
-    let requests = burstsForDiff(diffWorld(this.wanted !== null ? this.wanted : this.applied, spec))
+    // Every trigger edge accepted here goes off once, its particles and its push alike: the bursts are queued now, the
+    // blasts wait for the physics of the apply that takes them (applyOne), however many states that apply coalesces. The
+    // first world a box is given has no edges: its triggers are ones the state already had -- restored on reopen, or the
+    // box made again -- and setting them off again would scatter what the state left standing.
+    let base = this.wanted !== null ? this.wanted : this.applied
+    let requests: ParticleBurst[] = []
+    if (base !== null) {
+      let edges = diffTriggers(base, spec)
+      requests = burstsForDiff(edges)
+      for (let x of edges.blast) { this.pendingBlasts.push(x) }
+      if (this.pendingBlasts.length > MAX_BURSTS) { this.pendingBlasts.splice(0, this.pendingBlasts.length - MAX_BURSTS) }
+    }
     this.wanted = spec
     this.wantedTheme = theme
     if (!this.particleReady && (spec.bursts.length > 0 || spec.blasts.length > 0 ||
@@ -1122,9 +1135,9 @@ export class WorldBox {
     // Dice thrown here draw from Math.random, so no two throws are alike (the host's checks seed them instead).
     let made = new WorldSim(engine, (): number => Math.random())
     made.reset()
-    // Only a trigger that changed in this apply throws. On the box's first apply (prev null) every non-zero trigger
-    // is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the dice by
-    // itself and overwrite the faces the state keeps.
+    // Only a trigger that changed in this apply throws or blasts. On the box's first apply (prev null) every non-zero
+    // trigger is one the state already had -- restored on reopen, or a rebuild -- and throwing it again would roll the
+    // dice by itself and overwrite the faces the state keeps. The blasts are the edges apply() accepted (none then).
     let full = diffWorld(null, next)
     full.kick = prev !== null ? diff.kick : []
     full.blast = diff.blast
@@ -1640,6 +1653,16 @@ export class WorldBox {
     return true
   }
 
+  /** Whether the body nodes are exactly prev's bodies, each built from its spec and ready. */
+  private nodesShow(prev: WorldSpec | null): boolean {
+    if (prev === null || this.bodies.size !== prev.bodies.length) { return false }
+    for (let b of prev.bodies) {
+      let entry = this.bodies.get(b.id)
+      if (entry === undefined || !entry.ready || entry.spec !== b) { return false }
+    }
+    return true
+  }
+
   private async applyOne(next: WorldSpec, theme: ResolvedTheme): Promise<void> {
     this.checkAlive()
     if (this.note.startsWith('World rendering failed:') || this.note.startsWith('Texture loading failed:')) { this.note = '' }
@@ -1649,10 +1672,18 @@ export class WorldBox {
     if (next !== prev) { this.carry.apply(next, this.timeS) }
     let diff: WorldDiff = diffWorld(prev, next)
     let themeChanged = theme !== this.appliedTheme
+    // The blasts are those apply() accepted, the same edges its particles were queued for; taken once the physics has
+    // them, so an apply that fails after this does not push them twice.
+    diff.blast = this.pendingBlasts
     this.applyPhysics(prev, diff, next)
-    let live = new WorldSpec()
-    this.bodies.forEach((entry: BodyNode) => { live.bodies.push(entry.spec) })
-    let renderDiff = diffWorld(live, next)
+    this.pendingBlasts = []
+    // The nodes as they are: as prev has them when every body of prev is drawn, built and nothing else (no diff again).
+    let renderDiff = diff
+    if (!this.nodesShow(prev)) {
+      let live = new WorldSpec()
+      this.bodies.forEach((entry: BodyNode) => { live.bodies.push(entry.spec) })
+      renderDiff = diffWorld(live, next)
+    }
     let rebuilding = new Set<string>(renderDiff.recreate.map((b: BodySpec): string => b.id))
     for (let b of next.bodies) {
       let entry = this.bodies.get(b.id)
@@ -1935,7 +1966,9 @@ export class WorldBox {
     } finally {
       let readers = (TEXTURE_READERS.get(fullPath) || 1) - 1
       if (readers > 0) { TEXTURE_READERS.set(fullPath, readers) } else { TEXTURE_READERS.delete(fullPath) }
-      if (this.filesDir.length > 0) { trimTextures(dir) }
+      // Once the last load in flight is done (a world's textures load together), not after each: trimming lists and
+      // stats the whole directory on this thread, and a file still being read or written could not go anyway.
+      if (this.filesDir.length > 0 && TEXTURE_READERS.size === 0 && TEXTURE_WRITES.size === 0) { trimTextures(dir) }
     }
   }
 
