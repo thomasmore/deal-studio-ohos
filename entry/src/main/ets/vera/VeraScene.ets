@@ -210,7 +210,8 @@ export const SCENE_FUNCTIONS: GfxFunction[] = [
   new GfxFunction('burst', [str('id'), num('trigger'), num('x'), num('y'), num('z'), str('kind'), color()], 'thing',
     'a brief particle effect at x, y, z each time trigger changes: ' +
     PARTICLE_KINDS.map((p: string[]): string => '"' + p[0] + '" ' + p[1]).join('; ') +
-    '. Keep a count in state; initially 0 does nothing, any change including back to 0 emits once. Changing position, kind ' +
+    '. Keep a count in state, starting at 0: its value in the world\'s first state does nothing, and every change after it, ' +
+    'including back to 0, emits once. Changing position, kind ' +
     'or colour without changing trigger emits nothing. Not a body, no physics needed, its id unique among all things. ' +
     'The host animates and removes particles; never move them with a ticker. Shots striking bodies give sparks, and hard ' +
     'watched knocks give dust automatically; do not repeat these effects with scene.burst'),

@@ -151,28 +151,29 @@ What a world can do, combined as the request needs:
   came into which zone: a finish, a checkpoint, something to collect (keep the ids collected in the state and leave
   them out of build). Others that go the same way are bodies on paths through the same zones: the order of their
   "enter" events is who came first.
-- Shooting (whenever the request says shoot or fire, whatever the shooter holds): a count of shots in the state, which the button or tap that fires adds 1 to. build makes only the last
+- Shooting: whatever shoots, and whatever it holds (that is only how it looks), what it fires is a shot that flies. A count of shots in the state, which the button or tap that fires adds 1 to. build makes only the last
   few shots (a loop from the count less a few up to the count), each a new id from its number, so a shot once made
   flies on by itself: scene.from(scene.shoot(body, speed, false), shooterId, 0) with the body's x just ahead of the
   shooter's centre along +x (one built inside the shooter is moved ahead of it), so it leaves the way the shooter
   faces, and its y at the height of the middle of what it is meant to hit (a shot that flies straight keeps the height it
   starts at: from the top of a tall shooter it passes over everything low); wrap it in scene.aim(..., x, y, z) to send it at a point instead, the last tap's e.x, e.y, e.z kept in the
   state. A tap that fires sends the shot at the point tapped: keep e.x, e.y, e.z in the state and aim at them. arc true
-  for a thing thrown or lobbed, false for one that flies straight. The host keeps at most 16 shots and drops the oldest.
+  for a thing thrown or lobbed, false for one that flies straight. The host keeps only the newest shots (scene.shoot says how many) and drops the oldest.
   What a shot did is known only from "struck" when it lands, never when it is fired: count a hit there.
 - Breaking: what can break is a scene.target -- a primitive or group, never an imported model; also a thing that walks or wanders by itself (its pieces
   then fall loose). Only a shot, a thrown or falling body, a blast or the steered one running into it strikes it: a
-  part of a body that turns (an arm, a blade) strikes nothing. On a "struck" above a strength (e.speed, or e.values for each of
+  part of a body that turns (a limb, or what it holds) strikes nothing. On a "struck" above a strength (e.speed, or e.values for each of
   e.bodies) the handler keeps the id in the state (a list of broken ids), and from then on build returns the pieces of
   scene.split(thing, n, burst) in its place instead of it, so the pieces start where it was and fly apart. Pieces are
   never split again and are not targets.
 - A blast: scene.blast(id, trigger, x, y, z, radius, strength) pushes every loose body near the point away each time
-  its trigger, a count in the state, changes; "settled" follows it as it follows a throw. The host adds debris and smoke
+  its trigger, a count in the state, changes; when it moves loose bodies other than the player and shots, "settled"
+  follows as it follows a throw. The host adds debris and smoke
   at the blast point automatically: do not add a scene.burst for the same effect.
 - Particles: scene.burst(id, trigger, x, y, z, kind, color) is a brief visual effect, not a body; it works without
-  physics. Choose kind by appearance from the catalogue: sparks, smoke, dust, debris or confetti. Initially trigger 0
-  emits nothing; each change, including back to 0, emits once. Editing position, kind or colour with the same trigger
-  emits nothing. Keep the trigger count and any event point in state; the host animates and removes particles, never a
+  physics. Choose kind by appearance from the catalogue: sparks, smoke, dust, debris or confetti. Start the trigger at 0:
+  its value in the world's first state emits nothing; each change after it, including back to 0, emits once. Editing
+  position, kind or colour with the same trigger emits nothing. Keep the trigger count and any event point in state; the host animates and removes particles, never a
   ui.Ticker. Give bursts ids unique among all bodies, zones, blasts and other bursts. Shots striking bodies already
   give sparks at contact, and hard watched knocks give dust; never duplicate these automatic effects with scene.burst.
 - In words on the screen call shots and pieces what they are in this scene, never "shot", "piece" or "body", and never
@@ -206,6 +207,24 @@ function init(): AppState {
   return {throws: 0, read: 0, round: 0, moved: 0, picked: ""};
 }
 
+// The id of body i in this round: build makes the bodies with it, and view finds which was picked with it.
+function bodyId(round: number, i: number): string {
+  return "r" + ui.numberToString(round) + "-" + ui.numberToString(i);
+}
+
+// What the picked body is, in words: the name kept beside it, found by its exact id, never read out of the id.
+function pickedName(state: AppState): string {
+  let names: string[] = ["the cube", "the cylinder", "the ball"];
+  let i: number = 0;
+  while (i < 3) {
+    if (state.picked === bodyId(state.round, i)) {
+      return names[i];
+    }
+    i = i + 1;
+  }
+  return "";
+}
+
 function build(state: AppState): scene.Thing[] {
   let things: scene.Thing[] = [];
   things.push(scene.camera(0, 0.9, 1.4, 0, 0.05, 0, true));
@@ -218,7 +237,7 @@ function build(state: AppState): scene.Thing[] {
   let colours: string[] = ["accent", "warning", "#22c55e"];
   let i: number = 0;
   while (i < 3) {
-    let id: string = "r" + ui.numberToString(state.round) + "-" + ui.numberToString(i);
+    let id: string = bodyId(state.round, i);
     let x: number = (i - 1) * 0.3;
     let body: scene.Thing = scene.box(id, x, 0.05, 0, 0.1, 0.1, 0.1, colours[i]);
     if (i === 1) {
@@ -268,15 +287,10 @@ function view(state: AppState): ui.View {
   } else if (state.throws > 0) {
     result = ui.numberToString(state.moved) + " of 3 moved";
   }
-  if (state.picked !== "") {
+  let picked: string = pickedName(state);
+  if (picked !== "") {
     // Say what was picked, not its id.
-    let what: string = "the ball";
-    if (strings.contains(state.picked, "-0")) {
-      what = "the cube";
-    } else if (strings.contains(state.picked, "-1")) {
-      what = "the cylinder";
-    }
-    result = result + " - " + what + " picked";
+    result = result + " - " + picked + " picked";
   }
   return ui.AppTheme("clean", "", [
     ui.Column("default", [
@@ -327,26 +341,39 @@ function walker(id: string, colour: string): scene.Thing {
   return scene.group(id, 0, 0, 0, parts);
 }
 
-// Say who and where, not their ids.
-function whoCame(id: string): string {
-  if (strings.contains(id, "walker")) {
-    return "the walker";
-  }
-  if (strings.contains(id, "roamer")) {
-    return "the ball";
-  }
-  return "you";
+// What every id in this round starts with: build makes the ids with it, and the names below match them exactly.
+function prefix(state: AppState): string {
+  return "r" + ui.numberToString(state.round) + "-";
 }
 
-function whereCame(id: string): string {
-  if (strings.contains(id, "gate")) {
+// Say who and where in words, by the exact ids build makes, not read out of the ids.
+function whoCame(state: AppState, id: string): string {
+  let r: string = prefix(state);
+  if (id === r + "walker") {
+    return "the walker";
+  }
+  if (id === r + "roamer") {
+    return "the ball";
+  }
+  if (id === r + "me") {
+    return "you";
+  }
+  return "something";
+}
+
+function whereCame(state: AppState, id: string): string {
+  let r: string = prefix(state);
+  if (id === r + "gate") {
     return "the gate";
   }
-  return "the spring";
+  if (id === r + "spring") {
+    return "the spring";
+  }
+  return "a circle";
 }
 
 function build(state: AppState): scene.Thing[] {
-  let r: string = "r" + ui.numberToString(state.round) + "-";
+  let r: string = prefix(state);
   let things: scene.Thing[] = [];
   things.push(scene.sky("#9fd0f0", 0));
   things.push(scene.floor("#6aa84f"));
@@ -367,7 +394,7 @@ function onWorld(state: AppState, e: scene.Event): AppState {
     return {jumps: state.jumps + 1, pace: state.pace, round: state.round, entered: state.entered, last: state.last};
   }
   if (e.kind === "enter") {
-    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: whoCame(e.body) + " at " + whereCame(e.other)};
+    return {jumps: state.jumps, pace: state.pace, round: state.round, entered: state.entered + 1, last: whoCame(state, e.body) + " at " + whereCame(state, e.other)};
   }
   return state;
 }

@@ -286,26 +286,18 @@ export const CATALOG: ComponentSpec[] = [
     'direction alternating with each throw; on e.kind === "settled" keep what e.values say in the state and show it (say it ' +
     'is still in the air while state.throws is ahead of the throw last read). Putting things back: state.round in every id, ' +
     'a Button adding 1. Bodies that stand together touch (a stack of side s is s higher each level); bodies to be told apart ' +
-    'start apart. Prefer a matching model from the std/scene model catalogue: scene.model(id, name, x, y, z, size) ' +
-    'uses its imported colours, size its longest body side in metres, x/z the support midpoint and y the SUPPORT BOTTOM ' +
-    '(0 on the ground, a supporting body\'s top on it), unlike primitives whose y is the centre. Models already face +x; ' +
-    'turn pivots about the body centre without regrounding, path keeps the converted centre height and adds its heading ' +
-    'to turn, and from uses the converted centre as a parent-local offset. Models are standalone bodies, not group parts; ' +
-    'paint, glow and split reject them; mark and rings are allowed. Paint surfaces as what they are: scene.paint(thing, pattern, color2) keeps the first colour and adds a ' +
-    'material pattern on any primitive, a group part, a whole group, a table or a floor; sphere-only patterns stay on spheres. ' +
-    'Painting a group replaces its parts\' paint, keeping each part\'s first colour; paint parts separately for different materials. ' +
-    'Motion, glow and mark wrap the group, but paint and turn may wrap parts. Material patterns repeat in metres: frame the ' +
-    'painted surfaces large enough to read on the screen. Bodies circling a centre: no floor, a glowing centre if it shines, each body painted as what it is ' +
+    'start apart. Prefer a matching model from the model catalogue (scene.model; its y is where it stands, not its centre) ' +
+    'to one built from primitives, and paint surfaces as what they are (scene.paint): std/scene below says how each works. ' +
+    'Bodies circling a centre: no floor, a glowing centre if it shines, each body painted as what it is ' +
     '(scene.paint, a real body in its real colours) and turning on its tilted axis, scene.orbit(scene.spin(scene.turn(' +
     'scene.paint(scene.sphere(id, 0, 0, 0, r, colour), pattern, colour2), 0, 0, tilt), dayS), centreId, radius, periodS, ' +
     'phaseDeg), every body the request implies within 4.5 (smaller rather than left out), neighbouring orbits further apart ' +
     'than the two bodies reach (radius, rings, what circles them), style full and an orbiting scene.camera high above the ' +
     'centre. A tap names the body (e.body) in state, scene.mark marks it and a ui.Text shows it. scene.sky(colour, stars) ' +
     'for what is behind the world, scene.trail on the bodies whose paths should show: the host adds no sky, stars or paths ' +
-    'by itself. scene.burst(id, trigger, x, y, z, kind, color) gives a brief particle effect on each trigger change ' +
-    '(initial 0 is silent, changing back to 0 emits); its id is unique among bodies, zones, blasts and bursts. The host ' +
-    'animates and removes particles, without physics or a ticker. Blasts already give debris and smoke; shots hitting ' +
-    'bodies give sparks and hard watched knocks give dust: do not duplicate these with scene.burst.'),
+    'by itself. scene.burst(id, trigger, x, y, z, kind, color) gives a brief particle effect on each trigger change after ' +
+    'the world\'s first state (start the count at 0; changing back to 0 emits). Blasts already give debris and smoke; shots ' +
+    'hitting bodies give sparks and hard watched knocks give dust: do not duplicate these with scene.burst.'),
   new ComponentSpec('ListItem', 'listitem',
     [style('listitem'), new PropSpec('text', 'string'), new PropSpec('label', 'string'),
       new PropSpec('value', 'string'), new PropSpec('action', 'string'),
