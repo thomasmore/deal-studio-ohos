@@ -67,6 +67,20 @@ function chooseDevice(cameras: camera.CameraDevice[], facing: string): camera.Ca
   return cameras.length > 0 ? cameras[0] : null
 }
 
+/**
+ * The one capture in flight: the session-level photo handlers resolve or reject
+ * it, and a photo that arrives after it has settled (a slow capture that timed
+ * out, or the second of the photoAvailable/photoAssetAvailable pair) is released
+ * through it so native camera and image buffers are not held by a stray delivery.
+ */
+class CameraCapturePending {
+  settled: boolean = false
+  resolve: ((photo: camera.Photo | null) => void) | null = null
+  reject: ((error: Error) => void) | null = null
+  assetUri: string = ''
+  timer: number = -1
+}
+
 export class VeraCamera {
   private input: camera.CameraInput | null = null
   private session: camera.PhotoSession | null = null
@@ -76,6 +90,7 @@ export class VeraCamera {
   private started: boolean = false
   private capturing: boolean = false
   private generation: number = 0
+  private pending: CameraCapturePending | null = null
 
   /** The surface this camera is showing on, or '' before start. */
   surface(): string { return this.surfaceId }
@@ -150,6 +165,17 @@ export class VeraCamera {
       this.output = output
       this.surfaceId = surfaceId
       this.started = true
+      // One pair of handlers for the whole session: a capture points `this.pending`
+      // at itself, the handler resolves or rejects it, and any photo that arrives
+      // with no pending capture (or after one has settled) is released here so it
+      // does not leak native buffers. Registered once per output, not per capture,
+      // so the per-capture closures do not stack across a long-lived preview.
+      output.on('photoAvailable', (err: BusinessError, captured: camera.Photo): void => {
+        this.onPhotoAvailable(err, captured)
+      })
+      output.on('photoAssetAvailable', (err: BusinessError, asset: photoAccessHelper.PhotoAsset): void => {
+        this.onPhotoAssetAvailable(err, asset)
+      })
       console.info('VERA-CAMERA started ' + previewProfile.size.width.toString() + 'x' + previewProfile.size.height.toString() + ' photo=' + photoProfile.size.width.toString() + 'x' + photoProfile.size.height.toString())
     } catch (e) {
       if (output !== null) { try { await output.release() } catch (_e) {} }
@@ -175,38 +201,23 @@ export class VeraCamera {
     let output = this.output
     console.info('VERA-CAMERA capture begin')
     this.capturing = true
+    let pending = new CameraCapturePending()
+    this.pending = pending
     try {
-      let assetUri = ''
       let photo = await new Promise<camera.Photo | null>((resolve: (photo: camera.Photo | null) => void,
           reject: (error: Error) => void): void => {
-        let settled = false
-        let timer = setTimeout((): void => {
-          if (settled) { return }
-          settled = true
+        pending.resolve = resolve
+        pending.reject = reject
+        pending.timer = setTimeout((): void => {
+          if (pending.settled) { return }
+          pending.settled = true
           console.error('VERA-CAMERA capture timed out')
           reject(new Error('camera capture timed out'))
         }, 15000)
-        output.on('photoAvailable', (err: BusinessError, captured: camera.Photo): void => {
-          if (settled) { return }
-          settled = true
-          clearTimeout(timer)
-          if (err) { console.error('VERA-CAMERA photo error ' + err.code.toString() + ' ' + err.message); reject(new Error(err.message)); return }
-          console.info('VERA-CAMERA photo available')
-          resolve(captured)
-        })
-        output.on('photoAssetAvailable', (err: BusinessError, asset: photoAccessHelper.PhotoAsset): void => {
-          if (settled) { return }
-          settled = true
-          clearTimeout(timer)
-          if (err) { console.error('VERA-CAMERA asset error ' + err.code.toString() + ' ' + err.message); reject(new Error(err.message)); return }
-          assetUri = asset.uri
-          console.info('VERA-CAMERA photo asset ' + assetUri)
-          resolve(null)
-        })
         output.capture().then((): void => { console.info('VERA-CAMERA capture accepted') }).catch((e: Error): void => {
-          if (settled) { return }
-          settled = true
-          clearTimeout(timer)
+          if (pending.settled) { return }
+          pending.settled = true
+          clearTimeout(pending.timer)
           reject(e)
         })
       })
@@ -216,7 +227,7 @@ export class VeraCamera {
         let path = dir + '/camera-' + Date.now().toString() + '.jpg'
         let source: fs.File | null = null
         try {
-          source = fs.openSync(assetUri, fs.OpenMode.READ_ONLY)
+          source = fs.openSync(pending.assetUri, fs.OpenMode.READ_ONLY)
           fs.copyFileSync(source.fd, path)
         } finally {
           if (source !== null) { fs.closeSync(source) }
@@ -244,7 +255,54 @@ export class VeraCamera {
       }
     } finally {
       this.capturing = false
+      this.pending = null
     }
+  }
+
+  /** Resolves the pending capture with a photo, or releases a photo that arrived late. */
+  private onPhotoAvailable(err: BusinessError, captured: camera.Photo): void {
+    let p = this.pending
+    if (p === null || p.settled) {
+      // No capture waiting, or it already settled (a slow capture that timed out, or
+      // the asset path already won): release this photo so native capture/image buffers
+      // are not held by a delivery nobody consumed.
+      this.releasePhoto(captured)
+      return
+    }
+    p.settled = true
+    clearTimeout(p.timer)
+    if (err) {
+      console.error('VERA-CAMERA photo error ' + err.code.toString() + ' ' + err.message)
+      this.releasePhoto(captured)
+      p.reject!(new Error(err.message))
+      return
+    }
+    console.info('VERA-CAMERA photo available')
+    p.resolve!(captured)
+  }
+
+  /** Resolves the pending capture with a photo-asset URI, or drops a late asset. */
+  private onPhotoAssetAvailable(err: BusinessError, asset: photoAccessHelper.PhotoAsset): void {
+    let p = this.pending
+    if (p === null || p.settled) { return }
+    p.settled = true
+    clearTimeout(p.timer)
+    if (err) {
+      console.error('VERA-CAMERA asset error ' + err.code.toString() + ' ' + err.message)
+      p.reject!(new Error(err.message))
+      return
+    }
+    p.assetUri = asset.uri
+    console.info('VERA-CAMERA photo asset ' + p.assetUri)
+    p.resolve!(null)
+  }
+
+  private releasePhoto(captured: camera.Photo): void {
+    // Fire-and-forget: this runs in the synchronous event handler, so the async
+    // releases cannot be awaited here. .catch swallows rejections so a release
+    // failure on a stray photo does not become an unhandled rejection.
+    captured.main.release().catch((): void => {})
+    captured.release().catch((): void => {})
   }
 
   /** Stops the preview and releases every camera object; safe to call more than once. */
@@ -254,6 +312,7 @@ export class VeraCamera {
     this.started = false
     this.capturing = false
     this.surfaceId = ''
+    this.pending = null
     let input = this.input
     let session = this.session
     let preview = this.preview

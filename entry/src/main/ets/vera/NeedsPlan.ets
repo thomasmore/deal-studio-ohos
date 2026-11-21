@@ -447,6 +447,25 @@ export function isCameraNeed(words: string): boolean {
 }
 
 /**
+ * True only for a need the capture fragment can actually satisfy on its own:
+ * framing a live preview, snapping one photo and keeping it. A need that also
+ * asks to scan, decode, recognize or identify something (a QR scanner that
+ * decodes a code and opens its URL), or one that mentions a camera only in
+ * passing (a camera-settings checklist, "display ... without taking photos"),
+ * is not satisfied by appending a captured JPEG to a photo list, so it returns
+ * false and is left for the section writer -- the rest of the behavior stays
+ * open instead of being silently dropped with no unsupported-feature notice.
+ */
+export function isCameraCaptureNeed(words: string): boolean {
+  if (!isCameraNeed(words)) { return false }
+  if (/\b(scan|scanner|scanning|qr|barcode|bar\s?code|decode|recognize|recognise|identify|detect|checklist|settings)\b/i.test(words)) {
+    return false
+  }
+  if (/without\b[^.]*\b(taking|capturing|snapping|shooting)\b/i.test(words)) { return false }
+  return true
+}
+
+/**
  * A request that says the person photographs or scans something must keep a
  * camera need even when the plan leaves it out: the Exam Prep starter does, and
  * a plan without it served a practice screen with no way to photograph a page.
