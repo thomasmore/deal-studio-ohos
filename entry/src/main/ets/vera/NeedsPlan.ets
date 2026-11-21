@@ -442,8 +442,10 @@ export function sketchFrom(plan: NeedsPlan): Sketch | null {
   return parseSketch(JSON.stringify(o))
 }
 
+const CAMERA_SCAN_WORD: RegExp = /\bscan(?:s|ned|ning|ners?)?\b/i
+
 export function isCameraNeed(words: string): boolean {
-  return /\b(?:cameras?|photograph(?:s|ed|ing|y)?|scan(?:s|ned|ning|ners?)?)\b/i.test(words)
+  return /\b(?:cameras?|photograph(?:s|ed|ing|y)?)\b/i.test(words) || CAMERA_SCAN_WORD.test(words)
 }
 
 /**
@@ -458,7 +460,8 @@ export function isCameraNeed(words: string): boolean {
  */
 export function isCameraCaptureNeed(words: string): boolean {
   if (!isCameraNeed(words)) { return false }
-  if (/\b(scan|scanner|scanning|qr|barcode|bar\s?code|decode|recognize|recognise|identify|detect|checklist|settings)\b/i.test(words)) {
+  if (CAMERA_SCAN_WORD.test(words) ||
+      /\b(qr|barcode|bar\s?code|decode|recognize|recognise|identify|detect|checklist|settings)\b/i.test(words)) {
     return false
   }
   if (/without\b[^.]*\b(taking|capturing|snapping|shooting)\b/i.test(words)) { return false }
