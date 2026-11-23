@@ -10,6 +10,22 @@ Use an available TypeScript installation with Node module resolution.
 Alternatively, set `VERA_TYPESCRIPT_PATH` to the TypeScript module entry file before these commands.
 No dependency installation is required when that module is available.
 
+## Running the checks
+
+`run-all.js` discovers every `*-check.js` and `*-suite.js` in this folder and runs it in its own process, then reports pass/fail/skip with timing:
+
+```bash
+node tools/vera-harness/run-all.js                # ALL CHECKS, SEQUENTIALLY
+node tools/vera-harness/run-all.js --list         # names and families
+node tools/vera-harness/run-all.js --family=runtime
+node tools/vera-harness/run-all.js --filter=host --jobs=2
+node tools/vera-harness/run-all.js --json=/tmp/vera-checks.json
+```
+
+Families are `runtime`, `visual`, `widget`, `prompt`, `agent`, `composition`, `live`, `ui`, `compiler` and `other`.
+
+`manifest.js` records what cannot be inferred: extra arguments (for checks that take a repo root or report path), required environment (skipping with a reason when absent), and platform skips, `--jobs=N` runs checks concurrently; keep it at 1 when a check writes a fixed temp path.
+
 Run these commands from the repository root:
 
 ```bash
