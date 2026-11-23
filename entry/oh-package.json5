@@ -7,6 +7,7 @@
   "license": "",
   "dependencies": {
     "libllama.so": "file:./src/main/cpp/types/libllama",
+    "liblocaljev.so": "file:./src/main/cpp/types/liblocaljev",
     "libphys.so": "file:./src/main/cpp/types/libphys",
     "libusbnet.so": "file:./src/main/cpp/types/libusbnet"
   }

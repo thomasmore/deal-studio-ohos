@@ -24,7 +24,7 @@ const FIRST_APP_UID = 10000
 // caller. The navigation parameters (projectId, launchMode, veraRun) are not listed:
 // the launcher, the widget and shortcuts send those.
 export const DEV_PARAMETER_NAMES: string[] = [
-  'deepseekKey', 'typesafeKey', 'exaKey', 'reasoningEffort', 'veraServer',
+  'deepseekKey', 'typesafeKey', 'exaKey', 'reasoningEffort', 'veraServer', 'localJev',
   'probeTarget', 'probeParams', 'probeMode', 'probeSdkTarget', 'probeSdkParams',
   'probeSdkSearch', 'veraBenchmark', 'veraSdkEval', 'veraUiEval', 'veraUiAb',
   'veraCompose', 'veraComposePlan', 'veraCustom', 'veraAlign', 'veraWhole',

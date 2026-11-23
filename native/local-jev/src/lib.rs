@@ -340,6 +340,73 @@ pub fn decisions(raw: &Value, temperature: f64, threshold: f64) -> Value {
     json!({"answers": answers, "local": {"status": if answers.len() == scores.len() {"answered"} else {"uncertain"}}})
 }
 
+/// Developer-only temperature-1 decisions. Never called by regular prediction.
+/// Keep this in Rust so host and phone use exactly the same validation and policy.
+pub fn experimental_decisions(mut raw: Value, body: &str) -> Value {
+    if raw.get("scores").is_none() {
+        return raw;
+    }
+    let request = match parse_with_min_options(body, 1) {
+        Ok(request) => request,
+        Err(reason) => return uncertain(&reason),
+    };
+    let Some(scores) = raw["scores"].as_object() else {
+        return uncertain("invalid_scores");
+    };
+    if scores.len() != request.questions.len() {
+        return uncertain("invalid_scores");
+    }
+    let mut answers = serde_json::Map::new();
+    for (key, question) in &request.questions {
+        let score = &scores.get(key).unwrap_or(&Value::Null);
+        let Some(logits) = score["logits"].as_object() else {
+            return uncertain("invalid_scores");
+        };
+        let ids: Vec<String> = if question.kind == "noul" {
+            vec!["false".into(), "true".into()]
+        } else {
+            question.criteria.keys().cloned().collect()
+        };
+        if score["type"] != question.kind || logits.len() != ids.len() {
+            return uncertain("invalid_scores");
+        }
+        let mut values = Vec::new();
+        for id in &ids {
+            match logits.get(id).and_then(Value::as_f64) {
+                Some(value) if value.is_finite() => values.push(value),
+                _ => return uncertain("invalid_scores"),
+            }
+        }
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let total: f64 = values.iter().map(|value| (value - max).exp()).sum();
+        let mut probabilities = serde_json::Map::new();
+        let mut best = 0;
+        for (i, id) in ids.iter().enumerate() {
+            probabilities.insert(id.clone(), json!((values[i] - max).exp() / total));
+            // Deterministic ties: first lexicographic ID, matching BTreeMap request order.
+            if values[i] > values[best] {
+                best = i;
+            }
+        }
+        let answer = if question.kind == "noul" {
+            json!({"type":"noul", "noul":probabilities["true"], "probabilities":probabilities})
+        } else {
+            json!({"type":"choice", "choice":ids[best], "probabilities":probabilities})
+        };
+        answers.insert(key.clone(), answer);
+    }
+    let production_reason = raw["local"]["reason"].clone();
+    raw["answers"] = Value::Object(answers);
+    raw["local"]["status"] = json!("diagnostic");
+    raw["local"]["reason"] = json!("playground_uncalibrated_logits");
+    raw["local"]["productionReason"] = production_reason;
+    raw["local"]["diagnostic"] = json!(true);
+    raw["local"]["calibrated"] = json!(false);
+    raw["local"]["productionAllowed"] = json!(false);
+    raw["local"]["scoreTemperature"] = json!(1);
+    raw
+}
+
 static ENGINE: OnceLock<Mutex<Result<Engine>>> = OnceLock::new();
 static LAYA: OnceLock<Mutex<Result<laya::Engine>>> = OnceLock::new();
 
@@ -377,6 +444,45 @@ pub unsafe extern "C" fn local_jev_diagnostic_scores(data: *const u8, len: usize
             Err(_) => uncertain("laya_model_unavailable"),
         }
     })
+}
+
+/// Explicit experimental API: same capped input policy and raw scores as the playground.
+/// The normal local_jev_predict guard above remains unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn local_jev_experimental_decisions(
+    data: *const u8,
+    len: usize,
+) -> *mut c_char {
+    reply(data, len, |body| {
+        let engine = LAYA
+            .get_or_init(|| Mutex::new(laya::Engine::embedded()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*engine {
+            Ok(engine) => match engine.diagnostic_scores(body) {
+                Ok(raw) => experimental_decisions(raw, body),
+                Err(reason) => uncertain(&reason),
+            },
+            Err(_) => uncertain("laya_model_unavailable"),
+        }
+    })
+}
+
+/// Loads and validates the embedded bundle. Must run off the UI thread.
+#[no_mangle]
+pub extern "C" fn local_jev_status() -> *mut c_char {
+    let output = std::panic::catch_unwind(|| {
+        let engine = LAYA
+            .get_or_init(|| Mutex::new(laya::Engine::embedded()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        json!({"ready":engine.is_ok(), "abi":1, "diagnostic":true,
+            "calibrated":false, "productionAllowed":false,
+            "reason":if engine.is_ok() {"experimental_only"} else {"laya_model_unavailable"},
+            "manifestSha256":format!("{:x}", Sha256::digest(assets::LAYA_MANIFEST))})
+    })
+    .unwrap_or_else(|_| json!({"ready":false,"reason":"inference_failed"}));
+    CString::new(output.to_string()).unwrap().into_raw()
 }
 
 unsafe fn reply(

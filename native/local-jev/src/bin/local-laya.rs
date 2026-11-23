@@ -8,6 +8,7 @@ fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let mut scores = false;
     let mut diagnostic = false;
+    let mut experimental = false;
     let mut batch_questions = false;
     let mut report_batches = false;
     let mut stream = false;
@@ -17,6 +18,7 @@ fn main() {
     while index < args.len() {
         match args[index].as_str() {
             "--scores" => scores = true,
+            "--experimental-decisions" => experimental = true,
             "--diagnostic-scores" => {
                 scores = true;
                 diagnostic = true;
@@ -34,7 +36,7 @@ fn main() {
             }
             _ => {
                 eprintln!(
-                    "usage: local-laya [--bundle DIR] [--scores | --diagnostic-scores] [--stream | --framed] [--batch-questions [--report-batches]]"
+                    "usage: local-laya [--bundle DIR] [--scores | --diagnostic-scores | --experimental-decisions] [--stream | --framed] [--batch-questions [--report-batches]]"
                 );
                 std::process::exit(2);
             }
@@ -46,6 +48,10 @@ fn main() {
         eprintln!("{reason}");
     }
     let predict = |body: &str| match &model {
+        Ok(model) if experimental => match model.diagnostic_scores(body) {
+            Ok(raw) => local_jev::experimental_decisions(raw, body),
+            Err(reason) => uncertain(&reason),
+        },
         Ok(model) if scores && batch_questions => {
             let mut lengths = Vec::new();
             let result =

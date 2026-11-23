@@ -13,6 +13,10 @@ uint32_t local_jev_abi(void);
 char *local_jev_predict(const uint8_t *data, size_t len);
 // Experimental only. Returns logits and leaves the answer map empty.
 char *local_jev_diagnostic_scores(const uint8_t *data, size_t len);
+// Developer opt-in only: uncalibrated decisions with raw scores and diagnostics.
+char *local_jev_experimental_decisions(const uint8_t *data, size_t len);
+// Loads and validates the bundle; call off the UI thread.
+char *local_jev_status(void);
 void local_jev_free(char *value);
 
 #ifdef __cplusplus

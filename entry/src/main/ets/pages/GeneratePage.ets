@@ -22,6 +22,7 @@ import { deepseek, DEEPSEEK_GENERATION_MAX_TOKENS, SideCall } from '../vera/Deep
 import { OperationController, throwIfCancelled } from '../vera/OperationCancellation'
 import { VeraPreview, VeraPreviewController } from '../components/VeraPreview'
 import { settings, MODE_DEEPSEEK, MODE_SERVER, MODE_LOCAL } from '../vera/SettingsStore'
+import { localJev } from '../vera/LocalJev'
 import { settingsMenuItem } from '../components/SettingsEntry'
 import { withoutWidgetRequests } from '../vera/ProjectText'
 import { consent } from '../vera/VeraConsentStore'
@@ -1012,6 +1013,7 @@ export struct GeneratePage {
    * it re-renders when the proxy toggle flips.
    */
   private selectorNote(): string {
+    if (settings.useLocalSelector()) { return 'Selector: local experimental / ' + localJev.statusNote() }
     if (this.jevProxyOn) { return 'Selector: cloud proxy' }
     if (settings.hasSelectorKey()) { return 'Selector: TypeSafe' }
     return 'No selector (agent route off)'
@@ -1189,6 +1191,10 @@ export struct GeneratePage {
     if (this.disposed || this.prompt.trim().length === 0 || this.baseError.length > 0 || this.generating) { return }
     // Sent before the prompt and the catalogue were read: it goes when they are (aboutToAppear).
     if (!this.resourcesLoaded) { this.runOnOpen = true; return }
+    if (this.mode === MODE_DEEPSEEK && settings.useLocalSelector() && !localJev.isReady()) {
+      this.status = 'Local selector unavailable: ' + localJev.statusNote()
+      return
+    }
     if (this.compiledSource.length > 0) { this.previousSource = this.compiledSource }
     if (this.mode === MODE_SERVER) {
       if (!settings.hasServerUrl()) { this.checkServer(); return }
@@ -2082,6 +2088,10 @@ export struct GeneratePage {
     // A change that only adds, removes, replaces or moves a block of a composed screen is made on its
     // record, with no model rewrite; anything else, and any step that does not hold, refines as before.
     // Make widget is not a structural edit: only the model, told what a widget may add, writes it.
+    if (this.mode === MODE_DEEPSEEK && settings.useLocalSelector() && !localJev.isReady()) {
+      this.status = 'Local selector unavailable: ' + localJev.statusNote()
+      return
+    }
     if (!this.makeWidget && this.compositionJson.length > 0 && this.mode === MODE_DEEPSEEK && templateSelectEnabled() &&
         settings.hasSelector()) {
       this.tryStructuralEdit(ask)

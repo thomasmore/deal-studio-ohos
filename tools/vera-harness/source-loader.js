@@ -23,6 +23,8 @@ function loadSource(file) {
     if (name === '@kit.NetworkKit') return {connection: {getAddressesByName: async host => typeof globalThis.__veraResolve === 'function' ? globalThis.__veraResolve(host) :
       (await require('node:dns').promises.lookup(host, {all: true})).map(a => ({address: a.address}))}, http: {RequestMethod: {POST: 'POST', GET: 'GET'}, HttpProtocol: {HTTP1_1: 'http1.1'}, HttpDataType: {STRING: 0, OBJECT: 1}, createHttp() { if (typeof globalThis.__veraHttp === 'function') return globalThis.__veraHttp(); return {on() {}, destroy() {}, request() { return Promise.reject(Object.assign(Error('network is not available in the host harness'), {code: 2300028})) }} }}}
     // Any other platform module is only touched when a network or file call is made, which host checks never do.
+    if (name === 'liblocaljev.so') return {default:{status: async () => globalThis.__veraLocalJev ? globalThis.__veraLocalJev.status() : JSON.stringify({ready:false,reason:'host_adapter_not_configured'}),
+      experimentalDecisions: body => { if (!globalThis.__veraLocalJev) throw Error('Local host adapter not configured'); return globalThis.__veraLocalJev.experimentalDecisions(body) }}}
     if (name.startsWith('@kit.') || name === 'libllama.so') return {}
     if (name.startsWith('.')) return loadSource(path.resolve(path.dirname(file), name + '.ets'))
     throw Error('Unsupported host dependency: ' + name)

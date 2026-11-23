@@ -20,8 +20,6 @@
  * is none, and an edit goes to the model as it always did.
  */
 
-import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'
-import { http } from '@kit.NetworkKit'
 import { hilog } from '@kit.PerformanceAnalysisKit'
 import { fragments, FragmentSpec, StateFieldSpec, LIVE_KIND } from './VeraTemplates'
 import { markedHole, readChoiceValue } from './VeraSectionCompose'
@@ -30,13 +28,10 @@ import { fillSectionsContent } from './VeraTemplateContent'
 import { arrangeInLayout, LAYOUT_STACK } from './VeraLayouts'
 import { compileVeraSource, CompileResult } from './VeraCompiler'
 import { smokeRun } from './VeraSmoke'
-import { settings } from './SettingsStore'
-import { askJevViaCloud } from './JevProxy'
+import { askSelector } from './VeraSelector'
 import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
-import { requestWithCancellation } from './VeraWebSearch'
 
 const DOMAIN = 0x0000
-const ENDPOINT: string = 'https://api.typesafe.ai/v1/systemone'
 const MODEL: string = 'jev-latest'
 const MAX_BLOCKS: number = 6
 const EDIT_ABOVE: number = 0.6
@@ -488,48 +483,12 @@ export async function selectEdit(request: string, c: Composition, apiKey: string
   throwIfCancelled(cancellation)
   let none = new CompositionEdit()
   if (request.trim().length === 0) { none.note = 'edit=none(no key)'; return none }
-  // Route through the on-device cloud proxy when it is on; the proxy uses the
-  // cloud key, so the selector-key guard does not apply in that mode.
-  if (settings.useJevProxy()) {
-    throwIfCancelled(cancellation)
-    let body = await askJevViaCloud(buildEditRequest(request, c), cancellation)
-    throwIfCancelled(cancellation)
-    if (body.length === 0) { none.note = 'edit=none(selector unreachable)'; return none }
-    let edit = readEditAnswer(body, c)
-    hilog.info(DOMAIN, 'VERA', 'VERA-EDIT ' + edit.note)
-    return edit
-  }
-  if (apiKey.length === 0) { none.note = 'edit=none(no key)'; return none }
-  try {
-    let headers: Record<string, string> = {}
-    headers['Content-Type'] = 'application/json'
-    headers['Authorization'] = 'Bearer ' + apiKey
-    throwIfCancelled(cancellation)
-    let response = await requestWithCancellation(ENDPOINT, {
-      method: http.RequestMethod.POST,
-      header: headers,
-      extraData: buildEditRequest(request, c),
-      connectTimeout: 5000,
-      readTimeout: 15000
-    }, cancellation)
-    throwIfCancelled(cancellation)
-    if ((response.responseCode as number) !== 200) {
-      noteService(SERVICE_JEV, false, httpFailure(response.responseCode as number, String(response.result)))
-      none.note = 'edit=none(selector ' + (response.responseCode as number).toString() + ')'
-      return none
-    }
-    noteService(SERVICE_JEV, true)
-    let edit = readEditAnswer(response.result as string, c)
-    hilog.info(DOMAIN, 'VERA', 'VERA-EDIT ' + edit.note)
-    return edit
-  } catch (e) {
-    throwIfCancelled(cancellation)
-    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
-    hilog.warn(DOMAIN, 'VERA', 'VERA-EDIT failed: ' + (e as Error).message)
-    noteService(SERVICE_JEV, false, (e as Error).message)
-    none.note = 'edit=none(selector unreachable)'
-    return none
-  }
+  let body = await askSelector(buildEditRequest(request, c), apiKey, cancellation)
+  throwIfCancelled(cancellation)
+  if (body.length === 0) { none.note = 'edit=none(selector unreachable)'; return none }
+  let edit = readEditAnswer(body, c)
+  hilog.info(DOMAIN, 'VERA', 'VERA-EDIT ' + edit.note)
+  return edit
 }
 
 export type EditSelector = (request: string, c: Composition, cancellation?: OperationCancellation) => Promise<CompositionEdit>

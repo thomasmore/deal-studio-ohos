@@ -24,19 +24,14 @@
  * status line names it.
  */
 
-import { http } from '@kit.NetworkKit'
 import { OperationCancellation, throwIfCancelled } from './OperationCancellation'
-import { requestWithCancellation } from './VeraWebSearch'
 import { FragmentSpec, StateFieldSpec, PortSpec, VetoSpec, fragments, vetoes, LIVE_KIND, liveFigureNumber } from './VeraTemplates'
 import { composeFragments } from './VeraSectionCompose'
-import { noteService, httpFailure, SERVICE_JEV } from './ServiceHealth'
 import { blockDefaults } from './VeraTemplateContent'
-import { settings } from './SettingsStore'
-import { askJevViaCloud } from './JevProxy'
+import { askSelector } from './VeraSelector'
 import { ScreenPlan, PlanSlot, PlanComponent, StateItem, assemblePlan, FILL_PART, FILL_BLOCK, FILL_EFFECT, FILL_HOLE, FILL_OPEN,
   PLAN_FROM_SKETCH, TO_WRITE } from './ScreenPlan'
 
-const JEV_ENDPOINT: string = 'https://api.typesafe.ai/v1/systemone'
 
 /** On whenever there is a TypeSafe key; `--ps veraCompose 0` switches it off for the session. */
 let enabled: boolean = true
@@ -4748,41 +4743,9 @@ export class ComposeResult {
   composition: Composition | null = null
 }
 
+/** Compatibility entry point; all application selectors share VeraSelector. */
 export async function askJev(body: string, apiKey: string, cancellation?: OperationCancellation): Promise<string> {
-  throwIfCancelled(cancellation)
-  // Route the selector calls through the on-device cloud proxy when it is on,
-  // instead of TypeSafe; otherwise the real TypeSafe endpoint, unchanged.
-  if (settings.useJevProxy()) {
-    return askJevViaCloud(body, cancellation)
-  }
-  try {
-    let headers: Record<string, string> = {}
-    headers['Content-Type'] = 'application/json'
-    headers['Authorization'] = 'Bearer ' + apiKey
-    let response = await requestWithCancellation(JEV_ENDPOINT, {
-      method: http.RequestMethod.POST,
-      header: headers,
-      extraData: body,
-      expectDataType: http.HttpDataType.STRING,
-      connectTimeout: 5000,
-      readTimeout: 15000
-    }, cancellation)
-    throwIfCancelled(cancellation)
-    if ((response.responseCode as number) !== 200) {
-      console.warn('VERA-JEV http ' + (response.responseCode as number).toString() + ' bytes=' + body.length.toString() + ' ' +
-        String(response.result).substring(0, 300))
-      noteService(SERVICE_JEV, false, httpFailure(response.responseCode as number, String(response.result)))
-      return ''
-    }
-    noteService(SERVICE_JEV, true)
-    return response.result as string
-  } catch (e) {
-    throwIfCancelled(cancellation)
-    if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
-    console.warn('VERA-JEV failed bytes=' + body.length.toString() + ': ' + (e as Error).message)
-    noteService(SERVICE_JEV, false, (e as Error).message)
-    return ''
-  }
+  return askSelector(body, apiKey, cancellation)
 }
 
 /** Asks for the sketch: (system prompt, request, reply so far) -> the whole reply, or null when there was none. */

@@ -36,5 +36,18 @@ int main(void) {
         if (!check("diagnostic", local_jev_diagnostic_scores(request, sizeof(request) - 1),
                    "\"scores\":{\"widget\":{\"logits\":{", 1)) return 1;
     }
-    return 0;
+    char *status = local_jev_status();
+    if (!status || !strstr(status, "\"ready\":true")) {
+        if (status) local_jev_free(status);
+        return 1;
+    }
+    printf("status %s\n", status);
+    local_jev_free(status);
+    char *experimental = local_jev_experimental_decisions(request, sizeof(request) - 1);
+    int ok = experimental && strstr(experimental, "\"diagnostic\":true") &&
+        strstr(experimental, "\"productionAllowed\":false") &&
+        strstr(experimental, "\"probabilities\":{") &&
+        !strstr(experimental, "\"answers\":{}");
+    if (experimental) { printf("experimental %s\n", experimental); local_jev_free(experimental); }
+    return ok ? 0 : 1;
 }

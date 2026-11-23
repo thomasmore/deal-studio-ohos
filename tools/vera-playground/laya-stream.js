@@ -1,7 +1,7 @@
 // One serialized Rust stream for the playground server or standalone harness.
 'use strict'
 const cp=require('node:child_process'),readline=require('node:readline'),crypto=require('node:crypto')
-const {specification,metadata,diagnosticDecisions}=require('./local-selector')
+const {specification,metadata}=require('./local-selector')
 const localFailureMessage = error => /^(Local model unavailable|Laya (process (failed|exited)|startup (failed|timed out)|stream (write failed|closed)|inference timed out|response identity mismatch|call cancelled|frame too large|request too large)|Invalid Laya frame)$/.test(error.message)
   ? error.message : 'Selector transport or response failure'
 function localOperationalReason(response) {
@@ -70,7 +70,8 @@ class LayaStream {
       await this.retiring
       if(this.closed||signal?.aborted)throw Error('Laya call cancelled')
       if(Buffer.byteLength(body)>262144)throw Error('Laya request too large')
-      const request=JSON.parse(body),state=this.state||this.start(),cold=!state.readyDone
+      JSON.parse(body)
+      const state=this.state||this.start(),cold=!state.readyDone
       const abort=()=>this.fail(state,'Laya call cancelled')
       signal?.addEventListener('abort',abort,{once:true})
       try{
@@ -82,7 +83,6 @@ class LayaStream {
           state.pending={id,resolve,reject,timer,sent,entered,cold}
           state.child.stdin.write(`{"id":${JSON.stringify(id)},"request":${body.replace(/[\r\n]/g,' ')}}\n`)
         })
-        result.response=diagnosticDecisions(result.response,request)
         result.timings.totalMs=performance.now()-entered
         return result
       }finally{signal?.removeEventListener('abort',abort)}

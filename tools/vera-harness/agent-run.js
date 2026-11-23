@@ -43,6 +43,10 @@ if (relayLocal && (selector !== 'local' || !process.connected)) throw Error('Loc
 const {LayaStream, localFailureMessage} = require('../vera-playground/laya-stream')
 const {askCloud} = require('../vera-playground/selector-comparison')
 const localStream = selector === 'local' && !relayLocal ? new LayaStream() : null
+// Standalone generation uses the same application boundary as structural editing.
+const localEvents = new Map()
+const localAdapter = localStream ? require('../local-jev/host-selector').installLocalSelector({loadVera,stream:localStream,
+  onEvent:event => localEvents.set(event.body,event)}) : null
 let relayId = 0
 function askLocal(body) {
   if (localStream) return localStream.query(body)
@@ -152,8 +156,15 @@ function host(log, dir) {
     let text = '', error = '', local = {}
     try {
       if (selector === 'local') {
-        local = await askLocal(body)
-        text = JSON.stringify(local.response)
+        if (localAdapter) {
+          localEvents.delete(body)
+          text = await loadVera('VeraSelector').askSelector(body, '')
+          local = localEvents.get(body) || {}
+          if (!local.source) throw Error('Local model unavailable')
+        } else {
+          local = await askLocal(body)
+          text = JSON.stringify(local.response)
+        }
       } else if (selector === 'cloud') text = await askCloud(body, process.env.TYPESAFE_API_KEY)
       else {
         const res = await fetch('https://api.typesafe.ai/v1/systemone', {method: 'POST',
@@ -249,5 +260,5 @@ async function one([label, prompt]) {
 ;(async () => {
   const queue = prompts.slice()
   try { await Promise.all(Array.from({length: Math.min(jobs, queue.length)}, async () => { while (queue.length) await one(queue.shift()) })) }
-  finally { localStream?.close(); if (relayLocal && process.connected) process.disconnect() }
+  finally { localAdapter?.close(); localStream?.close(); if (relayLocal && process.connected) process.disconnect() }
 })()

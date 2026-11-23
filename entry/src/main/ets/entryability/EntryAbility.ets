@@ -6,6 +6,7 @@ import { refreshForms } from '../vera/FormUpdater'
 import { store } from '../vera/ProjectStore'
 import { formBindings } from '../vera/FormBindings'
 import { settings } from '../vera/SettingsStore'
+import { localJev } from '../vera/LocalJev'
 import { resetLogprobsProbe } from '../vera/JevProxy'
 import { requestCalendarPermissions, requestMicrophonePermission } from '../vera/VeraPermissions'
 import { runProbe } from '../vera/IntentProbe'
@@ -62,6 +63,7 @@ export default class EntryAbility extends UIAbility {
     }
     // Widget launches can reach ProjectPage and refreshForms (onForeground) before Index
     // initialises storage. Both must read the real project directory.
+    settings.init(this.context.filesDir)
     store.init(this.context.filesDir)
     formBindings.init(this.context.filesDir)
     // Before anything can be generated or compiled: the vocabulary a program is
@@ -70,6 +72,7 @@ export default class EntryAbility extends UIAbility {
     startPowerKeyProbe()
     this.extractProjectId(want)
     this.extractDevParameters(want)
+    if (settings.useLocalSelector()) { localJev.prepare() }
     this.navigateToProject()
   }
 
@@ -109,6 +112,13 @@ export default class EntryAbility extends UIAbility {
     this.extractApiModel(want)
     this.extractSelectorKey(want)
     this.extractJevProxy(want)
+    let localSelector = want.parameters === undefined || want.parameters === null ? undefined :
+      (want.parameters as Record<string, Object>)['localJev']
+    if (localSelector === '1' || localSelector === '0') {
+      settings.setLocalSelector(localSelector === '1')
+      if (settings.useLocalSelector()) { localJev.prepare() }
+      hilog.info(DOMAIN, 'VERA', 'Local Jev experimental mode: ' + String(settings.useLocalSelector()))
+    }
     this.extractExaKey(want)
     this.extractReasoningEffort(want)
     this.extractServerUrl(want)

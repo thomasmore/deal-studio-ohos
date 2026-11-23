@@ -26,6 +26,7 @@
  */
 
 import { fileIo as fs } from '@kit.CoreFileKit'
+import { localJev } from './LocalJev'
 
 export const DEFAULT_DEEPSEEK_BASE_URL: string = 'https://api.deepseek.com'
 export const DEFAULT_DEEPSEEK_MODEL: string = 'deepseek-flash'
@@ -88,6 +89,10 @@ export const MODE_DEEPSEEK: string = 'deepseek'
 export const MODE_SERVER: string = 'server'
 export const MODE_LOCAL: string = 'local'
 
+export const SELECTOR_TYPESAFE: string = 'typesafe'
+export const SELECTOR_LLM: string = 'llm'
+export const SELECTOR_LOCAL: string = 'local'
+
 export class SettingsStore {
   private root: string = ''
   private apiKey: string = ''
@@ -133,6 +138,8 @@ export class SettingsStore {
    * to point at.
    */
   private jevProxy: string = ''
+  // Explicit demo choice; legacy jevProxy is retained for launch-parameter compatibility.
+  private selectorMode: string = SELECTOR_TYPESAFE
   /** MODE_DEEPSEEK, MODE_SERVER or MODE_LOCAL; chosen on the Settings page and kept. */
   private mode: string = MODE_DEEPSEEK
   private loaded: boolean = false
@@ -163,6 +170,9 @@ export class SettingsStore {
         this.exaKey = (obj['exaKey'] as string) || ''
         this.reasoningEffort = (obj['reasoningEffort'] as string) || ''
         this.jevProxy = (obj['jevProxy'] as string) || ''
+        let selector = (obj['selectorMode'] as string) || ''
+        this.selectorMode = selector === SELECTOR_LOCAL || selector === SELECTOR_LLM || selector === SELECTOR_TYPESAFE ?
+          selector : (this.jevProxy.length > 0 ? SELECTOR_LLM : SELECTOR_TYPESAFE)
         let mode = (obj['mode'] as string) || ''
         this.mode = mode === MODE_SERVER || mode === MODE_LOCAL ? mode : MODE_DEEPSEEK
       } catch (_e) {}
@@ -181,6 +191,7 @@ export class SettingsStore {
     obj['exaKey'] = this.exaKey
     obj['reasoningEffort'] = this.reasoningEffort
     obj['jevProxy'] = this.jevProxy
+    obj['selectorMode'] = this.selectorMode
     obj['mode'] = this.mode
     try { writeText(this.path(), JSON.stringify(obj)) } catch (_e) {}
   }
@@ -224,15 +235,30 @@ export class SettingsStore {
 
   hasSelectorKey(): boolean { return this.getSelectorKey().length > 0 }
 
-  /**
-   * Whether a selector is available at all: the real TypeSafe key, or the
-   * on-device cloud proxy (which uses the cloud key, not the selector key).
-   * The composer's agent route and its structural-edit path are gated on this:
-   * they need *some* selector to answer their choice/noul questions, and when
-   * the proxy is on that selector is the configured cloud model, so the paths
-   * proceed without a TypeSafe key.
-   */
-  hasSelector(): boolean { return this.hasSelectorKey() || this.useJevProxy() }
+  /** Availability of the explicitly chosen provider, never another provider's key. */
+  hasSelector(): boolean {
+    if (this.useLocalSelector()) { return localJev.isReady() }
+    if (this.useJevProxy()) { return this.hasApiKey() }
+    return this.hasSelectorKey()
+  }
+
+  getSelectorMode(): string {
+    if (!this.loaded) { this.load() }
+    return this.selectorMode
+  }
+
+  setSelectorMode(mode: string): void {
+    if (!this.loaded) { this.load() }
+    if (mode !== SELECTOR_TYPESAFE && mode !== SELECTOR_LLM && mode !== SELECTOR_LOCAL) { return }
+    this.selectorMode = mode
+    this.jevProxy = mode === SELECTOR_LLM ? '1' : ''
+    this.save()
+  }
+
+  useLocalSelector(): boolean { return this.getSelectorMode() === SELECTOR_LOCAL }
+  setLocalSelector(enabled: boolean): void {
+    this.setSelectorMode(enabled ? SELECTOR_LOCAL : (this.getJevProxy().length > 0 ? SELECTOR_LLM : SELECTOR_TYPESAFE))
+  }
 
   getExaKey(): string {
     if (!this.loaded) { this.load() }
@@ -274,16 +300,14 @@ export class SettingsStore {
   setJevProxy(url: string): void {
     if (!this.loaded) { this.load() }
     this.jevProxy = url.trim()
+    if (!this.useLocalSelector()) {
+      this.selectorMode = this.jevProxy.length > 0 ? SELECTOR_LLM : SELECTOR_TYPESAFE
+    }
     this.save()
   }
 
-  /**
-   * Whether askJev/selectEdit should route through the on-device cloud proxy
-   * (JevProxy.ets) instead of TypeSafe. True when `jevProxy` is set to any
-   * non-empty value (`--ps jevProxy 1`); false otherwise, in which case the
-   * selector calls go to api.typesafe.ai unchanged.
-   */
-  useJevProxy(): boolean { return this.getJevProxy().length > 0 }
+  /** Whether generation/structural selection uses the configured cloud-model approximation. */
+  useJevProxy(): boolean { return this.getSelectorMode() === SELECTOR_LLM }
 
   setApiKey(key: string): void {
     this.apiKey = key.trim()
