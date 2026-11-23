@@ -208,7 +208,16 @@ global.fetch = async (url, options) => {
     const different = await another({diverged:true}, false)
     const diverged = await readComparison(different)
     assert.ok(diverged.summary.replays.cloud > 0 && diverged.summary.replays.local > 0, JSON.stringify(diverged.summary))
-    assert.equal(diverged.summary.choice.compared, 30, 'a contradictory choice type is excluded and an absent type is accepted')
+    const cases = diverged.requests.flatMap(row => Object.entries(JSON.parse(row.body).questions)
+      .filter(([, question]) => question.type === 'choice')
+      .map(([key, question]) => ({criteria: question.criteria, cloud: row.cloud.response?.answers[key],
+        local: row.local.response?.answers[key]})))
+    assert.ok(cases.some(({cloud, local}) => cloud?.type === 'noul' && local), 'fixture supplies a contradictory type')
+    assert.ok(cases.some(({cloud, local}) => cloud && !Object.hasOwn(cloud, 'type') && local), 'fixture supplies an omitted type')
+    assert.equal(diverged.summary.choice.eligible, cases.length)
+    const validPairs = cases.filter(({criteria, cloud, local}) =>
+      cloud?.type !== 'noul' && Object.hasOwn(criteria, cloud?.choice) && Object.hasOwn(criteria, local?.choice))
+    assert.equal(diverged.summary.choice.compared, validPairs.length, 'a contradictory choice type is excluded and an absent type is accepted')
     assert.equal(diverged.summary.noul.eligible, 2)
     assert.equal(diverged.summary.noul.compared, 1, 'a contradictory noul type is excluded')
     const calendar = diverged.requests.find(row => row.cloud.response.answers['section1.itinerary.calendar'])
