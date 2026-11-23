@@ -109,9 +109,9 @@ function declaration(source, prefix) {
 function extractPreview() {
   let source = previewSource.replace(/\r\n/g, '\n')
   source = source.replace(declaration(source, '  build()'), '')
-  const builders = [...source.matchAll(/^  @LocalBuilder\s*\n  (\w+)\(/gm)].map(match => match[1])
+  const builders = [...source.matchAll(/^  @(LocalBuilder|Builder)\s*\n  (\w+)\(/gm)]
   assert(builders.length > 0, 'must exclude ArkUI builders')
-  for (const name of builders) source = source.replace('  @LocalBuilder\n' + declaration(source, '  ' + name + '('), '')
+  for (const [, decorator, name] of builders) source = source.replace('  @' + decorator + '\n' + declaration(source, '  ' + name + '('), '')
   source = source.replace('export struct VeraPreview', 'export class VeraPreview')
     .replace(/@(Watch|StorageProp)\([^)]*\)/g, '')
     .replace(/@(Component|ObservedV2|Trace|Prop|State)\b/g, '')
@@ -153,7 +153,7 @@ const { compileVeraSource } = load(path.join(root, 'vera/VeraCompiler.ets'))
 const { veraStateStamp } = load(path.join(root, 'vera/VeraStateStamp.ets'))
 const { store } = load(path.join(root, 'vera/ProjectStore.ets'))
 store.init('/preview-host-fixture')
-function compile({ initial = 0, bad = false, viewTrapAfter = false, refreshTrap = false, refreshDelta = 0, ticker = 0, surface = false, animated = false, surfaceChange = '', effect = false, world = false, worldUnchanged = false, hideWorldAfterEvent = false } = {}) {
+function compile({ initial = 0, bad = false, viewTrapAfter = false, refreshTrap = false, refreshDelta = 0, ticker = 0, surface = false, animated = false, surfaceChange = '', effect = false, world = false, worldUnchanged = false, worldDirection = false, hideWorldAfterEvent = false } = {}) {
   const changingSurface = surfaceChange === 'shift'
     ? ', ui.Column("default", shifted), ui.Surface("default", 100, 100, "drawOld", "", "pointer")'
     : ', ui.Surface("default", 100, 100, firstDraw, frameAction, "pointer")' +
@@ -177,7 +177,7 @@ function pointer(state: AppState, value: gfx.Pointer): AppState {
 }
 function draw(state: AppState): gfx.Shape[] { return []; }
 ${surfaceChange ? 'function drawOld(state: AppState): gfx.Shape[] { return [gfx.rect(0, 0, 100, 100, "#ff0000")]; } function drawNew(state: AppState): gfx.Shape[] { return [gfx.rect(0, 0, 100, 100, "#0000ff")]; }' : ''}
-${world ? 'function buildWorld(state: AppState): scene.Thing[] { return [scene.box("body", state.n, 2, 3, 1, 2, 3, "accent")]; } function worldEvent(state: AppState, event: scene.Event): AppState { ' + (worldUnchanged ? '' : 'state.n = state.n + 1; ') + 'return state; }' : ''}
+${world ? 'function buildWorld(state: AppState): scene.Thing[] { return [scene.box("body", state.n, 2, 3, 1, 2, 3, "accent")]; } function worldEvent(state: AppState, event: scene.Event): AppState { ' + (worldUnchanged ? '' : 'state.n = state.n + 1; ') + (worldDirection ? 'state.text = event.kind; state.order.push(ui.numberToString(event.dx)); state.order.push(ui.numberToString(event.dy)); state.order.push(ui.numberToString(event.dz)); ' : '') + 'return state; }' : ''}
 function answered(state: AppState, value: string): AppState { state.order.push("answer"); return state; }
 ${effect || refreshTrap || refreshDelta ? 'function widgetRefresh(state: AppState): AppState { ' + (refreshTrap ? 'state.n = 1; ' : '') + (refreshDelta ? 'state.n = state.n + ' + refreshDelta + '; state.order.push("refresh"); ' : '') + (effect ? 'sdk.call("Fixture.device.read", [], "answered"); ' : '') + 'return state; }' : ''}
 function view(state: AppState): ui.View {
@@ -248,7 +248,7 @@ function fixture(program = programs.basic, config = {}) {
   p.previewOnly = config.previewOnly || false
   p.persistKey = config.persistKey || ''
   p.controller = new VeraPreviewController()
-  p.getUIContext = () => ({ getMediaQuery: () => ({ matchMediaSync: () => ({ matches: false, on() {}, off() {} }) }), vp2px: x => x })
+  p.getUIContext = () => ({ getHostContext: () => undefined, getMediaQuery: () => ({ matchMediaSync: () => ({ matches: false, on() {}, off() {} }) }), vp2px: x => x })
   const events = []
   const frames = []
   const snapshots = []
@@ -610,7 +610,7 @@ test('failed world replacement retains boxes, camera and runnable world events',
   assert.equal(f.p.worldErrorBlocks(), false)
   assert(f.p.surfaceTimer >= 0)
   const applies = box.applies
-  box.events.push({ kind: 'settled', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 0, bodies: [], values: [], kick: 0 })
+  box.events.push({ kind: 'settled', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 0, bodies: [], values: [], dx: 0, dy: 0, dz: 0, kick: 0 })
   f.p.surfaceFrame()
   await pump()
   assert.equal((await f.state()).n, 1)
@@ -690,6 +690,27 @@ test('same-program promotion retains world boxes and camera state', async () => 
   assert.equal(f.p.pendingWorldProgram, null)
 })
 
+test('world events forward directions and default swipes to zero through the host', async () => {
+  const f = fixture(compile({ world: true, worldDirection: true }))
+  await f.mount()
+  const node = walk(f.p.liveRoot).find(node => node.kind === 'world')
+  const box = f.p.worlds.get(node)
+  f.p.worldEvents = [{ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0,
+    speed: 1, bodies: [], values: [], dx: 0.5, dy: -0.25, dz: 1, kick: 0 }]
+  f.p.worldEventNodes = [node]
+  f.p.dispatchWorldEvents()
+  await pump()
+  assert.deepEqual((await f.state()).order, ['0.5', '-0.25', '1'])
+  const input = f.calls.find(call => call.name === 'postInput' && call.args[1].kind === 'SCENE')
+  assert.deepEqual(input.args[1].payload.scene.dir, [0.5, -0.25, 1])
+  box.touchUp = () => ({ kind: 'swipe', body: 'body', x: 1, z: 2, speed: 3 })
+  f.p.worldTouch(node, { type: platform.TouchType.Up, changedTouches: [{ id: 1, x: 0, y: 0 }] })
+  await pump()
+  const state = await f.state()
+  assert.equal(state.text, 'swipe')
+  assert.deepEqual(state.order, ['0.5', '-0.25', '1', '0', '0', '0'])
+})
+
 test('world steps collect, dispatch and apply before advancing after mailbox backpressure', async () => {
   const f = fixture(compile({ world: true }))
   await f.mount()
@@ -714,7 +735,7 @@ test('world steps collect, dispatch and apply before advancing after mailbox bac
   const resume = pause(f.h)
   try {
     fill(f.h, f.p)
-    box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], kick: 0 })
+    box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], dx: 0, dy: 0, dz: 0, kick: 0 })
     timers.get(f.p.surfaceTimer).callback()
     assert.equal(f.p.pendingWorldStep, true)
     assert.equal(f.p.admissionBlocked, true)
@@ -765,7 +786,7 @@ test('unchanged world handlers wait for the real snapshot barrier without requir
     if (f.p.inFlight?.nodeKind !== 'world') return barrier
     return barrier.then(value => new Promise(resolve => { unblock = () => resolve(value) }))
   }
-  box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], kick: 0 })
+  box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], dx: 0, dy: 0, dz: 0, kick: 0 })
   try {
     f.p.surfaceFrame()
     await microtasks()
@@ -802,7 +823,7 @@ test('release saves dirty world state after the last world leaves the live tree'
   const box = f.p.worlds.get(node)
   const actor = f.h.registry.get(f.p.handle.appId).actor
   const saved = f.events.filter(event => event.type === 'onStateSaved').length
-  box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], kick: 0 })
+  box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], dx: 0, dy: 0, dz: 0, kick: 0 })
   f.p.tickWorlds(now, 16)
   await pump()
   assert.equal(actor.worldDirty(), true)
@@ -829,7 +850,7 @@ for (const reason of ['node-gone', 'handler-changed', 'node-generation', 'progra
   await f.mount()
   const node = walk(f.p.liveRoot).find(node => node.kind === 'world')
   const box = f.p.worlds.get(node)
-  box.events.push({ kind: 'settled', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 0, bodies: [], values: [], kick: 0 })
+  box.events.push({ kind: 'settled', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 0, bodies: [], values: [], dx: 0, dy: 0, dz: 0, kick: 0 })
   f.p.renderingDepth++
   try {
     f.p.tickWorlds(now, 16)
@@ -873,7 +894,7 @@ test('disappearance remaps an admitted world action and its dependencies to the 
   const box = f.p.worlds.get(node)
   const resume = pause(f.h)
   try {
-    box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], kick: 0 })
+    box.events.push({ kind: 'hit', body: 'body', other: '', x: 0, y: 0, z: 0, speed: 1, bodies: [], values: [], dx: 0, dy: 0, dz: 0, kick: 0 })
     f.p.tickWorlds(now, 16)
     const next = f.p.inFlight
     assert(next)

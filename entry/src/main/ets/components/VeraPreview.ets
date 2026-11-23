@@ -54,10 +54,10 @@ function pointerPayload(phase: string, id: number, x: number, y: number): InputP
 }
 
 function scenePayload(kind: string, body: string, other: string, x: number, y: number, z: number,
-    speed: number, bodies: string[], values: number[]): InputPayload {
+    speed: number, bodies: string[], values: number[], dir: number[] = [0, 0, 0]): InputPayload {
   return { kind: 'SCENE', num: 0, str: '', bool: false, phase: '', id: 0, x: 0, y: 0,
     scene: { kind: kind, body: body, other: other, x: x, y: y, z: z, speed: speed,
-      bodies: bodies, values: values } }
+      bodies: bodies, values: values, dir: dir } }
 }
 
 class PreviewSubscriber implements AppSubscriber {

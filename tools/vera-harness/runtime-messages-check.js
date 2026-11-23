@@ -15,7 +15,7 @@ const interfaces = {
   ActorHandle: ['appId:string', 'vmGeneration:number', 'leaseId:string'],
   DrawRequest: ['nodeId:number', 'entry:string', 'surfaceRevision:number'],
   SurfaceFrameEvent: ['elapsed:number', 'actions:string[]', 'draws:DrawRequest[]', 'loopStartedAt?:number', 'worldOnly?:boolean', 'worldStopping?:boolean'],
-  SceneEventPayload: ['kind:string', 'body:string', 'other:string', 'x:number', 'y:number', 'z:number', 'speed:number', 'bodies:string[]', 'values:number[]'],
+  SceneEventPayload: ['kind:string', 'body:string', 'other:string', 'x:number', 'y:number', 'z:number', 'speed:number', 'bodies:string[]', 'values:number[]', 'dir?:number[]'],
   InputPayload: ['kind:string', 'num:number', 'str:string', 'bool:boolean', 'phase:string', 'id:number', 'x:number', 'y:number', 'scene?:SceneEventPayload'],
   InputEvent: ['appId:string', 'vmGeneration:number', 'kind:string', 'action:string', 'payload:InputPayload', 'persist:boolean', 'draws:DrawRequest[]', 'skipIfSame?:boolean'],
   TickEvent: ['tickerId:string', 'action:string', 'elapsed:number'],
@@ -73,9 +73,10 @@ const tick: M.TickEvent = { tickerId: 'clock', action: 'advance', elapsed: 16 }
 const frame: M.FrameEnvelope = { appId: 'app', vmGeneration: 1, frameSeq: 2, appliedSeq: 1, reveal: true, view: null, gfx: [], timing: [1, 2, 3] }
 const weakFrame: M.FrameEnvelope = { ...frame, view: { arbitrary: true }, gfx: [{ deliberatelyUntyped: true }] }
 const sceneEvent: M.SceneEventPayload = { kind: 'hit', body: 'a', other: 'b', x: 1, y: 2, z: 3, speed: 4, bodies: ['a'], values: [6] }
-const scenePayload: M.InputPayload = { ...numeric, kind: 'SCENE', scene: sceneEvent }
+const directedScene: M.SceneEventPayload = { ...sceneEvent, dir: [0.5, -0.25, 1] }
+const scenePayload: M.InputPayload = { ...numeric, kind: 'SCENE', scene: directedScene }
 const sceneInput: M.InputEvent = { ...input, kind: 'SCENE', payload: scenePayload, skipIfSame: true }
-const sceneDraw: M.SceneDraw = { nodeId: 1, spec: { camera: null, floor: null, table: null, sky: null, bodies: [], zones: [], follow: null } }
+const sceneDraw: M.SceneDraw = { nodeId: 1, spec: { camera: null, floor: null, table: null, sky: null, bodies: [], zones: [], follow: null, blasts: [], bursts: [], droppedShots: 0, droppedPieces: 0 } }
 const sceneFrame: M.FrameEnvelope = { ...frame, scenes: [sceneDraw] }
 const worldFrame: M.SurfaceFrameEvent = { ...surface, worldOnly: true, worldStopping: true }
 const effect: M.EffectRequest = { appId: 'app', vmGeneration: 1, effectId: 3, kind: 'intent', rawTarget: 'target', params: ['name', 'value'], resultHandler: 'done', mode: 'future' }

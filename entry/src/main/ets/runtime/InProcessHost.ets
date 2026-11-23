@@ -263,7 +263,8 @@ export class InProcessHost implements EffectResultHost {
       let scene = input.payload.scene
       payload.scene = { kind: scene.kind, body: scene.body, other: scene.other,
         x: scene.x, y: scene.y, z: scene.z, speed: scene.speed,
-        bodies: scene.bodies.slice(), values: scene.values.slice() }
+        bodies: scene.bodies.slice(), values: scene.values.slice(),
+        dir: scene.dir === undefined ? undefined : scene.dir.slice() }
     }
     entry.input = {
       appId: input.appId, vmGeneration: input.vmGeneration, kind: input.kind,
@@ -503,6 +504,12 @@ export class InProcessHost implements EffectResultHost {
     for (let value of scene.values) {
       if (typeof value !== 'number' || !Number.isFinite(value)) { return false }
     }
+    if (scene.dir !== undefined) {
+      if (!Array.isArray(scene.dir)) { return false }
+      for (let value of scene.dir) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) { return false }
+      }
+    }
     return true
   }
 
@@ -523,7 +530,7 @@ export class InProcessHost implements EffectResultHost {
       case 'SCENE': {
         let scene = payload.scene!
         return sceneEventValue(scene.kind, scene.body, scene.other, scene.x, scene.y, scene.z,
-          scene.speed, scene.bodies, scene.values)
+          scene.speed, scene.bodies, scene.values, scene.dir === undefined ? [0, 0, 0] : scene.dir)
       }
       default: return new VeraNumberValue(0)
     }

@@ -215,6 +215,9 @@ function worldEvent(state: AppState, e: scene.Event): AppState {
     state.marks.push(e.y);
     state.marks.push(e.z);
     state.marks.push(e.values[0]);
+    state.marks.push(e.dx);
+    state.marks.push(e.dy);
+    state.marks.push(e.dz);
   }
   return state;
 }
@@ -2289,8 +2292,10 @@ test('SCENE admissions detach all fields and arrays and remain ordered barriers'
   let seq
   queued(h, a, p, () => {
     accepted(h.postTick(a, tick('same', 1), false))
-    const event = sceneInput(a)
+    const event = sceneInput(a, sceneEvent({ dir: [0.5, -0.25, 1] }))
     seq = accepted(h.postInput(a, event))
+    event.payload.scene.dir[0] = 100
+    event.payload.scene.dir = [100, 100, 100]
     event.payload.scene.kind = 'changed'
     event.payload.scene.body = 'changed'
     event.payload.scene.other = 'changed'
@@ -2306,11 +2311,20 @@ test('SCENE admissions detach all fields and arrays and remain ordered barriers'
   })
   const state = await snapshot(h, a)
   assert.equal(state.n, 8)
-  assert.deepEqual(state.marks, [1, 1, 2, 3, 6, 2])
+  assert.deepEqual(state.marks, [1, 1, 2, 3, 6, 0.5, -0.25, 1, 2])
   assert.equal(state.calls, 3)
   assert(p.frames.some(frame => frame.appliedSeq === seq && frame.scenes[0].spec.bodies[0].position[0] === 6))
   assertScenes(latest(p), 8)
   assert.equal(p.errors.length, 0)
+})
+
+test('SCENE directions default missing components to zero', async () => {
+  for (const [dir, expected] of [[undefined, [0, 0, 0]], [[], [0, 0, 0]], [[0.5], [0.5, 0, 0]]]) {
+    const h = host(), p = probe(), a = await acquire(h, p, programs.world)
+    accepted(h.postInput(a, sceneInput(a, sceneEvent({ dir }))))
+    assert.deepEqual((await snapshot(h, a)).marks, [1, 2, 3, 6, ...expected])
+    assert.equal(p.errors.length, 0)
+  }
 })
 
 test('malformed SCENE fields are rejected without queueing or executing', async () => {
@@ -2331,6 +2345,9 @@ test('malformed SCENE fields are rejected without queueing or executing', async 
   }
   for (const value of [undefined, null, 1, {}, ['1'], [NaN], [Infinity], Array(1)]) {
     rejected(h.postInput(a, sceneInput(a, sceneEvent({ values: value }))))
+  }
+  for (const value of [null, 1, 'direction', {}, ['1'], [NaN], [Infinity], Array(1)]) {
+    rejected(h.postInput(a, sceneInput(a, sceneEvent({ dir: value }))))
   }
   for (const value of [null, 1, {}, []]) rejected(h.postInput(a, sceneInput(a, value)))
   rejected(h.postInput(a, input(a, 'worldEvent', 0, { kind: 'SCENE' })))

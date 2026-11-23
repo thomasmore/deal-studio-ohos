@@ -44,6 +44,7 @@ export interface SceneEventPayload {
   speed: number
   bodies: string[]
   values: number[]
+  dir?: number[]
 }
 
 export interface InputPayload {
