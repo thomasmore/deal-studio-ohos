@@ -44,3 +44,7 @@ entry/src/main/cpp/build-host/
 tools/vera-harness/out/
 .deepseekkey
 .jevkey
+
+# Local selector models, playground records, and Rust output.
+/.local-jev/
+/native/local-jev/target/

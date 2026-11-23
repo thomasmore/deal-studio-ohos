@@ -80,6 +80,11 @@ DeepSeek has no GBNF grammar to constrain decoding the way llama.cpp does, so
 `vera.gbnf` is unused in that mode; the reply is cleaned up by
 `extractVeraSource` in case the model wraps the program in a markdown fence.
 
+The [local selector playground](tools/vera-playground/README.md) compares Cloud
+Jev and Rust Q4 previews that use the same DeepSeek plan. The
+[OpenHarmony integration guide](native/local-jev/README.md) shows how to build
+and call the embedded Rust selector in an experimental app build.
+
 ### The API key
 
 The key is not compiled in. It is sent as a launch parameter and stored in the

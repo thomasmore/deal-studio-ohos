@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>UI generation lab</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>UI generation lab</h1><p>Compare the same request through Cloud Jev and Local Rust.</p></div>
+      <div class="auto-controls"><span id="auto-status">Auto mode off</span><button id="auto" type="button">Start auto</button><button id="stop" type="button" disabled>Stop</button></div>
+    </header>
+    <form id="request-form">
+      <label class="request-field">Request<textarea id="prompt" rows="1" maxlength="12000" required>A daily water reminder with a checklist</textarea></label>
+      <button id="random" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 5v8l-8 5-8-5V8zM4 8l8 5 8-5M12 13v8M8 6l8 5"/></svg>Random prompt</button>
+      <button id="run" class="primary" type="submit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 4 12 8-12 8z"/></svg>Run comparison</button>
+    </form>
+    <div class="status-line"><p id="status" role="status" aria-live="polite">Connecting to the local host…</p><label>Comparison <select id="history"><option value="">No saved runs</option></select></label></div>
+    <div class="comparison">
+      <section class="path cloud" aria-labelledby="cloud-title">
+        <div class="panel-header"><div class="identity"><span class="model-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 0-8h-1a5 5 0 0 0-10-1 4.5 4.5 0 0 0 0 9z"/></svg></span><div><h2 id="cloud-title">Cloud Jev</h2><p>Generated with our cloud model</p></div></div><dl><div><dt>Selector time <span title="Sum of all selector calls in this path, measured on this host." aria-hidden="true">ⓘ</span><span class="sr-only">Sum of all selector calls in this path, measured on this host.</span></dt><dd id="cloud-selector">—</dd></div><div><dt>Total generation time <span title="Per-path host time includes startup, generation, and preview checks. Shared planning time is separate." aria-hidden="true">ⓘ</span><span class="sr-only">Per-path host time includes startup, generation, and preview checks. Shared planning time is separate.</span></dt><dd id="cloud-total">—</dd></div></dl></div>
+        <div class="device"><div id="cloud-screen" class="screen"><div class="empty-screen"><span class="empty-mark">◇</span><h3>No generated screen</h3><p>Run a comparison to see the actual host preview.</p></div></div></div>
+        <div class="path-footer"><span id="cloud-status">Ready</span><a id="cloud-source" hidden target="_blank" rel="noopener">Program source ↗</a></div>
+      </section>
+      <section class="path local" aria-labelledby="local-title">
+        <div class="panel-header"><div class="identity"><span class="model-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v12H5zM2 20h20M8 20h8"/></svg></span><div><h2 id="local-title">Local Rust Q4</h2><p id="local-subtitle">Local Rust · uncalibrated</p></div></div><dl><div><dt>Selector time <span title="Sum of selector round trips during this build." aria-hidden="true">ⓘ</span><span class="sr-only">Sum of selector round trips during this build.</span></dt><dd id="local-selector">—</dd></div><div><dt>Total generation time <span title="Whole path on this host. DeepSeek writes the content and code. Shared planning time is separate." aria-hidden="true">ⓘ</span><span class="sr-only">Whole path on this host. DeepSeek writes the content and code. Shared planning time is separate.</span></dt><dd id="local-total">—</dd></div></dl></div>
+        <div class="device"><div id="local-screen" class="screen"><div class="empty-screen"><span class="empty-mark">◇</span><h3>No generated screen</h3><p>Uncertain local answers remain visible. No decisions are invented.</p></div></div></div>
+        <div class="path-footer"><span id="local-status">Ready</span><a id="local-source" hidden target="_blank" rel="noopener">Program source ↗</a></div>
+      </section>
+    </div>
+    <section id="matched" class="matched" aria-labelledby="matched-title" hidden>
+      <h2 id="matched-title">Matched selector requests</h2>
+      <div id="matched-results"></div>
+    </section>
+    <div class="details">
+      <section><div class="detail-heading"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="14" height="18" rx="2"/><path d="M10 4V2h6v4h-6M10 11h6M10 15h6M10 19h3"/></svg><div><h2>Decisions</h2><p>Selector answers, structure, and UI choices.</p></div></div><div id="decisions" class="detail-content muted">Run a comparison to see model decisions here.</div></section>
+      <section><div class="detail-heading"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 10 18H2zM12 9v5M12 17v1"/></svg><div><h2>Errors</h2><p>Any generation errors or issues.</p></div></div><div id="errors" class="detail-content muted">No results yet. Run a comparison to see errors.</div></section>
+      <section><div class="detail-heading"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M9 7h6M9 11h6M9 15h4"/></svg><div><h2>Notes</h2><p>Observations, limits, and saved evidence.</p></div></div><div id="notes" class="detail-content">Host previews use the real compiler and VM with approximate SVG layout. They do not measure phone rendering or speed.</div></section>
+    </div>
+    <p class="experiment-note">Experimental comparison. Both paths use one shared DeepSeek plan. Independent content and code generation still include model variance. Local Rust replaces the selector only. No human quality score is available.</p>
+  </main>
+</body>
+</html>
