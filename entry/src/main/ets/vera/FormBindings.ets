@@ -108,9 +108,28 @@ export const OFFER_MS: number = 5 * 60 * 1000
 /** A sibling written whole, then renamed over the file: a reader in the other process sees the old file or the new one. */
 function writeAtomically(path: string, text: string): void {
   let temp = path + '.' + Date.now().toString() + '.' + Math.random().toString().substring(2) + '.tmp'
-  let file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC)
-  try { fs.writeSync(file.fd, text) } finally { fs.closeSync(file) }
-  try { fs.renameSync(temp, path) } finally {
+  try {
+    let file: fs.File | null = null
+    let failed = false
+    try {
+      file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC)
+      fs.writeSync(file.fd, text)
+    } catch (e) {
+      failed = true
+      throw e as Error
+    } finally {
+      if (file !== null) {
+        try {
+          fs.closeSync(file)
+        } catch (e) {
+          if (!failed) { throw e as Error }
+        }
+      }
+    }
+    fs.renameSync(temp, path)
+  } catch (e) {
+    throw e as Error
+  } finally {
     try { fs.unlinkSync(temp) } catch (_e) {}
   }
 }

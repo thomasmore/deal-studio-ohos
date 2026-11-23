@@ -824,12 +824,29 @@ export struct ChatPage {
     return turns
   }
 
-  private flushReferenceFields(): boolean {
-    for (let msg of this.messages) {
+  private async flushReferenceFields(run: ChatRunContext, references: WidgetReference[]): Promise<boolean> {
+    let chatId = this.chatId
+    let messages = this.messages
+    let current: (() => boolean)[] = []
+    for (let msg of messages) {
+      if (!this.isRunActive(run) || chatId !== this.chatId || messages !== this.messages) { return false }
       if (msg.role !== 'assistant' || msg.appState !== APP_READY) { continue }
-      if (!msg.previewController.flushAndSnapshot()) { return false }
+      let controller = msg.previewController
+      let generation = msg.previewGeneration
+      let program = msg.vbc2
+      let source = msg.source
+      current.push((): boolean => msg.previewGeneration === generation && msg.previewController === controller &&
+        msg.appState === APP_READY && msg.vbc2 === program && msg.source === source)
+      let snapshot = await controller.flushAndSnapshot()
+      if (!this.isRunActive(run) || chatId !== this.chatId || messages !== this.messages ||
+          msg.previewGeneration !== generation || msg.previewController !== controller ||
+          msg.appState !== APP_READY || msg.vbc2 !== program || msg.source !== source) { return false }
+      let ref = references.find((item: WidgetReference): boolean => item.messageId === msg.id)
+      if (ref === undefined || ref.source !== source) { return false }
+      if (snapshot.length > 0) { ref.latestState = snapshot }
     }
-    return !this.disposed
+    return this.isRunActive(run) && chatId === this.chatId && messages === this.messages &&
+      current.every((check: () => boolean): boolean => check())
   }
 
   /** Capture scalar values before the reply or a queued build can change them. */
@@ -899,11 +916,25 @@ export struct ChatPage {
   private async send(): Promise<void> {
     let text = this.draft.trim()
     if (this.disposed || text.length === 0 || this.busy) { return }
-    if (!this.flushReferenceFields()) { return }
     let run = this.createRun()
-    let references = this.referenceSnapshots()
-    this.draft = ''
     this.busy = true
+    let references = this.referenceSnapshots()
+    let captured = false
+    try {
+      if (references.length > 0 && !await this.flushReferenceFields(run, references)) { return }
+      if (!this.isRunActive(run)) { return }
+      captured = true
+    } catch (e) {
+      if (this.isRunActive(run)) { this.status = 'Could not capture app state: ' + (e as Error).message }
+      return
+    } finally {
+      if (!captured) {
+        if (this.isRunActive(run)) { this.busy = false }
+        run.replyFinished = true
+        this.releaseRunIfIdle(run)
+      }
+    }
+    if (this.draft.trim() === text) { this.draft = '' }
     let mine = new ChatMessage()
     mine.id = this.nextId++
     mine.role = 'user'

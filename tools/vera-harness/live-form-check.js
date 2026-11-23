@@ -4,6 +4,7 @@ const fs = require('node:fs'), path = require('node:path')
 const ts = require(process.env.VERA_TYPESCRIPT_PATH || 'typescript')
 const { loadVera } = require('./source-loader')
 const disk = new Map(), cache = new Map()
+const formProvider = {}
 const filesystem = {
   OpenMode: { CREATE: 1, WRITE_ONLY: 2, TRUNC: 4 }, mkdirSync() {},
   openSync(file) { return { fd: file } },
@@ -23,7 +24,7 @@ function load(name) {
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText
   new Function('require','module','exports', compiled)(dep => {
     if (dep === '@kit.CoreFileKit') return { fileIo: filesystem }
-    if (dep === '@kit.FormKit') return { formBindingData: { createFormBindingData: value => value } }
+    if (dep === '@kit.FormKit') return { formProvider, formBindingData: { createFormBindingData: value => value } }
     if (dep.startsWith('./')) return load(dep.slice(2))
     throw Error(dep)
   }, module, module.exports)
@@ -156,5 +157,75 @@ assert.equal(other.takeOffer(T + 30_000), project.id, 'the card added in the man
 assert.equal(formBindings.takeOffer(T + 31_000), '', 'a second card is not bound to it')
 formBindings.offer(project.id, T)
 assert.equal(formBindings.takeOffer(T + 6 * 60_000), '', 'a stale offer is dropped')
-console.log('PASS live forms: Add widget offer taken once while fresh, periodic widgetRefresh once per period, binding persistence/removal, shared state, first render commit, transport, stale/forged rejection, atomic writes, live source on the card')
+const {publishLiveWidget, bindLiveForm, WIDGET_ADDED} = load('LiveWidgetPublish')
+const sdkCalls = []
+const resetProvider = (supported = true) => {
+  sdkCalls.length = 0
+  Object.assign(formProvider, {
+    isRequestPublishFormSupported() { sdkCalls.push('support'); return Promise.resolve(supported) },
+    openFormManager(want) { sdkCalls.push('manager'); assert.equal(want.parameters.projectId, project.id) },
+    requestPublishForm(want, binding) {
+      sdkCalls.push('publish')
+      assert.equal(want.bundleName, 'com.vera.probe.dyn'); assert.equal(want.abilityName, 'VeraFormAbility')
+      assert.equal(want.parameters.projectId, project.id); assert.equal(want.parameters['ohos.extra.param.key.form_name'], 'live')
+      assert.equal(binding.projectId, project.id)
+      return Promise.resolve('published-form')
+    },
+    getPublishedRunningFormInfoById(id) {
+      sdkCalls.push('lookup'); assert.equal(id, 'bound-form')
+      return Promise.resolve({formName: 'live', bundleName: 'com.vera.probe.dyn'})
+    },
+    getPublishedRunningFormInfos() { sdkCalls.push('refresh'); return Promise.resolve([]) }
+  })
+}
+resetProvider()
+assert.equal(await publishLiveWidget(project.id), WIDGET_ADDED)
+assert.equal(formBindings.projectFor('published-form'), project.id)
+assert.deepEqual(sdkCalls, ['support', 'publish', 'refresh'])
+formBindings.unbind('published-form')
+resetProvider(false)
+assert.equal(await publishLiveWidget(project.id), 'Your launcher opened its widget list. Pick VERA live app: it will show this app.')
+assert.deepEqual(sdkCalls, ['support', 'manager'])
+assert.equal(other.takeOffer(), project.id)
+assert.equal(other.takeOffer(), '')
+resetProvider()
+assert.equal(await bindLiveForm('bound-form', project.id), undefined)
+assert.equal(formBindings.projectFor('bound-form'), project.id)
+assert.deepEqual(sdkCalls, ['lookup', 'refresh'])
+formBindings.unbind('bound-form')
+for (const [method, supported, operation, calls] of [
+  ['isRequestPublishFormSupported', true, () => publishLiveWidget(project.id), ['support']],
+  ['requestPublishForm', true, () => publishLiveWidget(project.id), ['support', 'publish']],
+  ['openFormManager', false, () => publishLiveWidget(project.id), ['support', 'manager']],
+  ['getPublishedRunningFormInfoById', true, () => bindLiveForm('bound-form', project.id), ['lookup']]
+]) {
+  for (const asynchronous of method === 'openFormManager' ? [false] : [false, true]) {
+    resetProvider(supported)
+    const failure = Object.assign(new Error(method + (asynchronous ? ' rejected' : ' threw')), {code: 16500050, data: {method}})
+    formProvider[method] = () => {
+      sdkCalls.push(calls[calls.length - 1])
+      if (asynchronous) return Promise.reject(failure)
+      throw failure
+    }
+    let pending
+    assert.doesNotThrow(() => { pending = operation() })
+    assert(pending instanceof Promise)
+    await assert.rejects(pending, error => { assert.strictEqual(error, failure); return true })
+    assert.deepEqual(sdkCalls, calls)
+    assert.equal(formBindings.projectFor('published-form'), '')
+    assert.equal(formBindings.projectFor('bound-form'), '')
+    formBindings.takeOffer()
+  }
+}
+for (const info of [
+  {formName: 'widget', bundleName: 'com.vera.probe.dyn'},
+  {formName: 'live', bundleName: 'another.bundle'}
+]) {
+  resetProvider()
+  formProvider.getPublishedRunningFormInfoById = () => { sdkCalls.push('lookup'); return Promise.resolve(info) }
+  await assert.rejects(bindLiveForm('bound-form', project.id), /Not a VERA live widget/)
+  assert.equal(formBindings.projectFor('bound-form'), '')
+  assert.deepEqual(sdkCalls, ['lookup'])
+}
+console.log('PASS live forms: publish/bind success, SDK synchronous throws and async rejections preserve error identity, unsupported manager, foreign-card rejection, Add widget offer taken once while fresh, periodic widgetRefresh once per period, binding persistence/removal, shared state, first render commit, transport, stale/forged rejection, atomic writes, live source on the card')
 })().catch(e => { console.error(e); process.exit(1) })
