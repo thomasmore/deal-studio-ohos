@@ -7,7 +7,8 @@ to draw each preview.
 
 ## Start from a fresh checkout
 
-Use Node.js 22 or later, Rust 1.93.1 or later, and Python 3.11 or later.
+Use Node.js 22 or later and Rust 1.93.1 or later. The public model export also
+requires Python 3.11 or later.
 Run these commands from the repository root.
 
 ```sh
@@ -16,16 +17,27 @@ cargo build --locked --release --manifest-path native/local-jev/Cargo.toml \
   --bin local-laya --bin laya-quantize
 ```
 
-Use one of these bundles:
+### Use the 49 MB Cycle 2 bundle
 
-- **Public Laya Multilingual Q4.** Build this bundle from the pinned [Apache-2.0 checkpoint](https://huggingface.co/convaiinnovations/laya-multilingual/tree/1720e3e3357cfe1e281542e223f8273b0890ca34).
-  The download uses about 678 MB. This model uses mmBERT-base.
-- **49 MB Cycle 2.** If you already have the trained mmBERT-small bundle, set
-  `VERA_LAYA_MANIFEST` to the absolute path to its `laya-manifest.json`.
-  Keep `laya-config.json`, `tokenizer.json`, and `model.gguf` in that same
-  directory. This repository contains the runner and export tools. The Cycle 2 bundle is a separate local artifact.
+If you have `mmbert-small-cycle2-q4.tar.gz`, extract it into a new directory.
+Replace `/path/to` with the archive location.
 
-For the public bundle, run:
+```sh
+mkdir -p .local-jev
+mkdir .local-jev/mmbert-small-cycle2-q4 &&
+  tar -xzf /path/to/mmbert-small-cycle2-q4.tar.gz -C .local-jev/mmbert-small-cycle2-q4
+export VERA_LAYA_MANIFEST="$PWD/.local-jev/mmbert-small-cycle2-q4/laya-manifest.json"
+```
+
+The archive provides `laya-config.json`, `laya-manifest.json`, `model.gguf`,
+and `tokenizer.json`. Keep the four files together. If you have the unpacked
+bundle, set `VERA_LAYA_MANIFEST` to its absolute manifest path. The same
+directory works for the [embedded app build](../../native/local-jev/README.md).
+
+### Export the public Laya Multilingual Q4 bundle
+
+Build from the pinned [Apache-2.0 checkpoint](https://huggingface.co/convaiinnovations/laya-multilingual/tree/1720e3e3357cfe1e281542e223f8273b0890ca34).
+The download uses about 678 MB. This model uses mmBERT-base.
 
 ```sh
 python3 -m venv .local-jev/venv
@@ -38,6 +50,8 @@ hf download convaiinnovations/laya-multilingual --revision "$revision" \
 python tools/local-jev/laya-export.py .local-jev/laya-base .local-jev/bundle-q4 \
   --base-revision "$revision" --q4-embeddings
 ```
+
+### Start the playground
 
 Set `DEEPSEEK_API_KEY` and `TYPESAFE_API_KEY` in your environment or
 `~/.env`. Search in section fill also uses `EXA_API_KEY` when set in the

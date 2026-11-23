@@ -9,10 +9,12 @@ answer map with `laya_not_human_calibrated` for embedded Laya bundles.
 
 Build or obtain a Q4 bundle by following the
 [playground guide](../../tools/vera-playground/README.md). Run from the repository
-root. Set `BUNDLE` to the absolute directory with the four bundle files.
+root. Set `BUNDLE` to the absolute directory with all four bundle files.
+For Cycle 2, use the directory extracted from `mmbert-small-cycle2-q4.tar.gz`.
+For the public export, use `$PWD/.local-jev/bundle-q4`.
 
 ```sh
-BUNDLE="$PWD/.local-jev/bundle-q4"
+BUNDLE="$PWD/.local-jev/mmbert-small-cycle2-q4"
 LAYA_BUNDLE_DIR="$BUNDLE" cargo build --locked --release \
   --manifest-path native/local-jev/Cargo.toml --lib
 cc -I native/local-jev/include tools/local-jev/abi-check.c \
