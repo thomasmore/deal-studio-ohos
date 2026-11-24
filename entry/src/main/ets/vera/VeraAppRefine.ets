@@ -6,7 +6,12 @@ import { describeComponents } from './VeraUiCatalog'
 
 export function sourceScreenIds(source: string): string[] {
   if (source.trim().length === 0) { return [] }
-  return sourceFunctionNames(source).filter((name: string): boolean => name.startsWith('c_view_')).map((name: string): string => name.substring(7))
+  try {
+    return sourceFunctionNames(source).filter((name: string): boolean => name.startsWith('c_view_')).map((name: string): string => name.substring(7))
+  } catch (_e) {
+    // Saved/server source can use syntax a newer parser understands. Introspection is best-effort, not a refinement gate.
+    return []
+  }
 }
 
 /** Empty for the existing single-screen path. Removal requires explicit confirmation by the person. */

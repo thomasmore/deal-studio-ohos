@@ -137,6 +137,7 @@ class PreviewPost {
   order: number = 0
   action: FieldAction | null = null
   tick: TickEvent | null = null
+  tickerConfig: TimerConfig | null = null
   surface: SurfaceFrameEvent | null = null
   draws: DrawRequest[] = []
   constructor(kind: string) { this.kind = kind }
@@ -1353,6 +1354,7 @@ export struct VeraPreview {
         this.dispatchTickerAction(id, current, numberPayload(Math.round(elapsed)))
       } else {
         let post = new PreviewPost('TICK')
+        post.tickerConfig = current
         post.key = id
         post.tick = { tickerId: id, action: current.action, elapsed: Math.round(elapsed) }
         this.queuePost(post)
@@ -2973,7 +2975,8 @@ export struct VeraPreview {
     post.segment = this.postSegment
     if (stopping) { this.postSegment++ }
     let last = this.posts[this.posts.length - 1]
-    if (last !== undefined && last.segment === post.segment && last.kind === post.kind && last.key === post.key) {
+    if (last !== undefined && last.segment === post.segment && last.kind === post.kind && last.key === post.key &&
+        (post.kind !== 'TICK' || last.tickerConfig === post.tickerConfig)) {
       if (post.kind === 'TICK' && last.tick !== null && post.tick !== null) { post.tick!.elapsed += last.tick!.elapsed }
       if (post.kind === 'SURFACE_FRAME' && last.surface !== null && post.surface !== null) {
         post.surface!.elapsed = Math.min(SURFACE_MAX_ELAPSED_MS, post.surface!.elapsed + last.surface!.elapsed)
@@ -3000,6 +3003,13 @@ export struct VeraPreview {
     try {
       while (this.posts.length > 0 && this.inFlight === null && !this.admissionBlocked && !this.transitioning && !this.disposed) {
         let post = this.posts[0]
+        // Fast ticks can wait behind a navigation input. Never deliver an old screen's interval to its replacement.
+        if (post.kind === 'TICK' && post.tickerConfig !== null &&
+            (this.timerConfigs.get(post.key) !== post.tickerConfig || post.tick!.action !== post.tickerConfig!.action)) {
+          this.posts.shift()
+          progressed = true
+          continue
+        }
         if (this.fieldActions.length > 0 && this.fieldActions[0].order < post.order) { break }
         if (post.kind === 'MOVE') {
           if (progressed) { break }

@@ -975,10 +975,11 @@ export function composeFragments(specAt: (FragmentSpec | null)[], globalValues: 
     if (tabbed && pane >= 0 && block.length > 0) {
       let name = 'pane' + pane.toString()
       let paneId = 'tabPane' + pane.toString()
-      functionBlocks.push('function c_view_' + paneId + '(state: AppState): ui.View {\n  let ' + name + ': ui.View[] = [];\n' +
-        block.split('sections.push(').join(name + '.push(') + '\n  return ui.Screen("' + paneId + '", ' + name + ');\n}')
-      block = 'let ' + name + ': ui.View = ui.Column("default", []);\nif (state.' + TAB_FIELD + ' === ' + pane.toString() +
-        ') { ' + name + ' = c_view_' + paneId + '(state); }'
+      // Legacy fragments are view-local blocks, not planned screen functions. Keep their scope and all sections
+      // operations intact; swapping the output array avoids text rewrites and the shared-app nonempty-screen gate.
+      block = 'let ' + name + 'Parent: ui.View[] = sections;\nsections = [];\n' + block +
+        '\nlet ' + name + ': ui.View = ui.Column("default", []);\nif (state.' + TAB_FIELD + ' === ' + pane.toString() +
+        ') { ' + name + ' = ui.Screen("' + paneId + '", sections); }\nsections = ' + name + 'Parent;'
       tabNames.push(paneLabel(spec, tabNames))
       tabPanes.push(name)
     }

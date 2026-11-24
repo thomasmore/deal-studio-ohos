@@ -139,9 +139,8 @@ console.log('template-run: record_log widget view ok')
   assert.equal(t.eventValue, 0); assert.equal(t.children.length, 3)
   assert.equal(t.children[0].kind, 'screen'); assert.equal(t.children[0].screenId, 'tabPane0')
   assert.equal(t.children[1].children.length, 0, 'inactive panes are not constructed')
-  assert.equal(smokeRun(result), '', 'legacy Chat tabs use the same named-view reachability gate')
-  const stuckTabs = compileVeraSource(tabSource.replace('return {paneTab: index', 'return {paneTab: state.paneTab'))
-  assert.match(smokeRun(stuckTabs), /No executed UI path reached: tabPane1, tabPane2/, 'broken legacy tab navigation is rejected')
+  assert.equal(smokeRun(result), '', 'legacy Chat tabs retain the ordinary smoke contract')
+  assert.doesNotMatch(tabSource, /function c_view_/, 'legacy panes do not opt into the planned-screen contract')
   state = vm.execute('setPaneTab', [state, int(1)])
   assert.equal(tabs(view(vm, state)).eventValue, 1, 'the handler opens another pane')
   state = vm.execute('addRecord1', [vm.execute('setAmount1', [state, str('12')]), int(0)])
@@ -152,6 +151,25 @@ console.log('template-run: record_log widget view ok')
   assert.ok(!tabs(view(vm1, vm1.execute('init'))), 'one block: no tabs')
 }
 console.log('template-run: widget tabs ok')
+
+// Existing fragments keep view-local scope and the ordinary smoke contract, including initially empty panes.
+{
+  const {composeFragments} = loadVera('VeraSectionCompose')
+  const specs = [fragments()[0], fragments()[1]]
+  specs[0].viewBlock = 'let sharedCaption: string = "Shared"; sections.push(ui.Text("body", sharedCaption));'
+  specs[1].viewBlock = 'if (sections.length() === 0) { sections.push(ui.Text("body", sharedCaption)); }'
+  const g = new Map(globals); g.set('__WIDGET__', 'true')
+  let source = composeFragments(specs, g, [values(specs[0].kind), values(specs[1].kind)])
+  let compiled = compileVeraSource(source)
+  assert.equal(smokeRun(compiled), '')
+  const vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), new UiHostEnvironment())
+  const state = vm.execute('setPaneTab', [vm.execute('init'), int(1)])
+  assert(texts(view(vm, state)).includes('Shared'), 'later block can read earlier view-local bindings and sections')
+  specs[1].viewBlock = 'sections.push(ui.Column("default", [ui.Spacer("default")]));'
+  source = composeFragments(specs, g, [values(specs[0].kind), values(specs[1].kind)])
+  assert.equal(smokeRun(compileVeraSource(source)), '', 'initially empty legacy pane is not a planned-screen failure')
+}
+console.log('template-run: legacy tab scope and empty panes ok')
 
 // An itinerary has its own start time (hours and minutes) and gap; changing them moves the stops' windows.
 {

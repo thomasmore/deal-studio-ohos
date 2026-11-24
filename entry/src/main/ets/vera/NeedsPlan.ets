@@ -233,7 +233,7 @@ function composerNames(s: string): string {
 }
 
 /** The plan from the model's reply, or null when it is not one. */
-export function parseNeedsPlan(reply: string): NeedsPlan | null {
+export function parseNeedsPlan(reply: string, problems: string[] = []): NeedsPlan | null {
   let start = reply.indexOf('{')
   let end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) { return null }
@@ -256,8 +256,12 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
     let need = new Need()
     need.id = text(raw, 'id') || 'need' + plan.needs.length.toString()
     let uses = raw['uses']
-    if (uses !== undefined && (!Array.isArray(uses) || (uses as Object[]).some((v: Object): boolean => typeof v !== 'string'))) { return null }
-    need.uses = uses === undefined ? [] : (uses as string[]).slice()
+    let multi = Array.isArray(o['screens']) && (o['screens'] as Object[]).length > 1
+    if (multi && uses !== undefined && (!Array.isArray(uses) || (uses as Object[]).some((v: Object): boolean => typeof v !== 'string'))) {
+      problems.push('Need ' + need.id + ' has invalid uses: expected an array of need ids')
+      return null
+    }
+    need.uses = multi && uses !== undefined ? (uses as string[]).slice() : []
     need.type = type
     need.raw = raw
     if (type === NEED_FIGURE) {
@@ -278,61 +282,71 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
     }
     plan.needs.push(need)
   }
-  if (!readScreens(plan, o)) { return null }
+  let problem = readScreens(plan, o)
+  if (problem.length > 0) { problems.push(problem); return null }
   return plan
 }
 
 /** Screen plans are validated before they can bypass the one-screen composer. No guessed dangling references. */
-function readScreens(plan: NeedsPlan, raw: Record<string, Object>): boolean {
-  let presentation = raw['presentation']
-  if (presentation !== undefined && presentation !== 'pages' && presentation !== 'tabs') { return false }
-  if (presentation !== undefined) { plan.presentation = presentation as string }
+function readScreens(plan: NeedsPlan, raw: Record<string, Object>): string {
   let screens = raw['screens']
-  if (screens === undefined) { return raw['startScreen'] === undefined && raw['transitions'] === undefined }
-  if (!Array.isArray(screens) || screens.length < 1 || screens.length > 8) { return false }
+  // Optional one-screen metadata must not impose the shared-app id/reference contract on legacy plans.
+  if (Array.isArray(screens) && screens.length < 2) { return '' }
+  if (screens === undefined) {
+    return raw['startScreen'] === undefined && raw['transitions'] === undefined ? '' : 'startScreen/transitions require screens'
+  }
+  if (!Array.isArray(screens) || screens.length > 8) { return 'screens must be an array of 2 to 8 screens' }
+  let presentation = raw['presentation']
+  if (presentation !== undefined && presentation !== 'pages' && presentation !== 'tabs') { return 'presentation must be pages or tabs' }
+  if (presentation !== undefined) { plan.presentation = presentation as string }
   let validId = (id: string): boolean => /^[a-z][A-Za-z0-9_]{0,47}$/.test(id)
   let ids: string[] = []
   for (let n of plan.needs) {
-    if (!validId(text(n.raw, 'id')) || ids.indexOf(n.id) >= 0) { return false }
+    if (!validId(text(n.raw, 'id'))) { return 'Every multi-screen need requires a valid id: missing/invalid id for ' + n.words }
+    if (ids.indexOf(n.id) >= 0) { return 'Duplicate need id: ' + n.id }
     ids.push(n.id)
   }
   for (let n of plan.needs) {
-    if (n.uses.some((id: string): boolean => ids.indexOf(id) < 0 || id === n.id)) { return false }
+    for (let id of n.uses) {
+      if (ids.indexOf(id) < 0 || id === n.id) { return 'Need ' + n.id + ' has dangling/self uses reference: ' + id }
+    }
   }
   let screenIds: string[] = []
   for (let item of screens as Object[]) {
-    if (item === null || typeof item !== 'object') { return false }
+    if (item === null || typeof item !== 'object') { return 'Each screen must be an object with id and needs' }
     let value = item as Record<string, Object>
     let screen = new NeedScreen()
     screen.id = text(value, 'id')
-    if (!validId(screen.id) || screenIds.indexOf(screen.id) >= 0) { return false }
+    if (!validId(screen.id) || screenIds.indexOf(screen.id) >= 0) { return 'Missing, invalid or duplicate screen id: ' + screen.id }
     let refs = value['needs']
-    if (!Array.isArray(refs) || refs.some((id: Object): boolean => typeof id !== 'string' || ids.indexOf(id as string) < 0)) { return false }
+    if (!Array.isArray(refs) || refs.some((id: Object): boolean => typeof id !== 'string' || ids.indexOf(id as string) < 0)) {
+      return 'Screen ' + screen.id + ' needs must reference declared need ids'
+    }
     screen.needs = (refs as string[]).slice()
     screenIds.push(screen.id)
     plan.screens.push(screen)
   }
   plan.startScreen = text(raw, 'startScreen')
-  if (screenIds.indexOf(plan.startScreen) < 0) { return false }
+  if (screenIds.indexOf(plan.startScreen) < 0) { return 'startScreen must reference a declared screen id' }
   let transitions = raw['transitions']
-  if (transitions !== undefined && !Array.isArray(transitions)) { return false }
+  if (transitions !== undefined && !Array.isArray(transitions)) { return 'transitions must be an array' }
   for (let item of (transitions ?? []) as Object[]) {
-    if (item === null || typeof item !== 'object') { return false }
+    if (item === null || typeof item !== 'object') { return 'Each transition must be an object' }
     let value = item as Record<string, Object>
     let t = new NeedTransition()
     t.from = text(value, 'from'); t.to = text(value, 'to'); t.on = text(value, 'on'); t.record = text(value, 'record')
-    if (value['record'] !== undefined && typeof value['record'] !== 'string') { return false }
+    if (value['record'] !== undefined && typeof value['record'] !== 'string') { return 'Transition record must be a need id or need.id string' }
     // A bare declared owner names the same record source. Canonicalize locally rather than buying another plan.
     if (ids.indexOf(t.record) >= 0) { t.record += '.id' }
-    if (screenIds.indexOf(t.from) < 0 || screenIds.indexOf(t.to) < 0 || t.on.length === 0) { return false }
-    if (t.record.length > 0 && (!t.record.endsWith('.id') || ids.indexOf(t.record.substring(0, t.record.length - 3)) < 0)) { return false }
+    if (screenIds.indexOf(t.from) < 0 || screenIds.indexOf(t.to) < 0 || t.on.length === 0) { return 'Transition requires declared from/to screens and a nonempty on' }
+    if (t.record.length > 0 && (!t.record.endsWith('.id') || ids.indexOf(t.record.substring(0, t.record.length - 3)) < 0)) { return 'Transition has an undeclared record owner: ' + t.record }
     plan.transitions.push(t)
   }
   let reached: string[] = [plan.startScreen]
   for (let i = 0; i < screenIds.length; i++) {
     for (let t of plan.transitions) { if (reached.indexOf(t.from) >= 0 && reached.indexOf(t.to) < 0) { reached.push(t.to) } }
   }
-  return reached.length === screenIds.length
+  return reached.length === screenIds.length ? '' : 'Every screen must be reachable from startScreen through transitions'
 }
 
 /** A named destination in prose must not silently go through the lossy flat composer.
@@ -342,7 +356,7 @@ export function navigationPlanProblem(plan: NeedsPlan): string {
   if (plan.screens.length > 1) { return '' }
   // Action needs describe the PHONE's destinations, not this app's internal views.
   let words = plan.needs.filter((n: Need): boolean => n.type !== NEED_ACTION).map((n: Need): string => n.words).join('\n')
-  if (!/\b(?:detail|editor|edit|second|another|separate)\s+(?:screen|view|page)\b|\b(?:opens?|navigat\w*|go(?:es)?)\b[^.\n]{0,80}\b(?:details|editor|screen|page|view)\b/i.test(words)) { return '' }
+  if (!/\b(?:detail|editor|edit|second|another|separate)\s+(?:screen|view|page)\b|\b(?:opens?|navigat\w*)\b[^.\n]{0,80}\b(?:details|editor|screen|page)\b/i.test(words)) { return '' }
   return 'The needs describe navigation to a detail/editor or another view, but the plan has no multi-view metadata. ' +
     'Declare screens, startScreen and transitions for every destination; use one shared collection and record IDs. ' +
     'Use presentation pages for list/detail/editor flows or tabs for peer views. Do not flatten the navigation into a single inline section.'

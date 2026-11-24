@@ -49,6 +49,18 @@ async function main() {
     p => p.transitions = [], p => p.needs[1].uses = ['missing'], p => p.needs[1].uses = [3],
     p => p.needs[1].uses = ['overview'], p => p.screens = 'home', p => p.needs = null
   ]) { const p = plan(); mutate(p); assert.equal(parse(p), null); checks++ }
+  for (const screens of [[], [{id:'main', needs:['missing']}]] ) {
+    const single = parse({title:'Timer', screens, startScreen:'missing', transitions:'ignored', presentation:'ignored',
+      needs:[{type:'countdown',label:'Countdown',uses:['missing']}]})
+    assert.ok(single); assert.equal(single.screens.length, 0); assert.deepEqual(single.needs[0].uses, []); checks++
+  }
+  for (const [mutate, expected] of [
+    [p => delete p.needs[0].id, /missing\/invalid id/],
+    [p => p.needs[1].uses = ['missing'], /dangling\/self uses reference: missing/]
+  ]) {
+    const invalid = plan(); mutate(invalid); const problems = []
+    assert.equal(np.parseNeedsPlan(JSON.stringify(invalid), problems), null); assert.match(problems.join(';'), expected); checks++
+  }
   const bare = plan(); bare.transitions[1].record = 'notes'; assert.equal(parse(bare).transitions[1].record, 'notes.id'); checks++
   const badRecord = plan(); badRecord.transitions[1].record = 'notes.title'; assert.equal(parse(badRecord), null); checks++
   const multiple = plan(); multiple.needs.push({id: 'tasks', type: 'entries', label: 'Tasks', fields: []}); multiple.screens[0].needs.push('tasks')
@@ -86,6 +98,10 @@ async function main() {
   }
   const fakeDeclarations = built.agent.source + '\n// function c_view_fake(s: AppState): ui.View {}\n'
   assert.deepEqual(refine.sourceScreenIds(fakeDeclarations), ['home', 'notes', 'editor']); checks++
+  assert.deepEqual(refine.sourceScreenIds('function view( version-skew syntax'), [])
+  assert.equal(refine.appRefinementNote('function view( version-skew syntax'), '')
+  assert.deepEqual(refine.removedAppScreens('function view( version-skew syntax', flat), [])
+  assert.equal(refine.smokeRefinement(flat, 'function view( version-skew syntax'), ''); checks++
   const iconCode = good.replace('ui.Button("primary", "Notes", "c_list", 0, true)', 'ui.IconButton("default", "plus", "Notes", "c_list", 0, true)')
   const iconHost = hostFor(plan(), iconCode); const iconBuilt = await run(iconHost.host)
   assert.equal(iconBuilt.kind, 'agent', iconBuilt.reason); assert.equal(iconHost.seen.code.length, 1); checks++
@@ -118,10 +134,16 @@ async function main() {
   const afterPlanRepair = await run(plannedAgain.host, 'open a book')
   assert.equal(afterPlanRepair.kind, 'agent', afterPlanRepair.reason); assert.equal(plannedAgain.seen.plans.length, 2)
   assert.match(plannedAgain.seen.plans[1], /no multi-view metadata/); checks++
-  const foreverFlat = hostFor(flatPlan)
-  const flatRejected = await run(foreverFlat.host, 'open a book')
-  assert.equal(flatRejected.kind, 'not-built'); assert.equal(flatRejected.agent.composed.appPlanFailed, true)
-  assert.equal(foreverFlat.seen.code.length, 0); checks++
+  let flatCalls = 0
+  const flatFallback = await loadVera('NeedsChoose').composeNeeds('open a book', async () => { flatCalls++; return JSON.stringify(flatPlan) }, async () => '')
+  assert.equal(flatCalls, 3); assert.equal(flatFallback.appPlanFailed, false, 'a prose heuristic alone cannot disable the ordinary fallback'); checks++
+  for (const words of ['when the countdown ends the alarm goes off and the view flashes', 'open eyes and view the breathing rhythm']) {
+    const single = {title:'Timer', needs:[{type:'other',what:words}]}
+    assert.equal(np.navigationPlanProblem(parse(single)), '')
+    let calls = 0
+    const composed = await loadVera('NeedsChoose').composeNeeds(words, async () => { calls++; return JSON.stringify(single) }, async () => '')
+    assert.equal(calls, 1); assert.equal(composed.appPlanFailed, false); checks++
+  }
   // Tabs use the SAME named screens, active-only construction and reachability gate.
   const tabPlan = plan(); tabPlan.presentation = 'tabs'
   const tabCode = good.replace(/if \(state.c_screen === "notes"\)[\s\S]*?(?=<\/view>)/, `let panes: ui.View[] = [];
@@ -145,6 +167,11 @@ return {c_screen:"home"__PASSTHROUGH__};
   const qPlan = n => Object.assign(plan(), n === 1 ? {questions: [{id: 'subject', ask: 'Which notes?', options: ['Work', 'Home'], default: 0}]} : {})
   const clarified = hostFor(qPlan); clarified.host.askJev = async body => JSON.parse(body).questions['blocking.0'] ? '{"answers":{"blocking.0":{"probabilities":{"ask":1,"skip":0}}}}' : ''; clarified.host.ask = async () => 1
   const q = await run(clarified.host); assert.equal(q.kind, 'agent', q.reason); assert.equal(clarified.seen.plans.length, 2); assert.match(clarified.seen.code[0].user, /Which notes\? Home/); assert.equal(q.agent.asked.length, 1); checks++
+  const defaultResult = await loadVera('NeedsChoose').composeNeeds('Notes', async () => JSON.stringify(Object.assign(plan(), {
+    questions:[{id:'currency',ask:'Which currency?',options:['USD','EUR'],default:1}]
+  })), async () => '', () => {}, false, async () => '')
+  assert.match(defaultResult.appPlan.request, /Which currency\? EUR/); checks++
+  assert.match(invalidHost.seen.plans[1], /Screen home needs must reference declared need ids/); checks++
   const cancel = hostFor(); let cancelled = false; cancel.host.cancelled = () => cancelled; cancel.host.lookup = async () => { cancelled = true; return '' }; const stopped = await run(cancel.host); assert.equal(stopped.kind, 'cancelled'); assert.equal(cancel.seen.code.length, 0); checks++
   console.log(`app-plan: ${checks} checks passed (real compiler/VM; model, selector and phone effects mocked)`)
 }

@@ -17,15 +17,19 @@ function back(state: AppState, value: number): AppState { return {screen: "a", c
 function increment(state: AppState, value: number): AppState { return {screen: state.screen, count: state.count + 1, text: state.text}; }
 function edit(state: AppState, value: string): AppState { return {screen: "b", count: state.count, text: value}; }
 function tick(state: AppState, value: number): AppState { return {screen: state.screen, count: state.count + 1, text: state.text}; }
-function screenA(state: AppState): ui.View { return ui.Screen("a", [ui.TextField("default", "Name", state.text, "edit"), ui.Button("primary", "Next", "go", 0, true),ui.Ticker("default","clock",1000,true,"tick")]); }
-function screenB(state: AppState): ui.View { return ui.Screen("b", [ui.TextField("default", "Name", state.text, "edit"),ui.Button("primary", "Next", "go", 0, true),ui.Ticker("default","clock",1000,true,"tick"),ui.BackHandler("back")]); }
-function view(state: AppState): ui.View { if (state.screen === "a") {return ui.AppTheme("clean","",[screenA(state),ui.Ticker("default","global-clock",1000,true,"tick")]);} return ui.AppTheme("clean","",[screenB(state),ui.Ticker("default","global-clock",1000,true,"tick")]); }`
+function screenA(state: AppState): ui.View { return ui.Screen("a", [ui.TextField("default", "Name", state.text, "edit"), ui.Button("primary", "Next", "go", 0, true),ui.Ticker("default","clock",33,true,"tick")]); }
+function screenB(state: AppState): ui.View { return ui.Screen("b", [ui.TextField("default", "Name", state.text, "edit"),ui.Button("primary", "Next", "go", 0, true),ui.Ticker("default","clock",33,true,"tick"),ui.BackHandler("back")]); }
+function view(state: AppState): ui.View { if (state.screen === "a") {return ui.AppTheme("clean","",[screenA(state),ui.Ticker("default","global-clock",33,true,"tick")]);} return ui.AppTheme("clean","",[screenB(state),ui.Ticker("default","global-clock",33,true,"tick")]); }`
 const compiled = C.compileVeraSource(src)
 const renderer = fs.readFileSync(path.join(sourceRoot, 'components/VeraPreview.ets'), 'utf8')
 const number = num => ({kind:'NUMBER', num, str:'', bool:false, phase:'', id:0, x:0, y:0})
 const stopped = [], started = [], cancelled = [], backSignals = []
 const runtime = new InProcessHost()
-const {probe:p} = createPreview({runtime, HostOperationFailure, HostEffectsBridge})
+const intervalCallbacks = []
+const {probe:p} = createPreview({runtime, HostOperationFailure, HostEffectsBridge, mocks:{
+  setInterval: callback => { intervalCallbacks.push(callback); return intervalCallbacks.length }, clearInterval() {}
+}})
+const realStartTimer = p.startTimer.bind(p)
 p.vbc2 = compiled.vbc2
 p.previewOnly = false
 p.onBackHandlerChanged = value => backSignals.push(value)
@@ -35,9 +39,14 @@ p.cancelField = node => { cancelled.push(node); cancel(node) }
 p.startTimer = (id, config) => { started.push(id); p.timers.set(id, 1); p.timerConfigs.set(id, config) }
 p.stopTimer = id => { stopped.push(id); p.timers.delete(id); p.timerConfigs.delete(id); p.timerLastFire.delete(id) }
 async function settle() {
-  let operations
-  do { operations = p.operations; await operations; await new Promise(resolve => setImmediate(resolve)) } while (operations !== p.operations)
-  assert.equal(p.error, '')
+  for (let i = 0; i < 40; i++) {
+    const operations = p.operations
+    await operations; await new Promise(resolve => setImmediate(resolve))
+    if (operations === p.operations && p.inFlight === null && !p.postDrain && p.posts.length === 0 && p.fieldActions.length === 0) {
+      assert.equal(p.error, ''); return
+    }
+  }
+  assert.fail('preview work did not settle')
 }
 async function state() { return V.decodeRuntimeValue(JSON.parse(await runtime.requestSnapshot(p.handle))) }
 async function apply(name, value = 0) { p.dispatchFieldAction(name, number(value)); await settle() }
@@ -51,6 +60,13 @@ function pendingNavigationEdit() {
     const boundary = p.liveRoot.children[0], field = boundary.children[0], button = boundary.children[1]
     assert.equal(boundary.screenId, 'a'); field.touched = true; field.typed = 'unsaved'
     p.fieldController(field, field.fieldGeneration)
+    const detached = L.cloneLiveTree(p.liveRoot)
+    assert.equal(detached.children[0].screenId, 'a')
+    const detachedField = detached.children[0].children[0]
+    const cloneVm = new V.VirtualMachine(V.deserializeVbc2(compiled.vbc2), new (loadVera('VeraUi').UiHostEnvironment)())
+    const cloneNext = loadVera('VeraUi').decodeVeraUi(cloneVm.execute('view', [cloneVm.execute('init')]))[0]
+    L.reconcile(detached, cloneNext)
+    assert.equal(detached.children[0].children[0], detachedField, 'clone/reconcile does not spuriously replace same-screen controls')
     const queued = p.captureFieldAction(button.action, number(0), true, button)
     assert(p.fieldActionCurrent(queued))
     await apply('increment')
@@ -96,6 +112,29 @@ function pendingNavigationEdit() {
     pendingNavigationEdit(); p.dispatchTickerAction('global-clock', globalConfig, number(1000)); await settle()
     assert.equal(p.timerConfigs.get('global-clock'), globalConfig)
     assert.equal((await state()).fields.get('count').value, before + 2, 'application ticker survives screen navigation')
+    await apply('back')
+    const fastConfig = {interval:33, action:'tick'}
+    p.stopTimer(timerId); realStartTimer(timerId, fastConfig)
+    p.admissionBlocked = true
+    p.dispatchFieldAction('go', number(0))
+    intervalCallbacks.at(-1)()
+    assert.equal(p.posts.length, 1, 'real fast timer callback queues a tick while navigation waits')
+    assert.equal(p.posts[0].tickerConfig, fastConfig)
+    const beforeFast = (await state()).fields.get('count').value
+    p.admissionBlocked = false; p.resumeFieldActions(); await settle()
+    assert.equal((await state()).fields.get('screen').value, 'b')
+    assert.equal((await state()).fields.get('count').value, beforeFast, 'queued fast tick is dropped after screen exit')
+    assert.equal(p.posts.length, 0)
+    await apply('back')
+    assert.notEqual(p.timerConfigs.get(timerId), fastConfig, 'return starts a new ticker lifetime')
+    intervalCallbacks.at(-1)(); await settle()
+    assert.equal((await state()).fields.get('count').value, beforeFast, 'old interval callback cannot revive on return')
+    p.stopTimer('global-clock'); realStartTimer('global-clock', fastConfig)
+    p.admissionBlocked = true; p.dispatchFieldAction('go', number(0)); intervalCallbacks.at(-1)()
+    assert.equal(p.posts.length, 1); assert.equal(p.posts[0].key, 'global-clock')
+    assert.equal(p.posts[0].tickerConfig, p.timerConfigs.get('global-clock'))
+    p.admissionBlocked = false; p.resumeFieldActions(); await settle()
+    assert.equal((await state()).fields.get('count').value, beforeFast + 1, 'global fast tick survives navigation')
     assert.match(renderer, /ForEach\(\[node.screenId\]/)
     assert.match(renderer, /rootScroller.scrollTo\(\{ xOffset: 0, yOffset: 0 \}\)/)
     assert.equal(loadVera('VeraSmoke').smokeRun(compiled), '')

@@ -316,6 +316,7 @@ export function cloneLiveTree(node: LiveNode): LiveNode {
   copy.layoutWidth = node.layoutWidth
   copy.layoutHeight = node.layoutHeight
   copy.kind = node.kind
+  copy.screenId = node.screenId
   copy.style = node.style
   copy.text = node.text
   copy.source = node.source

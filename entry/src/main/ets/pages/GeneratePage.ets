@@ -516,6 +516,8 @@ export struct GeneratePage {
   private acceptedComposition: string = ''
   private acceptedOrigin: string = ''
   private acceptedMetrics: VersionMetrics | null = null
+  private screenRemovalAsked: boolean = false
+  private allowedScreenRemovals: string[] = []
   private metricTotals: VersionMetrics = new VersionMetrics()
   /**
    * This run alone. `metricTotals` is cumulative across every request a page
@@ -550,6 +552,8 @@ export struct GeneratePage {
     this.finishMetrics(this.runId)
     this.pendingBase = this.currentBase()
     if (this.makeWidget && this.widgetFresh) { this.previousSource = withoutWidget(this.compiledSource) }
+    this.screenRemovalAsked = false
+    this.allowedScreenRemovals = []
     this.pendingRequest = ask
     let history = this.modelRequestHistory()
     this.pendingHistory = history.length > 0 ? history + '\n\nRefinement:\n' + ask : ask
@@ -1583,6 +1587,25 @@ export struct GeneratePage {
     }
   }
 
+  /** Ask at most once per request; approval covers only the exact ids shown, never later removals. */
+  private async confirmScreenRemovals(removed: string[]): Promise<string[]> {
+    if (removed.length === 0 || this.screenRemovalAsked) { return this.allowedScreenRemovals }
+    this.screenRemovalAsked = true
+    let run = this.runId
+    // The model cannot authorize losing unrelated views. Only the person may allow this structural change.
+    try {
+      let answer = await this.getUIContext().getPromptAction().showDialog({
+        title: 'Remove app screens?',
+        message: 'This change removes these screens: ' + removed.join(', ') + '. Allow this only if you asked to remove or combine them.',
+        buttons: [{ text: 'Keep screens', color: '#334155' }, { text: 'Allow removal', color: '#B91C1C' }]
+      })
+      if (!this.disposed && run === this.runId && !this.cancelRequested && answer.index === 1) {
+        this.allowedScreenRemovals = removed.slice()
+      }
+    } catch (_e) { /* Dismissing the dialog never permits a removal. */ }
+    return this.allowedScreenRemovals
+  }
+
   private async runAttempt(userPrompt: string, errorFeedback: string, operation: OperationController): Promise<void> {
     if (operation.isCancelled()) { return }
     let run = this.runId
@@ -1722,19 +1745,8 @@ export struct GeneratePage {
       // repaired here like a compile error rather than found on the screen.
       let smokeStart = Date.now()
       let removed = removedAppScreens(this.previousSource, result)
-      let allowed: string[] = []
-      if (removed.length > 0) {
-        // The model cannot authorize losing unrelated views. Only the person may allow this structural change.
-        try {
-          let answer = await this.getUIContext().getPromptAction().showDialog({
-            title: 'Remove app screens?',
-            message: 'This change removes these screens: ' + removed.join(', ') + '. Allow this only if you asked to remove or combine them.',
-            buttons: [{ text: 'Keep screens', color: '#334155' }, { text: 'Allow removal', color: '#B91C1C' }]
-          })
-          if (answer.index === 1) { allowed = removed }
-        } catch (_e) { /* Dismissing the dialog never permits a removal. */ }
-        if (this.disposed || run !== this.runId || operation.isCancelled()) { return }
-      }
+      let allowed = await this.confirmScreenRemovals(removed)
+      if (this.disposed || run !== this.runId || operation.isCancelled()) { return }
       errors = smokeRefinement(result, this.previousSource, allowed)
       if (errors.length === 0 && this.makeWidget) {
         errors = await validateWidgetOffMain(this.widgetBase, this.generatedSource.trim(), result.vbc2)

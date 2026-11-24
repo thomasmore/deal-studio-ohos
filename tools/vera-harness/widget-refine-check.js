@@ -497,7 +497,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
   const {OperationController, throwIfCancelled} = loadVera('OperationCancellation')
   const {GenerateRequest, GenerateResult} = loadVera('LlamaEngine')
   const names = ['aboutToAppear', 'makeWidgetAlone', 'doServerGenerate', 'commitSave', 'widgetSaveState', 'checkWidgetSave', 'hasResult', 'versionCount',
-    'modelRequestHistory', 'prepareRequest', 'markMetricsPartial', 'acceptRequest', 'doRefine', 'refineWithModel', 'startAttemptOne', 'runAttempt', 'callModel']
+    'modelRequestHistory', 'prepareRequest', 'markMetricsPartial', 'confirmScreenRemovals', 'acceptRequest', 'doRefine', 'refineWithModel', 'startAttemptOne', 'runAttempt', 'callModel']
   const methods = names.map(name => {
     const match = pageSource.match(new RegExp('^  (?:private )?(?:async )?' + name + '\\([^\\{]*\\{[\\s\\S]*?^  \\}', 'm'))
     assert(match, 'GeneratePage.' + name + ' must exist')
@@ -587,6 +587,28 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
       failSave(value) { failSave = value }, failWrite(value) { failWrite = value },
       setLatest(value) { latest = value }, setState(value) { savedState = value }}
   }
+  // Screen-removal approval is scoped to one request and exactly the ids shown, not all repair candidates.
+  for (const choice of [0, 1, 'dismiss']) {
+    const p = fixture(base).page; p.runId = 1; p.screenRemovalAsked = false; p.allowedScreenRemovals = []
+    let dialogs = 0
+    p.getUIContext = () => ({getPromptAction: () => ({async showDialog() {
+      dialogs++; if (choice === 'dismiss') throw Error('dismissed'); return {index:choice}
+    }})})
+    const expected = choice === 1 ? ['notes'] : []
+    assert.deepEqual(await p.confirmScreenRemovals(['notes']), expected)
+    assert.deepEqual(await p.confirmScreenRemovals(['notes','editor']), expected)
+    assert.deepEqual(await p.confirmScreenRemovals(['editor']), expected)
+    assert.equal(dialogs, 1, 'repair candidates do not prompt again or widen approval')
+    p.prepareRequest('new refinement')
+    assert.equal(p.screenRemovalAsked, false); assert.deepEqual(p.allowedScreenRemovals, [])
+    await p.confirmScreenRemovals(['editor']); assert.equal(dialogs, 2, 'a new request may ask again')
+  }
+  {
+    const p = fixture(base).page; p.runId = 1; p.screenRemovalAsked = false; p.allowedScreenRemovals = []
+    p.getUIContext = () => ({getPromptAction: () => ({async showDialog() { p.runId++; return {index:1} }})})
+    assert.deepEqual(await p.confirmScreenRemovals(['notes']), [], 'late approval cannot authorize a later request')
+  }
+  console.log('PASS screen-removal confirmation: once per request, exact approved ids, dismissal and stale replies')
   // Save as the page makes it for a widget: the card's checks (in a worker, when what Generate found no longer holds), then the commit.
   const saveWidget = async page => (await page.checkWidgetSave()) && page.commitSave()
   const oldPrograms = [

@@ -357,17 +357,19 @@ async function drawPlan(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
         if (screens !== undefined && (!Array.isArray(screens) || screens.length > 1)) { out.appAttempted = true }
       } catch (_e) {}
     }
-    let plan = reply !== null ? parseNeedsPlan(reply!) : null
+    let problems: string[] = []
+    let plan = reply !== null ? parseNeedsPlan(reply!, problems) : null
     let sketch = plan !== null ? planningSketch(plan!) : null
     let navigation = plan !== null ? navigationPlanProblem(plan!) : ''
-    if (navigation.length > 0) { out.appAttempted = true }
+    // Prose is only a heuristic. It may request a better plan, but cannot disable the ordinary fallback on its own.
     if (plan !== null && sketch !== null && navigation.length === 0) {
       out.text = reply!
       out.plan = plan
       out.sketch = sketch
       return out
     }
-    let wrong = navigation.length > 0 ? navigation : (reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200))
+    let wrong = navigation.length > 0 ? navigation : (problems.length > 0 ? problems.join('; ') :
+      (reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200)))
     user = prompt + note + '\n\nThe last answer could not be used: ' + wrong + '. Answer with the JSON object only, in the form asked for.'
   }
   return out
@@ -411,6 +413,8 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   throwIfCancelled(cancellation)
   // What each question stands at, the person's answer or its default, before a plan drawn again drops the questions.
   let answered: string[] = sketch.questions.map((q: SketchQuestion): string => answerTo(q)).filter((a: string): boolean => a.length > 0)
+  let clarified: string[] = sketch.questions.filter((q: SketchQuestion): boolean => answerTo(q).length > 0)
+    .map((q: SketchQuestion): string => q.ask + ' ' + answerTo(q))
   if (settled.length > 0) {
     prompt = prompt + '\n\n' + settled
     let again = Date.now()
@@ -441,7 +445,7 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   let unasked = dropUnasked(plan, prompt)
   // A multi-screen app is written once from the full plan, before choosing any flat parts or sections.
   if (plan.screens.length > 1) {
-    plan.request = prompt
+    plan.request = prompt + (clarified.length > 0 ? '\n\nClarification answers (chosen or default):\n' + clarified.join('\n') : '')
     plan.compact = widget
     result.appPlan = plan
     result.note = 'shared app (' + plan.presentation + (widget ? ', compact' : '') + '): ' + plan.screens.map((s): string => s.id).join(', ')

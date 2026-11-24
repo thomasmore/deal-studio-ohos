@@ -10,7 +10,7 @@ Generate and Chat share one optional view plan, one writer chain and one VM/AppS
 - `presentation: "tabs"`: peer views; Chat adds compact presentation instructions.
 - Ordinary single-view plans retain the existing parts/catalogue route.
 
-A conservative English-pattern guard detects explicit detail/editor navigation described in needs without screen metadata. It returns a diagnostic through the existing bounded planning retries. External phone-action needs are excluded. It is not a universal intent classifier. Recognized multi-view failures do not fall through to flat generation in either entry point.
+A conservative English-pattern guard detects explicit detail/editor navigation described in needs without screen metadata. It returns a diagnostic through the existing bounded planning retries. External phone-action needs are excluded. It is not a universal intent classifier. The heuristic alone never disables the ordinary whole-screen fallback; only an explicit malformed/failed multi-screen plan does so in either entry point.
 
 ## Writing and runtime
 
@@ -18,7 +18,7 @@ The existing classes/fields/functions/view contribution format produces shared `
 
 The writer has at most three attempts and a screen-scaled output budget capped at 16,000 tokens. Requested actions require actual controls. A small bytecode-reference check catches unreferenced AppState-mutating handlers; it is not full action coverage.
 
-Existing Chat block-to-tabs composition is retained, with named Screen panes constructed only when selected. Labels, selected state and callbacks stay unchanged. These compositions retain their composition records; declared shared apps do not have flat records.
+Existing Chat block-to-tabs composition retains its view-local fragment scope and ordinary smoke contract, including panes that start empty. Only the selected pane is wrapped in a named Screen; fragment blocks are not extracted into `c_view_` functions or opted into the planned-screen validation/reachability contract. Labels, selected state and callbacks stay unchanged. These compositions retain their composition records; declared shared apps do not have flat records.
 
 See [runtime contract](multiscreen-runtime.md) for native identity and teardown behavior.
 
@@ -28,7 +28,7 @@ See [runtime contract](multiscreen-runtime.md) for native identity and teardown 
 
 The search freezes time, deep-clones branches, respects inactive tabs and never executes external effects. Bounds: 192 queued states, 768 actions, depth 16, 64 KiB state keys, and 2M aggregate VM steps checked between calls (100K per call). Missing paths return observations and witness paths to the existing repair loop. Exhaustion means **no witness found**, not proof of impossibility; unusual input or external prerequisites can fail the gate.
 
-Refinement validation extracts pre-edit top-level function identities with the compiler parser (not line-based matching), preventing accidental flattening. Local Generate asks before intentional view removal; Chat/server refinements preserve views conservatively.
+Refinement validation extracts pre-edit top-level function identities with the compiler parser (not line-based matching), preventing accidental flattening. Local Generate asks once per request before intentional view removal and remembers only the exact approved ids across repairs; a later candidate cannot widen that approval. Chat/server refinements preserve views conservatively. Source introspection is best-effort: a saved/server source the current parser cannot read does not block the refinement request.
 
 Date-generation instructions initialize/reset new date drafts to `time.daysSinceEpoch()`, not `0` (1 January 1970). Editing preserves stored dates. This is prompt guidance, not renderer coercion or a migration.
 
@@ -45,6 +45,6 @@ node tools/vera-harness/chat-prompt-check.js
 node tools/vera-harness/reachability-check.js /path/app.vera
 ```
 
-The last command prints JSON and exits 1 when a path is missing. Tests use the real compiler/VM with mocked model/phone boundaries. They include payload mismatch, planning/repair feedback, compact pages/tabs, broken legacy tabs and refinement preservation. Native runtime checks are separate from generated-app functional correctness.
+The last command prints JSON and exits 1 when a path is missing. Tests use the real compiler/VM with mocked model/phone boundaries. They include payload mismatch, planning/repair feedback, compact planned pages/tabs, legacy tab scope/empty panes, clarification defaults and refinement preservation. Native runtime checks are separate from generated-app functional correctness.
 
 The PR's earlier 180-prompt benchmark measured commit `c33174b`, before reachability/date/unification changes. It is not a benchmark of the current head, nor functional validation. Known limitations include planner omissions outside the structural guard, bounded search, and imperfect semantic verification. See [agent route](agent.md) for the surrounding pipeline.
