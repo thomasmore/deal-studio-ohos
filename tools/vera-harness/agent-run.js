@@ -2,7 +2,7 @@
 // with fetch for DeepSeek ($ARKESTR_API_KEY), Jev ($TYPESAFE_API_KEY) and Exa ($EXA_API_KEY, optional: without it a
 // request whose sections need real data is refused, as on a phone with no search key).
 //
-//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [label ...]
+//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [--lookups FILE] [label ...]
 //
 // Each written hole goes to OUTDIR/<label>/holes.jsonl, which tools/vera-harness/hole-report.py groups, and every call of a hole
 // writer, whole, to OUTDIR/<label>/asks.jsonl with the hole and fill events that say which reply was kept (-t sets their temperature). -w builds each as a
@@ -33,6 +33,15 @@ const promptFile = option('-p', path.join(__dirname, '../vera-bench/prompts.tsv'
 const jobs = Number(option('-j', '4'))
 // -t: the temperature of the hole writers (catalogue holes and sections), for more than one sample of a request; the plan stays at 0.
 const holeTemperature = Number(option('-t', '0'))
+// --lookups: the phone's function lookups, replayed (vera-tuning's tools/lookup-cache.js from the phone's trace "lookup" events).
+// A lookup the cache does not hold answers '' and is recorded as a miss in asks.jsonl, so a hole written without what the
+// phone would have shown is never trained on.
+const lookupFile = option('--lookups', '')
+const lookups = lookupFile ? new Map(Object.entries(JSON.parse(fs.readFileSync(lookupFile, 'utf8')))) : null
+const lookupKey = (tool, query, both) => tool + '\u0000' + query + '\u0000' + (both ? '1' : '0')
+// The log of the request being run, for the lookups the route's own modules make (they are not given a host); requests run
+// side by side (-j), so it goes with each one's async calls.
+const requestLog = new (require('node:async_hooks').AsyncLocalStorage)()
 const flag = name => { const i = args.indexOf(name); if (i < 0) return false; args.splice(i, 1); return true }
 const widget = flag('-w')
 const wholeRoute = flag('-r')
@@ -72,8 +81,9 @@ function liveBlocks() {
   settings.getSelectorKey = () => process.env.TYPESAFE_API_KEY
   settings.hasExaKey = () => Boolean(process.env.EXA_API_KEY)
   loadVera('VeraWebSearch').webSearch = search
-  // The phone's SDK index is not on the host: a hole that may call the phone is shown no functions.
-  ds.discoveryToolResult = async () => ''
+  // The phone's SDK index is not on the host: a hole that may call the phone is shown no functions, or the phone's own
+  // answers when --lookups gives them.
+  ds.discoveryToolResult = async (name, query, round, both) => cachedLookup(requestLog.getStore(), name, query, Boolean(both))
   ds.deepseek.extractTemplateContent = async (system, user, maxTokens) => ds.extractVeraSource(await deepseek(system, user, maxTokens, false))
 }
 if (wholeRoute) liveBlocks()
@@ -97,6 +107,13 @@ async function asked(log, task, system, user, budget, think) {
   }
 }
 
+function cachedLookup(log, tool, query, both) {
+  if (lookups === null) return ''
+  const text = lookups.get(lookupKey(tool, query, both))
+  if (log) log.asks.push({kind: 'lookup', seq: log.seq++, tool, query, both, hit: text !== undefined})
+  return text === undefined ? '' : text
+}
+
 function host(log) {
   const h = new AgentHost()
   h.askPlan = async (system, user, onText, think) => { const t = Date.now(); const text = await deepseek(system, user, think ? 6000 : 1500, true, think); log.planMs = Date.now() - t; onText(text); return text }
@@ -113,6 +130,15 @@ function host(log) {
   if (process.env.EXA_API_KEY) calls.search = search
   calls.content = (system, user, budget) => deepseek(system, user, budget, false)
   calls.hole = (system, user) => asked(log, 'catalogue-hole', system, user, 500, false)
+  // As the phone asks them (SectionFillApp.ets, AgentAppHost.ets).
+  calls.sdkContext = async prompt => cachedLookup(log, 'find_sdk_function', prompt.substring(0, 300), false).substring(0, 2500)
+  if (lookups !== null) {
+    h.lookup = async need => {
+      const asked = need.substring(0, 300)
+      return 'find_intent_function:\n' + cachedLookup(log, 'find_intent_function', asked, true) +
+        '\nfind_sdk_function:\n' + cachedLookup(log, 'find_sdk_function', asked, false)
+    }
+  }
   // What the catalogue holes ended as: the bodies kept, after the asks recorded before it.
   h.fillBlocks = async request => {
     const fill = await fillSections(request, calls)
@@ -133,10 +159,14 @@ function host(log) {
   return h
 }
 
-async function one([label, prompt]) {
+function one(request) {
+  const log = {asks: [], seq: 0}
+  return requestLog.run(log, () => runOne(log, request))
+}
+
+async function runOne(log, [label, prompt]) {
   const dir = path.join(out, label)
   fs.mkdirSync(dir, {recursive: true})
-  const log = {asks: [], seq: 0}
   const started = Date.now()
   let r
   let o = null
