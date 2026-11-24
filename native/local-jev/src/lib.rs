@@ -453,18 +453,66 @@ pub unsafe extern "C" fn local_jev_experimental_decisions(
     data: *const u8,
     len: usize,
 ) -> *mut c_char {
+    reply(data, len, |body| experimental_reply(body, None))
+}
+
+#[derive(Default)]
+struct BenchmarkProfile {
+    batched: bool,
+    lengths: Vec<Vec<usize>>,
+    timings: laya::ScoreTimings,
+}
+
+fn experimental_reply(body: &str, profile: Option<&mut BenchmarkProfile>) -> Value {
+    let engine = LAYA
+        .get_or_init(|| Mutex::new(laya::Engine::embedded()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(engine) = &*engine else {
+        return uncertain("laya_model_unavailable");
+    };
+    let raw = match profile {
+        Some(profile) => engine.benchmark_scores(
+            body,
+            profile.batched,
+            &mut profile.lengths,
+            &mut profile.timings,
+        ),
+        None => engine.diagnostic_scores(body),
+    };
+    match raw {
+        Ok(raw) => experimental_decisions(raw, body),
+        Err(reason) => uncertain(&reason),
+    }
+}
+
+/// Benchmark-only capped decisions and phase timings. Mode 0 is serial and mode 1 is batched.
+#[no_mangle]
+pub unsafe extern "C" fn local_jev_benchmark_decisions(
+    data: *const u8,
+    len: usize,
+    mode: u32,
+) -> *mut c_char {
     reply(data, len, |body| {
-        let engine = LAYA
-            .get_or_init(|| Mutex::new(laya::Engine::embedded()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match &*engine {
-            Ok(engine) => match engine.diagnostic_scores(body) {
-                Ok(raw) => experimental_decisions(raw, body),
-                Err(reason) => uncertain(&reason),
+        let name = match mode {
+            0 => "serial",
+            1 => "batched",
+            _ => return uncertain("invalid_benchmark_mode"),
+        };
+        let mut profile = BenchmarkProfile {
+            batched: mode == 1,
+            ..Default::default()
+        };
+        let response = experimental_reply(body, Some(&mut profile));
+        json!({
+            "response": response,
+            "benchmark": {
+                "mode": name,
+                "batch_lengths": profile.lengths,
+                "preparation_ms": profile.timings.preparation.as_secs_f64() * 1000.,
+                "forward_ms": profile.timings.forward.as_secs_f64() * 1000.,
             },
-            Err(_) => uncertain("laya_model_unavailable"),
-        }
+        })
     })
 }
 

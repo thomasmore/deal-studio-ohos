@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    time::{Duration, Instant},
 };
 use tokenizers::Tokenizer;
 
@@ -162,6 +163,23 @@ fn allocate_options(source: &[Vec<u32>], head_max_len: usize) -> Result<Vec<Vec<
         *span = replacement.ok_or("option_tokens_collapsed")?;
     }
     Ok(spans)
+}
+
+#[derive(Default)]
+pub(crate) struct ScoreTimings {
+    pub preparation: Duration,
+    pub forward: Duration,
+}
+
+fn measure<T>(elapsed: Option<&mut Duration>, run: impl FnOnce() -> T) -> T {
+    if let Some(elapsed) = elapsed {
+        let start = Instant::now();
+        let result = run();
+        *elapsed += start.elapsed();
+        result
+    } else {
+        run()
+    }
 }
 
 pub struct Engine {
@@ -415,10 +433,10 @@ impl Engine {
         })
     }
     pub fn scores(&self, body: &str) -> Result<Value, String> {
-        self.score(body, false, false, None)
+        self.score(body, false, false, None, None)
     }
     pub fn diagnostic_scores(&self, body: &str) -> Result<Value, String> {
-        self.score(body, true, false, None)
+        self.score(body, true, false, None, None)
     }
     pub fn batched_scores(
         &self,
@@ -426,7 +444,16 @@ impl Engine {
         capped: bool,
         batch_lengths: Option<&mut Vec<Vec<usize>>>,
     ) -> Result<Value, String> {
-        self.score(body, capped, true, batch_lengths)
+        self.score(body, capped, true, batch_lengths, None)
+    }
+    pub(crate) fn benchmark_scores(
+        &self,
+        body: &str,
+        batched: bool,
+        batch_lengths: &mut Vec<Vec<usize>>,
+        timings: &mut ScoreTimings,
+    ) -> Result<Value, String> {
+        self.score(body, true, batched, Some(batch_lengths), Some(timings))
     }
     fn score(
         &self,
@@ -434,7 +461,9 @@ impl Engine {
         capped: bool,
         batched: bool,
         mut batch_lengths: Option<&mut Vec<Vec<usize>>>,
+        mut timings: Option<&mut ScoreTimings>,
     ) -> Result<Value, String> {
+        let started = timings.as_ref().map(|_| Instant::now());
         let request: Request = parse_with_min_options(body, 1)?;
         let raw: Value = serde_json::from_str(body).map_err(|_| "invalid_request")?;
         if raw["questions"]
@@ -455,6 +484,9 @@ impl Engine {
         if batched {
             sequences.sort_by_key(|q| q.ids.len());
         }
+        if let (Some(timings), Some(started)) = (&mut timings, started) {
+            timings.preparation = started.elapsed();
+        }
         let mut output = BTreeMap::new();
         let mut truncations = BTreeMap::new();
         let mut remaining = sequences.as_slice();
@@ -465,11 +497,15 @@ impl Engine {
             if let Some(report) = &mut batch_lengths {
                 report.push(group.iter().map(|q| q.ids.len()).collect());
             }
-            let hidden = self.infer_group(group).map_err(|e| e.to_string())?;
+            let hidden = measure(timings.as_deref_mut().map(|t| &mut t.forward), || {
+                self.infer_group(group)
+            })
+            .map_err(|e| e.to_string())?;
             for (row, question) in group.iter().enumerate() {
-                let values = self
-                    .marker_scores(&hidden, row, &question.markers)
-                    .map_err(|e| e.to_string())?;
+                let values = measure(timings.as_deref_mut().map(|t| &mut t.forward), || {
+                    self.marker_scores(&hidden, row, &question.markers)
+                })
+                .map_err(|e| e.to_string())?;
                 if values.iter().any(|v| !v.is_finite()) {
                     return Err("nonfinite_scores".into());
                 }

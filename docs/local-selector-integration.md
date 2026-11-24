@@ -128,6 +128,32 @@ The existing C ABI check now verifies readiness and experimental decisions as we
 as guarded prediction and diagnostic logits. Cross-compile it with the OHOS archive
 to run the same probe via `hdc` without replacing the installed app.
 
+## Compare serial and batched inference
+
+Cross-link `tools/local-jev/device-bench.c` with the embedded arm64 archive.
+Send the executable and a saved request to the phone with `hdc file send`.
+Use the same executable, request bytes, and thread count for both modes.
+
+```sh
+hdc shell 'chmod +x /data/local/tmp/device-bench'
+hdc shell 'RAYON_NUM_THREADS=8 /data/local/tmp/device-bench /data/local/tmp/request.json 5 serial' > serial.jsonl
+hdc shell 'RAYON_NUM_THREADS=8 /data/local/tmp/device-bench /data/local/tmp/request.json 5 batched' > batched.jsonl
+```
+
+Each explicit mode starts a fresh process, reports model load, and warms up once
+before the measured calls. Include one single-question request and a saved
+multi-question request. The benchmark response retains choices, logits, and
+truncation metadata under `response.response`. The benchmark fields under
+`response.benchmark` report unpadded sequence lengths per group and two
+timings. Preparation covers parsing, tokenization, validation, and sorting.
+Forward covers model input tensor creation, model execution, and marker scores.
+Compare winners and logits by question and option ID. Use the highest
+`peak_rss_kib` in each run for process peak memory. On macOS this field comes
+from `getrusage`. On OpenHarmony it comes from `VmHWM`.
+
+Omit the mode to use the original serial C export and its existing output.
+The app uses its existing serial export.
+
 ## Qualification still required
 
 See `docs/local-selector-verification.md` for actual host, installed-app and device
