@@ -35,6 +35,10 @@ Keep all four assets together. Cycle 2 remains an optional, separately supplied 
 The public bundle is 216,489,817 bytes; its token embeddings expand in memory, so
 bundle size is **not** a runtime-memory estimate.
 
+The [shared Qwen archive and Mac example](../tools/vera-playground/README.md#run-the-shared-qwen-prototype-on-a-mac)
+use a separate CLI for UI selection and formula generation. Use the Laya-compatible
+manifest for the NAPI build and phone benchmark below.
+
 ## Host generation
 
 Set `VERA_TYPESCRIPT_PATH` if TypeScript is not installed in this checkout.
