@@ -186,6 +186,83 @@ This UI verification did not make new live TypeSafe/LLM generation requests.
 Evidence: `/tmp/local-jev-cycle2-device/update-selector-settings.log`,
 `selector-settings-layout.json`, `selector-{typesafe,llm,local}-{selected,restarted}.json`.
 
+## Updated Candle scheduler and batching: phone measurements
+
+Fast-forwarded the integration worktree to `66f0b272ce1f991af6787ad277fba7a6666fe5df`.
+Built stock and optionally patched Candle 0.9.2 OHOS archives with the same Cycle 2
+bundle and cross-linked the updated `device-bench.c` against each. No app update.
+Stopped the installed app during tests and relaunched it afterward.
+
+Protocol: `RAYON_NUM_THREADS=8`; each configuration starts a separate process,
+loads the model, performs one excluded warmup and three measured inferences.
+Twenty-second pauses between configurations. Fixed order: stock single serial,
+single batched, multi serial, multi batched; then the same order for patched.
+The multi request is the same saved 22-question tip-calculator request used above;
+the single request retains its state and only its first question (`asked.billAmount`,
+135 tokens). These are two matched workloads, not a representative quality suite
+or a counterbalanced thermal benchmark.
+
+Median measured wall time (excludes model initialization):
+
+| Request | Stock serial | Stock batched | Patched serial | Patched batched |
+|---|---:|---:|---:|---:|
+| Single question | 1.072 s | 1.061 s | 0.544 s | 0.545 s |
+| 22 questions | 31.270 s | 34.194 s | 16.967 s | 17.423 s |
+
+Scheduler speedup in serial mode: **1.97x** single, **1.84x** multi.
+Batching is **9.4% slower** than serial with stock scheduling and **2.7% slower**
+with patched scheduling on the multi request; it should not be enabled on the
+basis of this run. All answers, raw logits and truncation records matched exactly
+across configurations, including warmups and repetitions (max logit difference 0).
+This preserves the model's existing unsuitable formula choices, not correctness.
+
+Multi-request median preparation: stock serial 10.026 ms; patched serial 10.186 ms.
+Median forward phase: stock serial 31,256.885 ms; patched serial 16,954.071 ms.
+This confirms model execution dominates; state tokenization is not the remaining
+bottleneck. Initialization ranged 2.451–2.562 s. Process peak RSS stayed within
+373,292–373,488 KiB (about 365 MiB); multi final RSS was about 251 MiB.
+No memory benefit from scheduling is claimed.
+
+The earlier 39.537 s result used a different thread configuration/environment;
+31.270 s is the matched stock control here. During this benchmark the patched
+archive was not installed into the app; it retained its stock Cycle 2 build until
+the subsequent installed-app demonstration below.
+
+Evidence: `/tmp/local-jev-scheduler-device/summary.json`, eight per-configuration
+JSONL outputs, stock/patched build logs, and local orchestration script.
+Single request SHA256: `39a634a351a305ab5bcb85e38d7239e12b0f11a62e47a74c0d441f775aa0b2e3`.
+Multi request and bundle hashes match the earlier Cycle 2 comparison above.
+Rust tests passed after the fast-forward. No Qwen source/runtime was added by these
+updates; this measurement covers Cycle 2 only.
+
+## Patched Cycle 2 installed-app demonstration
+
+At the user's request, installed the patched Candle OHOS archive with Cycle 2 via
+`update-phone.sh`; zero diagnostics, verified in-place identity/first-install time,
+32 seconds, no uninstall or clearing. Enabled local selection and generated:
+
+> A countdown timer with adjustable minutes, start, pause and reset buttons, and remaining time.
+
+First-attempt composition compiled with no omitted parts in **21.030 seconds**.
+Two local diagnostic selector calls: **11.304 s** (10 questions), **4.576 s**
+(1 question), **15.880 s** total. Planning/code writing still used the configured
+cloud model; this is not the shared Qwen prototype or all-local generation.
+The UI Metrics view attributed only the first selector phase to Jev (11.3 s), so
+its model/Jev breakdown understates total local work; the trace is the source for
+the 15.880 s total. Do not interpret the remaining 5.150 s as measured cloud CPU
+or network time; it is simply wall time outside those two calls.
+
+On-device actions: Start decremented 5:00 to 4:56; Stop held 4:56 across two dumps
+three seconds apart; Reset restored 5:00 and 100%. Pause is labeled Stop in the
+actual generated UI. Saved a new project **Local demo - Patched Cycle 2**,
+verified it in My apps, reopened its project and tapped Run. Left the saved app
+open on the phone. Existing projects were not edited.
+
+Evidence: `/tmp/local-jev-patched-demo/` (filtered run trace, paused/still-paused/reset
+layout dumps, saved project/library layouts, final screenshot). Private historical
+trace was not published. Install log:
+`/tmp/local-jev-scheduler-device/update-demo.log`.
+
 ## Still not verified
 
 - Phone structural-edit end-to-end UI (host structural selection is tested).
