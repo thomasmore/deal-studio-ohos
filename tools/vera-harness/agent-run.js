@@ -2,9 +2,10 @@
 // with fetch for DeepSeek ($ARKESTR_API_KEY), Jev ($TYPESAFE_API_KEY) and Exa ($EXA_API_KEY, optional: without it a
 // request whose sections need real data is refused, as on a phone with no search key).
 //
-//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [label ...]
+//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [label ...]
 //
-// Each written hole goes to OUTDIR/<label>/holes.jsonl, which tools/vera-harness/hole-report.py groups. -w builds each as a
+// Each written hole goes to OUTDIR/<label>/holes.jsonl, which tools/vera-harness/hole-report.py groups, and every call of a hole
+// writer, whole, to OUTDIR/<label>/asks.jsonl with the hole and fill events that say which reply was kept (-t sets their temperature). -w builds each as a
 // chat widget. -r runs the whole route (agent/VeraBuildRoute.ets): the agent, then the whole screen as one hole, with the web search
 // and the phone-function lookup set up as on the phone; result.json then says which way it went (route). Prompts come from tools/vera-bench/prompts.tsv unless -p names another
 // label<TAB>prompt file. Each run writes sketch.json, jev-answer.json (when Jev was asked), program.vera and
@@ -30,6 +31,8 @@ const option = (flag, fallback) => { const i = args.indexOf(flag); if (i < 0) re
 const out = option('-o', path.join(require('node:os').tmpdir(), 'agent-run'))
 const promptFile = option('-p', path.join(__dirname, '../vera-bench/prompts.tsv'))
 const jobs = Number(option('-j', '4'))
+// -t: the temperature of the hole writers (catalogue holes and sections), for more than one sample of a request; the plan stays at 0.
+const holeTemperature = Number(option('-t', '0'))
 const flag = name => { const i = args.indexOf(name); if (i < 0) return false; args.splice(i, 1); return true }
 const widget = flag('-w')
 const wholeRoute = flag('-r')
@@ -38,14 +41,16 @@ if (flag('-a')) loadVera('agent/AgentAlign').setAlignEnabled(true)
 const prompts = fs.readFileSync(promptFile, 'utf8').split('\n')
   .filter(l => l.trim() && !l.startsWith('#')).map(l => l.split('\t')).filter(([label]) => !args.length || args.includes(label))
 
-async function deepseek(system, user, maxTokens, json, think = false) {
+// The last reply's finish reason and token counts, for the record of each hole call (asks.jsonl).
+async function deepseek(system, user, maxTokens, json, think = false, temperature = 0, meta = null) {
   const res = await fetch('https://api.deepseek.com/chat/completions', {method: 'POST',
     headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.ARKESTR_API_KEY},
-    body: JSON.stringify(Object.assign({model: 'deepseek-flash', stream: false, temperature: 0, max_tokens: maxTokens,
+    body: JSON.stringify(Object.assign({model: 'deepseek-flash', stream: false, temperature, max_tokens: maxTokens,
       thinking: {type: think ? 'enabled' : 'disabled'}, messages: [{role: 'system', content: system}, {role: 'user', content: user}]},
       think ? {reasoning_effort: 'low'} : {}, json ? {response_format: {type: 'json_object'}} : {}))})
   const body = await res.json()
   if (!res.ok) throw Error('DeepSeek HTTP ' + res.status + ' ' + JSON.stringify(body).slice(0, 200))
+  if (meta) Object.assign(meta, {model: body.model, finish: body.choices[0].finish_reason, usage: body.usage})
   return body.choices[0].message.content
 }
 
@@ -74,6 +79,24 @@ function liveBlocks() {
 if (wholeRoute) liveBlocks()
 const route = loadVera('agent/VeraBuildRoute')
 
+// One hole writer's call, recorded whole in log.asks in the order it was made, with the hole and fill events between them
+// (asks.jsonl): which reply was kept is read from those events afterwards (vera-tuning's export).
+async function asked(log, task, system, user, budget, think) {
+  const meta = {}
+  const t = Date.now()
+  const entry = {kind: 'ask', task, seq: log.seq++, temperature: holeTemperature, budget, think, system, user}
+  try {
+    entry.reply = await deepseek(system, user, budget, false, think, holeTemperature, meta)
+    return entry.reply
+  } catch (e) {
+    entry.error = e.message
+    throw e
+  } finally {
+    Object.assign(entry, meta, {ms: Date.now() - t})
+    log.asks.push(entry)
+  }
+}
+
 function host(log) {
   const h = new AgentHost()
   h.askPlan = async (system, user, onText, think) => { const t = Date.now(); const text = await deepseek(system, user, think ? 6000 : 1500, true, think); log.planMs = Date.now() - t; onText(text); return text }
@@ -89,23 +112,31 @@ function host(log) {
   const calls = new BlockCalls()
   if (process.env.EXA_API_KEY) calls.search = search
   calls.content = (system, user, budget) => deepseek(system, user, budget, false)
-  calls.hole = (system, user) => deepseek(system, user, 500, false)
-  h.fillBlocks = request => fillSections(request, calls)
+  calls.hole = (system, user) => asked(log, 'catalogue-hole', system, user, 500, false)
+  // What the catalogue holes ended as: the bodies kept, after the asks recorded before it.
+  h.fillBlocks = async request => {
+    const fill = await fillSections(request, calls)
+    log.asks.push({kind: 'fill', seq: log.seq++, bodies: Object.fromEntries(fill.holeBodies || new Map()), note: fill.holesNote || ''})
+    return fill
+  }
   h.language = language
   h.surfaceGuide = surfaceGuide
   h.worldGuide = worldGuide
   // Every written hole and how it ended (agent/AgentHole.ets), for tools/vera-harness/hole-report.py.
-  h.onHole = r => (log.holes = log.holes || []).push(Object.assign({}, r))
+  h.onHole = r => {
+    (log.holes = log.holes || []).push(Object.assign({}, r))
+    log.asks.push(Object.assign({kind: 'hole', seq: log.seq++}, r))
+  }
   // AGENT_ANSWER=other picks an answer other than the suggested one, to exercise drawing the plan again; else the default.
   h.ask = async q => process.env.AGENT_ANSWER === 'other' ? (q.fallback === 0 ? 1 : 0) : null
-  h.askCode = async (system, user, budget, think) => { const reply = await deepseek(system, user, budget, false, think); (log.code = log.code || []).push(reply); return reply }
+  h.askCode = async (system, user, budget, think) => { const reply = await asked(log, 'section', system, user, budget, think); (log.code = log.code || []).push(reply); return reply }
   return h
 }
 
 async function one([label, prompt]) {
   const dir = path.join(out, label)
   fs.mkdirSync(dir, {recursive: true})
-  const log = {}
+  const log = {asks: [], seq: 0}
   const started = Date.now()
   let r
   let o = null
@@ -124,6 +155,7 @@ async function one([label, prompt]) {
   if (log.code) fs.writeFileSync(path.join(dir, 'custom-replies.txt'), log.code.join('\n\n======== next attempt ========\n\n'))
   fs.writeFileSync(path.join(dir, 'holes.jsonl'), (log.holes || []).map(h => JSON.stringify(Object.assign({label}, h)) + '\n').join(''))
   fs.writeFileSync(path.join(dir, 'program.vera'), c.source || '')
+  fs.writeFileSync(path.join(dir, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label}, a)) + '\n').join(''))
   const fill = r.blockFill
   const result = {label, prompt, widget, served: r.vbc2.length > 0, recorded: r.record !== null && r.record !== undefined, note: r.note, errors: r.errors, blocks: r.blocks,
     sketchMs: c.sketchMs, jevMs: c.jevMs, searchMs: fill ? fill.searchMs : -1, contentMs: fill ? fill.contentMs : 0,
@@ -141,6 +173,9 @@ async function one([label, prompt]) {
 }
 
 ;(async () => {
+  // The language the section writer is shown, once per run: what a short prompt leaves out of each section's system prompt.
+  fs.mkdirSync(out, {recursive: true})
+  fs.writeFileSync(path.join(out, 'language.txt'), language)
   const queue = prompts.slice()
   await Promise.all(Array.from({length: Math.min(jobs, queue.length)}, async () => { while (queue.length) await one(queue.shift()) }))
 })()
