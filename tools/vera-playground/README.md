@@ -106,3 +106,27 @@ matching, uncertainty, and failed providers.
 
 See [OpenHarmony integration](../../native/local-jev/README.md) for the
 embedded build, C ABI verification, and the app call sites.
+
+## Run the shared Qwen prototype on a Mac
+
+The [19.7 MB archive](models/vera-qwen-shared-q8-macos-arm64.zip) includes the
+Apple Silicon CLI, the Qwen tokenizer, the compressed embedding table, and a
+sample request. The CLI uses the same table for UI selection and Vera formula
+generation.
+
+Run these commands from the repository root.
+
+```sh
+unzip tools/vera-playground/models/vera-qwen-shared-q8-macos-arm64.zip -d .local-jev
+cd .local-jev/vera-qwen-shared-q8-macos-arm64
+./local-jev-shared bundle < example.jsonl
+```
+
+The example returns `(billAmount * (tipPercent / 100))`. On an M4 Pro, the
+median warm formula call took 0.30 ms. In the replay, 513 of 603 formulas passed
+the Vera VM numeric checks, including one of three formulas from a saved app plan.
+The UI scorer reproduced 45 of 45 decisions from the earlier Qwen scorer.
+
+The standalone CLI accepts framed Jev-shaped requests. The browser playground
+and OpenHarmony build still use Laya-compatible bundles. Full Vera code
+generation and phone timing remain open.
