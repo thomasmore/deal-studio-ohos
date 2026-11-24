@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const Module = require('node:module')
 const file = path.join(__dirname, 'texture-renderer-check.js')
-let source = fs.readFileSync(file, 'utf8')
+let source = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
 source = source.replace('main().catch(error => { console.error(error.stack || error); process.exitCode = 1 })',
   'module.exports = {fixture, body, world, theme, resolveTheme, T, L}')
 source = source.replace('const made = make()\n        resources.push(made)', `const made = make()

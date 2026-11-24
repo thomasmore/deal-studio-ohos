@@ -1,5 +1,11 @@
 # Changelog
 
+## Harness tests refactoring
+
+- Added `tools/vera-harness/run-all.js` and `manifest.js`: one entry point that discovers checks and suites, groups them by family, and supports filtering, parallel jobs, timeouts, JSON reports and platform skips.
+- Consolidated 12 template-block checks into `template-suite.js` with a shared `template-fixture.js`, deleting the originals.
+- Made the harness reliable on Windows (CRLF-normalized fixtures and sources, path normalization, checksum tolerance, Python fallback).
+
 ## Worker Thread backend: Stage 1
 
 ### Step 1

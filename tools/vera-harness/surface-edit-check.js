@@ -9,11 +9,12 @@ const {loadVera} = require('./source-loader')
 const {AgentHost} = loadVera('agent/AgentHost')
 const E = loadVera('agent/AgentSurfaceEdit')
 
-const game = fs.readFileSync(path.join(__dirname, 'examples/surface-catch.vera'), 'utf8')
-const scene = fs.readFileSync(path.join(__dirname, 'examples/surface-roulette.vera'), 'utf8')
-const guide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-surface-skill.txt'), 'utf8')
-const dice = fs.readFileSync(path.join(__dirname, 'examples/world-dice.vera'), 'utf8')
-const worldGuide = fs.readFileSync(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-world-skill.txt'), 'utf8')
+const lf = p => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n')
+const game = lf(path.join(__dirname, 'examples/surface-catch.vera'))
+const scene = lf(path.join(__dirname, 'examples/surface-roulette.vera'))
+const guide = lf(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-surface-skill.txt'))
+const dice = lf(path.join(__dirname, 'examples/world-dice.vera'))
+const worldGuide = lf(path.join(__dirname, '../../entry/src/main/resources/rawfile/vera-world-skill.txt'))
 const edit = (search, replace) => '<<<<<<< SEARCH\n' + search + '\n=======\n' + replace + '\n>>>>>>> REPLACE'
 
 function host(replies) {

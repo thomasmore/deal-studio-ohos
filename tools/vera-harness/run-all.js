@@ -7,7 +7,6 @@
 //   node tools/vera-harness/run-all.js --list
 //   node tools/vera-harness/run-all.js --family=runtime
 //   node tools/vera-harness/run-all.js --filter=host --jobs=2 --json=/tmp/report.json
-
 const fs = require('node:fs')
 const path = require('node:path')
 const {spawn} = require('node:child_process')
@@ -16,18 +15,17 @@ const manifest = require('./manifest')
 const dir = __dirname
 const root = path.resolve(dir, '../..')
 
-
 function usage() {
   console.log([
     'usage: node tools/vera-harness/run-all.js [options]',
     '',
-    '  --list             list the checks that would run. with their family',
+    '  --list             list the checks that would run, with their family',
     '  --family=NAME      run one family (runtime, visual, widget, prompt, agent,',
     '                     composition, live, ui, compiler, other)',
-    '  --filter==TEXT     run only checks whose file name contains TEXT',
+    '  --filter=TEXT      run only checks whose file name contains TEXT',
     '  --jobs=N           run up to N checks at once (default 1; temp files may collide)',
     '  --timeout=MS       per-check timeout (default 300000)',
-    '  --fail-fast       stop after the first failure',
+    '  --fail-fast        stop after the first failure',
     '  --json=PATH        write a JSON report',
     '  --verbose          print each check\'s full output',
     '  --help             show this message',
@@ -64,21 +62,21 @@ function familyOf(name) {
 }
 
 function discover() {
-    return fs.readdirSync(dir)
-      .filter(name => name.endsWith('-check.js'))
-      .sort()
-      .map(name => {
-        const override = manifest.overrides[name] || {}
-        return {
-          name,
-          family: familyOf(name),
-          args: override.args || [],
-          env: override.env || [],
-          skipOn: override.skipOn || [],
-          reason: override.reason || '',
-          timeout: override.timeout || null,
-        }
-      })
+  return fs.readdirSync(dir)
+    .filter(name => name.endsWith('-check.js') || name.endsWith('-suite.js'))
+    .sort()
+    .map(name => {
+      const override = manifest.overrides[name] || {}
+      return {
+        name,
+        family: familyOf(name),
+        args: override.args || [],
+        env: override.env || [],
+        skipOn: override.skipOn || [],
+        reason: override.reason || '',
+        timeout: override.timeout || null,
+      }
+    })
 }
 
 function skipReason(entry) {
@@ -179,8 +177,8 @@ async function main() {
       if (failed) {
         console.log('FAIL ' + entry.name + ' (' + result.ms + 'ms, exit ' + result.code + ')')
         if (opts.verbose) {
-        if (result.out.trim()) console.log(result.out.trimEnd())
-        if (result.err.trim()) console.log(result.err.trimEnd())
+          if (result.out.trim()) console.log(result.out.trimEnd())
+          if (result.err.trim()) console.log(result.err.trimEnd())
         } else {
           const hint = failureHint(result)
           if (hint) console.log('     ' + hint.replace(/\n/g, '\n     '))
@@ -213,7 +211,7 @@ async function main() {
       command: process.argv.join(' '),
       summary: {passed, failed, skipped, totalMs},
       results,
-  }, null, 2) + '\n')
+    }, null, 2) + '\n')
     console.log('report: ' + opts.json)
   }
 
