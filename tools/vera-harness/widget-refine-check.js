@@ -497,7 +497,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
   const {OperationController, throwIfCancelled} = loadVera('OperationCancellation')
   const {GenerateRequest, GenerateResult} = loadVera('LlamaEngine')
   const names = ['aboutToAppear', 'makeWidgetAlone', 'doServerGenerate', 'commitSave', 'widgetSaveState', 'checkWidgetSave', 'hasResult', 'versionCount',
-    'modelRequestHistory', 'prepareRequest', 'acceptRequest', 'doRefine', 'refineWithModel', 'startAttemptOne', 'runAttempt', 'callModel']
+    'modelRequestHistory', 'prepareRequest', 'markMetricsPartial', 'acceptRequest', 'doRefine', 'refineWithModel', 'startAttemptOne', 'runAttempt', 'callModel']
   const methods = names.map(name => {
     const match = pageSource.match(new RegExp('^  (?:private )?(?:async )?' + name + '\\([^\\{]*\\{[\\s\\S]*?^  \\}', 'm'))
     assert(match, 'GeneratePage.' + name + ' must exist')
@@ -536,6 +536,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
       validateWidgetOffMain: async (...args) => validateWidgetRefinement(...args),
       compileVeraSource, spliceWidget, smokeRun, widgetRefinementPrompt, Curve: {EaseInOut: 'ease-in-out'},
       ...loadVera('VeraAppRefine'),
+      VersionMetrics: loadVera('ProjectStore').VersionMetrics,
       serverUrl: () => 'http://fixture.invalid', http: {RequestMethod: {POST: 'POST'}, createHttp: () => ({
         async request(url, options) { serverRequests.push({url, ...options}); assert(serverResponse); return serverResponse },
         destroy() {}
@@ -576,7 +577,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
       loadResources: async () => {}, currentBase: () => ({}), ratePerMillion: () => 0,
       modeLabel: () => 'fixture', originLabel: () => '', copyMetrics: metrics => metrics,
       beginOperation: () => new OperationController(), resetRunMetrics() { this.attempt = 1; this.attempts = [] },
-      beginMetricAttempt() {}, recordMetricResult() {}, addToProgram() {}, traceEnd() {}, currentRun: () => null,
+      countModelCall() {}, beginMetricAttempt() {}, recordMetricResult() {}, addToProgram() {}, traceEnd() {}, currentRun: () => null,
       closeRun() {}, grammar: '', skillText: '',
       metricWork: (run, work) => work(), finishMetrics() {}, startRun() {}
     })

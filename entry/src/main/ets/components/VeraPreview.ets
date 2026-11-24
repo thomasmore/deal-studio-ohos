@@ -1350,11 +1350,7 @@ export struct VeraPreview {
       StageTrace.emit(this.traceOwner, 'TICK_DELIVERED', { tickerId: id, action: current.action,
         class: current.interval >= SLOW_TICK_MS ? 'slow' : 'fast' })
       if (current.interval >= SLOW_TICK_MS) {
-        let next = this.captureFieldAction(current.action, numberPayload(Math.round(elapsed)))
-        next.traceKind = 'TICK'
-        next.tickerId = id
-        next.tickerConfig = current
-        this.enqueueFieldAction(next)
+        this.dispatchTickerAction(id, current, numberPayload(Math.round(elapsed)))
       } else {
         let post = new PreviewPost('TICK')
         post.key = id
@@ -1367,6 +1363,7 @@ export struct VeraPreview {
 
   private dispatchTickerAction(id: string, config: TimerConfig, payload: InputPayload): void {
     let next = this.captureFieldAction(config.action, payload)
+    next.traceKind = 'TICK'
     next.tickerId = id
     next.tickerConfig = config
     this.enqueueFieldAction(next)
@@ -2714,6 +2711,11 @@ export struct VeraPreview {
   private fieldActionCurrent(next: FieldAction): boolean {
     if (next.generation !== this.effectGeneration || this.transitioning || this.disposed || this.previewOnly) {
       StageTrace.emit(this.traceOwner, 'FIELD_ACTION_DROP', { action: next.action, reason: 'effectGeneration' })
+      return false
+    }
+    if (next.tickerConfig !== null &&
+        (this.timerConfigs.get(next.tickerId) !== next.tickerConfig || next.action !== next.tickerConfig!.action)) {
+      StageTrace.emit(this.traceOwner, 'FIELD_ACTION_DROP', { action: next.action, reason: 'tickerStopped' })
       return false
     }
     for (let i = 0; i < next.dependencies.length; i++) {
