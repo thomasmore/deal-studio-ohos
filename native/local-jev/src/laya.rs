@@ -318,7 +318,7 @@ impl Engine {
     }
     fn sequence<'a>(
         &self,
-        state: &str,
+        state_tokens: &[u32],
         key: &'a str,
         q: &'a Question,
         capped: bool,
@@ -401,17 +401,13 @@ impl Engine {
             ids.extend_from_slice(tokens);
         }
         ids.push(self.config.sep_token_id);
-        let mut state_tokens = self.tokens(state)?;
         let original_state = state_tokens.len();
         let room = self.config.max_len.saturating_sub(ids.len() + 1);
-        if state_tokens.len() > room && !capped {
+        if original_state > room && !capped {
             return Err("state_token_budget".into());
         }
-        if capped {
-            state_tokens.truncate(room);
-        }
-        let kept_state = state_tokens.len();
-        ids.extend(state_tokens);
+        let kept_state = original_state.min(room);
+        ids.extend_from_slice(&state_tokens[..kept_state]);
         ids.push(self.config.sep_token_id);
         if ids.len() > self.config.max_len {
             return Err("option_token_budget".into());
@@ -473,10 +469,11 @@ impl Engine {
             return Err("unsupported_custom_noul_labels".into());
         }
         // Preflight every question before model execution.
+        let state_tokens = self.tokens(&request.state)?;
         let mut sequences = request
             .questions
             .iter()
-            .map(|(key, q)| self.sequence(&request.state, key, q, capped))
+            .map(|(key, q)| self.sequence(&state_tokens, key, q, capped))
             .collect::<Result<Vec<_>, _>>()?;
         if sequences.iter().map(|q| q.ids.len()).sum::<usize>() > CALL_TOKENS {
             return Err("call_token_budget".into());
@@ -663,11 +660,12 @@ mod option_budget_tests {
             expected.extend(engine.tokens(&format!(" {key}: {text}")).unwrap());
         }
         expected.push(config.sep_token_id);
-        expected.extend(engine.tokens("small state").unwrap());
+        let state_tokens = engine.tokens("small state").unwrap();
+        expected.extend_from_slice(&state_tokens);
         expected.push(config.sep_token_id);
         for capped in [true, false] {
             let prepared = engine
-                .sequence("small state", "normal", &normal, capped)
+                .sequence(&state_tokens, "normal", &normal, capped)
                 .unwrap();
             assert_eq!(prepared.ids, expected);
             assert_eq!(prepared.markers, markers);
@@ -694,7 +692,8 @@ mod option_budget_tests {
                 .collect(),
         };
         let state = " long state".repeat(1200);
-        let prepared = engine.sequence(&state, "wide", &wide, true).unwrap();
+        let state_tokens = engine.tokens(&state).unwrap();
+        let prepared = engine.sequence(&state_tokens, "wide", &wide, true).unwrap();
         assert_eq!(
             prepared.options,
             wide.criteria.keys().cloned().collect::<Vec<_>>()
@@ -718,7 +717,7 @@ mod option_budget_tests {
             json!({
                 "instruction_tokens_dropped": original_instruction - (config.head_max_len - 65 * 3),
                 "option_tokens_dropped": original_options - 65 * 2,
-                "state_tokens_dropped": engine.tokens(&state).unwrap().len() - (config.max_len - head_end - 2),
+                "state_tokens_dropped": state_tokens.len() - (config.max_len - head_end - 2),
                 "truncated": true, "option_budget_repaired": true,
             })
         );
@@ -734,7 +733,10 @@ mod option_budget_tests {
             );
         }
         assert_eq!(
-            engine.sequence(&state, "wide", &wide, false).err().unwrap(),
+            engine
+                .sequence(&state_tokens, "wide", &wide, false)
+                .err()
+                .unwrap(),
             "option_token_budget"
         );
         let questions: BTreeMap<_, _> = (0..9).map(|i| (
