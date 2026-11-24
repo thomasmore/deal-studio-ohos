@@ -111,3 +111,35 @@ there is no cloud selector fallback.
 Verify HAP loading, cancellation and warm inference on the target phone before
 relying on the integrated experimental route. Production remains separately gated
 on human evaluation, calibration and release acceptance.
+
+## Build the experimental Candle scheduler
+
+The optional scheduler distributes token rows across Rayon workers. It uses the
+same Q4 dot product for each output element. Build the patched host CLI from the
+repository root. It takes the same bundle and arguments as the stock CLI.
+
+```sh
+tools/local-jev/build-candle-patched.sh
+native/local-jev/target/candle-scheduling/release/local-laya \
+  --bundle "$BUNDLE" --diagnostic-scores --framed
+```
+
+To use this build in the playground, set `VERA_LAYA_CLI` to the absolute
+path of the patched CLI before starting the server.
+
+For an embedded OpenHarmony archive, use the linker configuration from the
+OpenHarmony build above and an absolute path for `BUNDLE`.
+
+```sh
+LAYA_BUNDLE_DIR="$BUNDLE" tools/local-jev/build-candle-patched.sh \
+  --target aarch64-unknown-linux-ohos --lib
+```
+
+The patched archive is in
+`native/local-jev/target/candle-scheduling/aarch64-unknown-linux-ohos/release/liblocal_jev.a`.
+Use an ordinary release build for the stock control.
+
+In a matched M4 Pro replay of seven Cycle 2 requests, the warm total fell from
+19.59 s to 7.28 s. All 45 choices, logits, and truncation records matched.
+The median for one 64-token choice fell from 116 ms to 39 ms.
+The patched phone run is pending.
