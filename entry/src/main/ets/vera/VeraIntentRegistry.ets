@@ -24,6 +24,7 @@
 
 import { insightIntentDriver } from '@kit.AbilityKit'
 import { hilog } from '@kit.PerformanceAnalysisKit'
+import { trace } from './VeraTiming'
 
 const DOMAIN = 0x0000
 
@@ -142,6 +143,11 @@ async function loadRegistryRead(): Promise<number> {
       if (entry !== null) { entries.push(entry!) }
     }
     cache = entries
+    // What the system answered, whole, once a process: the host's lookups (tools/vera-harness/host-lookup.js) read it
+    // instead of insightIntentDriver, which only a phone has.
+    let dump: Record<string, Object> = {}
+    dump['infos'] = infos as Object
+    trace('registry', dump)
     hilog.info(DOMAIN, 'VERA', 'VERA-REGISTRY loaded ' + cache.length.toString() +
       ' of ' + infos.length.toString() + ' installed intents')
   } catch (e) {

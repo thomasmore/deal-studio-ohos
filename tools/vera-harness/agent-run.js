@@ -2,7 +2,7 @@
 // with fetch for DeepSeek ($ARKESTR_API_KEY), Jev ($TYPESAFE_API_KEY) and Exa ($EXA_API_KEY, optional: without it a
 // request whose sections need real data is refused, as on a phone with no search key).
 //
-//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [--lookups FILE] [label ...]
+//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [--lookups FILE | --host-lookup DIR] [label ...]
 //
 // Each written hole goes to OUTDIR/<label>/holes.jsonl, which tools/vera-harness/hole-report.py groups, and every call of a hole
 // writer, whole, to OUTDIR/<label>/asks.jsonl with the hole and fill events that say which reply was kept (-t sets their temperature). -w builds each as a
@@ -13,6 +13,11 @@
 'use strict'
 const fs = require('node:fs')
 const path = require('node:path')
+// --host-lookup DIR: the phone's function lookup run on the host (host-lookup.js) from DIR, what was pulled from the phone
+// (models/, vera/ caches, intent-registry.json). Read before anything is loaded: its stand-ins must be in place first.
+const hostLookupDir = (() => { const i = process.argv.indexOf('--host-lookup'); return i < 0 ? '' : process.argv.splice(i, 2)[1] })()
+const hostLookup = hostLookupDir ? require('./host-lookup') : null
+if (hostLookup) hostLookup.install({phoneFiles: hostLookupDir})
 const {loadVera} = require('./source-loader')
 const {AgentHost} = loadVera('agent/AgentHost')
 const {BlockCalls, fillSections} = loadVera('SectionFill')
@@ -83,7 +88,8 @@ function liveBlocks() {
   loadVera('VeraWebSearch').webSearch = search
   // The phone's SDK index is not on the host: a hole that may call the phone is shown no functions, or the phone's own
   // answers when --lookups gives them.
-  ds.discoveryToolResult = async (name, query, round, both) => cachedLookup(requestLog.getStore(), name, query, Boolean(both))
+  // With --host-lookup the app's own discoveryToolResult answers (host-lookup.js calls it): replacing it would loop.
+  if (!hostLookup) ds.discoveryToolResult = async (name, query, round, both) => cachedLookup(requestLog.getStore(), name, query, Boolean(both))
   ds.deepseek.extractTemplateContent = async (system, user, maxTokens) => ds.extractVeraSource(await deepseek(system, user, maxTokens, false))
 }
 if (wholeRoute) liveBlocks()
@@ -107,7 +113,12 @@ async function asked(log, task, system, user, budget, think) {
   }
 }
 
-function cachedLookup(log, tool, query, both) {
+async function cachedLookup(log, tool, query, both) {
+  if (hostLookup) {
+    const text = await hostLookup.find(tool, query, both)
+    if (log) log.asks.push({kind: 'lookup', seq: log.seq++, tool, query, both, hit: true, source: 'host'})
+    return text
+  }
   if (lookups === null) return ''
   const text = lookups.get(lookupKey(tool, query, both))
   if (log) log.asks.push({kind: 'lookup', seq: log.seq++, tool, query, both, hit: text !== undefined})
@@ -131,12 +142,12 @@ function host(log) {
   calls.content = (system, user, budget) => deepseek(system, user, budget, false)
   calls.hole = (system, user) => asked(log, 'catalogue-hole', system, user, 500, false)
   // As the phone asks them (SectionFillApp.ets, AgentAppHost.ets).
-  calls.sdkContext = async prompt => cachedLookup(log, 'find_sdk_function', prompt.substring(0, 300), false).substring(0, 2500)
-  if (lookups !== null) {
+  calls.sdkContext = async prompt => (await cachedLookup(log, 'find_sdk_function', prompt.substring(0, 300), false)).substring(0, 2500)
+  if (lookups !== null || hostLookup) {
     h.lookup = async need => {
       const asked = need.substring(0, 300)
-      return 'find_intent_function:\n' + cachedLookup(log, 'find_intent_function', asked, true) +
-        '\nfind_sdk_function:\n' + cachedLookup(log, 'find_sdk_function', asked, false)
+      const intent = await cachedLookup(log, 'find_intent_function', asked, true)
+      return 'find_intent_function:\n' + intent + '\nfind_sdk_function:\n' + await cachedLookup(log, 'find_sdk_function', asked, false)
     }
   }
   // What the catalogue holes ended as: the bodies kept, after the asks recorded before it.
