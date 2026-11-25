@@ -223,7 +223,8 @@ async function refineAll(dir, label, prompt, source, record) {
       try {
         const made = await editProgram(source, change, prompt, h)
         const ok = made.source.length > 0
-        const does = ok ? await jevDoes(change, lineChanges(source, made.source)) : false
+        // The whole program after the change: lines taken out and put in lost their order and read as broken code.
+        const does = ok ? await jevDoes(change, made.source) : false
         outcome.program = {ok, does, edits: made.edits, rounds: made.rounds, attempts: made.attempts, failed: made.failed}
         log.asks.push({kind: 'edit', seq: log.seq++, route: 'program', change, ok, does, edits: made.edits, rounds: made.rounds,
           attempts: made.attempts, failed: made.failed, source: made.source})
