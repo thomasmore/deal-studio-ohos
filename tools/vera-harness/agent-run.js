@@ -55,6 +55,8 @@ const impossibleCount = Number(option('--impossible', '0'))
 const homeWidget = (() => { const i = args.indexOf('--home-widget'); if (i < 0) return false; args.splice(i, 1); return true })()
 // --widgets-for RUNDIR: no agent: the widget made for the program an earlier run built (RUNDIR/<label>/program.vera).
 const widgetsFor = option('--widgets-for', '')
+// --rewrites-for RUNDIR: no agent: each change of RUNDIR's refines that neither way made, written again whole (rewriteProgram).
+const rewritesFor = option('--rewrites-for', '')
 
 const lookups = lookupFile ? new Map(Object.entries(JSON.parse(fs.readFileSync(lookupFile, 'utf8')))) : null
 const lookupKey = (tool, query, both) => tool + '\u0000' + query + '\u0000' + (both ? '1' : '0')
@@ -213,6 +215,47 @@ async function proposeChanges(prompt, source, n, m) {
 }
 
 const {writeWidget} = loadVera('agent/AgentWidget')
+const {checkPlainProgram, CHANGE_TOKENS} = loadVera('agent/AgentSurfaceEdit')
+const {repairProgram} = loadVera('agent/AgentRepair')
+const {sourceIn} = loadVera('agent/AgentSurface')
+
+const REWRITE_RULES = 'Edits of this program could not make the change. Write the whole program again with the change made, and ' +
+  'nothing else changed: keep every other behaviour, the look, and the names and types of the state fields that stay. Call ' +
+  'only phone targets the program already calls or that are among the phone functions found. Answer with the whole program ' +
+  'and nothing before or after it.'
+
+/**
+ * The refine's last resort when neither its edits nor its section changed it: the whole program written again
+ * (GeneratePage.ets's refineWithModel), asked as the phone asks the local model -- no tools: the phone functions for the
+ * change are looked up first and put in the request, as a section's are. Checked as an edit is (checkPlainProgram, a
+ * repair by edits when it fails) and read by Jev. Every call is recorded with task program-rewrite.
+ */
+async function rewriteProgram(source, change, history, h) {
+  const out = {source: '', written: '', attempts: 0, rounds: 0, failed: '', does: false}
+  const found = h.lookup ? await h.lookup(change) : ''
+  const asked = 'The program:\n' + source + '\n\nIt was made for: ' + history + '\n\nThe change asked for now: ' + change +
+    (found ? '\n\nPhone functions found (the only targets the program may call besides those it calls):\n' + found : '') +
+    '\n\n' + REWRITE_RULES
+  for (let attempt = 0; attempt < 2 && !out.source; attempt++) {
+    out.attempts = attempt + 1
+    const reply = await h.askCode(h.language, asked, CHANGE_TOKENS, attempt > 0)
+    if (!reply || !reply.trim()) { out.failed = 'no answer'; continue }
+    let current = sourceIn(reply)
+    if (attempt === 0 || !out.written) out.written = current
+    let problem = checkPlainProgram(current)
+    if (problem) {
+      const repaired = await repairProgram(current, problem, history + '\n\nThe change: ' + change, h.language, h.askCode, checkPlainProgram)
+      out.rounds += repaired.rounds
+      if (repaired.source) { current = repaired.source; problem = '' } else problem = repaired.failed
+    }
+    if (problem) { out.failed = problem.split('\n')[0]; continue }
+    out.written = sourceIn(reply)
+    out.source = current
+    out.failed = ''
+  }
+  if (out.source) out.does = await jevDoes(change, out.source)
+  return out
+}
 
 const WIDGET_PROMPT = 'You suggest what a person would want a home-screen widget of their phone app to show at a glance. ' +
   'Write it the way people type it after "The home-screen widget should show: " -- 3 to 12 plain English words about this ' +
@@ -285,11 +328,51 @@ async function refineOne(dir, label, at, history, source, record, item, depth) {
         if (ok && !impossible) next = {source: made.source, record: made.composition}
       } catch (e) { outcome.section = {error: e.message} }
     }
+    // Neither way made it, and neither said it cannot be made: the whole program is written again, as the app then does.
+    const p = outcome.program || {}, s = outcome.section || {}
+    if (!impossible && !(p.ok && p.does) && !s.ok && !p.cannot && !s.cannot) {
+      log.task = 'program-rewrite'
+      try {
+        const made = await rewriteProgram(source, change, history, host(log))
+        outcome.rewrite = {ok: made.source.length > 0, does: made.does, attempts: made.attempts, rounds: made.rounds, failed: made.failed}
+        log.asks.push({kind: 'rewrite', seq: log.seq++, change, depth, ok: made.source.length > 0, does: made.does, attempts: made.attempts,
+          rounds: made.rounds, failed: made.failed, written: made.written, source: made.source, base: source})
+      } catch (e) { outcome.rewrite = {error: e.message} }
+    }
   })
   const where = path.join(dir, 'refine', at)
   fs.mkdirSync(where, {recursive: true})
   fs.writeFileSync(path.join(where, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt: history, change}, a)) + '\n').join(''))
   return {outcome, next}
+}
+
+/**
+ * --rewrites-for: the changes an earlier run's refines did not make either way (and did not refuse), each written again whole
+ * from the program and history it was asked of, recorded in OUTDIR/<label>/refine/<at>/asks.jsonl as a refine is.
+ */
+async function rewritesOf(dir, label) {
+  const refineDir = path.join(rewritesFor, label, 'refine')
+  if (!fs.existsSync(refineDir)) return
+  let done = 0, made = 0
+  for (const at of fs.readdirSync(refineDir).filter(d => /^\d+(\.\d+)*$/.test(d)).sort()) {
+    const file = path.join(refineDir, at, 'asks.jsonl')
+    if (!fs.existsSync(file)) continue
+    const events = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+    const edits = events.filter(e => e.kind === 'edit')
+    const program = edits.find(e => e.route === 'program')
+    if (!program || program.impossible || (program.ok && program.does) || program.cannot) continue
+    if (edits.some(e => e.route === 'section' && (e.ok || e.cannot))) continue
+    const log = {asks: [], seq: 0, task: 'program-rewrite'}
+    const out = await requestLog.run(log, () => rewriteProgram(program.base, program.change, program.prompt, host(log)))
+    log.asks.push({kind: 'rewrite', seq: log.seq++, change: program.change, depth: program.depth || 0, ok: out.source.length > 0, does: out.does,
+      attempts: out.attempts, rounds: out.rounds, failed: out.failed, written: out.written, source: out.source, base: program.base})
+    const where = path.join(dir, 'refine', at)
+    fs.mkdirSync(where, {recursive: true})
+    fs.writeFileSync(path.join(where, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt: program.prompt, change: program.change}, a)) + '\n').join(''))
+    done++
+    if (out.source && out.does) made++
+  }
+  if (done) console.log(label.padEnd(24), 'rewrite ', made, 'of', done, 'made')
 }
 
 /** Each proposed change made both ways; each one made is followed by --chain more, each on the program before it. */
@@ -335,6 +418,7 @@ async function runOne(log, [label, prompt]) {
     if (!source) return console.log(label.padEnd(24), 'SKIP     no program in ' + widgetsFor)
     return widgetOne(dir, label, prompt, source)
   }
+  if (rewritesFor) return rewritesOf(dir, label)
   const started = Date.now()
   let r
   let o = null
