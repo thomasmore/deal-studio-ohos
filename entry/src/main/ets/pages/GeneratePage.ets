@@ -2280,6 +2280,7 @@ export struct GeneratePage {
     let composition = ''
     let how = ''
     let failed = ''
+    let cannot = ''
     try {
       if (record !== null && writtenSectionAt(record!) >= 0) {
         let changed: SectionEdit | null = await this.metricWork(run,
@@ -2292,9 +2293,10 @@ export struct GeneratePage {
           how = 'by changing the section'
         } else if (changed !== null) {
           failed = changed!.written.failed
+          cannot = changed!.written.cannot
         }
       }
-      if (source.length === 0) {
+      if (source.length === 0 && cannot.length === 0) {
         let made: SurfaceEdit = await this.metricWork(run, (): Promise<SurfaceEdit> => editProgram(base, ask, this.requestHistory, host))
         if (run !== this.runId || operation.isCancelled()) { return }
         if (made.source.length > 0) {
@@ -2303,6 +2305,7 @@ export struct GeneratePage {
           how = made.edits > 0 ? 'by ' + made.edits.toString() + ' edit(s)' : 'written again'
         } else {
           failed = (failed.length > 0 ? failed + '; ' : '') + made.failed
+          cannot = made.cannot
         }
       }
     } catch (e) {
@@ -2313,8 +2316,18 @@ export struct GeneratePage {
     fields['change'] = ask
     fields['how'] = how
     fields['failed'] = failed
+    fields['cannot'] = cannot
     fields['source'] = source
     trace('refine-edit', fields)
+    if (source.length === 0 && cannot.length > 0) {
+      // Said it cannot: the app stays as it was, with the sentence for the person; a whole rewrite would only fake it.
+      this.generating = false
+      this.totalMs = Date.now() - this.genStartTime
+      this.markMetricsPartial()
+      this.status = cannot
+      this.finishMetrics(run)
+      return
+    }
     if (source.length === 0) {
       // Neither way passed: the whole rewrite, in this same operation.
       this.rewriteNext = true

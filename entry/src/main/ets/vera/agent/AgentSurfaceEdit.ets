@@ -45,7 +45,11 @@ const CHANGE_RULES: string = 'Make the change asked for, and nothing else: keep 
   '>>>>>>> REPLACE\n' +
   'Each SEARCH part must match exactly one place in the program: copy whole lines, with enough of them to be unique. ' +
   'A new field of AppState is added to the class, to init() and to every object literal that builds an AppState. ' +
-  'Write nothing outside the blocks. Only when most of the program has to change, answer with the whole program instead.'
+  'Write nothing outside the blocks. Only when most of the program has to change, answer with the whole program instead. ' +
+  'If the change cannot be made on this phone at all -- it needs a live camera picture, the person\'s location, a sound or ' +
+  'notification while the app is closed, data the phone does not give the app -- answer only <cannot>one short sentence for ' +
+  'the person, in plain words about their phone and its apps: what this app cannot do, and why, and what it does instead if ' +
+  'anything; never mention the language, the program or code</cannot>, and change nothing. Never fake it.'
 
 /** For a scene: in a whole program the section's __PASSTHROUGH__ has been written out, so the guide is read with that. */
 const SCENE_IN_PROGRAM: string = '\nThe scene below is already part of a whole program: where the guide says to return only ' +
@@ -115,6 +119,8 @@ export class SurfaceEdit {
   edits: number = 0
   /** What still failed, '' when served. */
   failed: string = ''
+  /** The model's sentence for the person when it answered that the change cannot be made; '' otherwise. */
+  cannot: string = ''
   ms: number = 0
 }
 
@@ -150,6 +156,13 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
     let reply = await host.askCode!(system, asked, CHANGE_TOKENS, think)
     checkAgent(host)
     if (reply === null || reply.trim().length === 0) { out.failed = 'no answer for the change'; continue }
+    // A change the phone cannot make is said, not faked: the program stays as it was.
+    let refused = reply.match(new RegExp('^\\s*<cannot>([\\s\\S]*?)</cannot>\\s*$'))
+    if (refused !== null) {
+      out.cannot = refused[1].trim()
+      out.failed = 'cannot: ' + out.cannot
+      break
+    }
     let applied = applyRepair(source, reply)
     if (applied.source.length === 0) { out.failed = 'the edits did not apply: ' + applied.error; continue }
     let current = applied.source

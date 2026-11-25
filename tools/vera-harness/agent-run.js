@@ -182,75 +182,104 @@ const {CustomRequest, verifyRequest, undone} = loadVera('agent/AgentCustom')
 const CHANGE_PROMPT = 'You suggest changes a person would type under an app on their phone to refine it, after seeing it ' +
   'run. Each is one short request in plain English, 3 to 12 words, the way people type: a small new feature, a different ' +
   'behaviour, a different look or wording, or something removed. Each must be something this app could do on a phone, about ' +
-  'this app, and different from the others. Reply with JSON only: {"changes": ["...", "..."]}'
+  'this app, and different from the others. Besides them, write the number of impossible ones asked for: requests a person ' +
+  'might well type about this app that no app on a phone can do this way -- a live camera picture inside it, the person\'s ' +
+  'location or nearby places, a sound or notification while the app is closed, reading other apps or the web without being ' +
+  'asked. Reply with JSON only: {"changes": ["...", "..."], "impossible": ["..."]}'
 
-/** Changes a person might type under the program, from DeepSeek (not trained on). */
-async function proposeChanges(prompt, source, n) {
+// --chain D: after a change one way made, D more changes in a row, each on the program the one before left.
+const chainDepth = Number(option('--chain', '0'))
+// --impossible M: M of the changes for each built screen are ones no phone app can make (the right answer is a refusal).
+const impossibleCount = Number(option('--impossible', '0'))
+
+/** Changes a person might type under the program, from DeepSeek (not trained on): [{change, impossible}]. */
+async function proposeChanges(prompt, source, n, m) {
   const reply = await deepseek(CHANGE_PROMPT, 'The app was made for: ' + prompt + '\n\nIts program:\n' + source +
-    '\n\nSuggest ' + n + ' changes.', 400, true, false, 0.9)
-  try { return (JSON.parse(reply).changes || []).filter(c => typeof c === 'string' && c.trim()).slice(0, n) } catch (e) { return [] }
+    '\n\nSuggest ' + n + ' changes and ' + m + ' impossible ones.', 600, true, false, 0.9)
+  try {
+    const parsed = JSON.parse(reply)
+    const ok = list => (list || []).filter(c => typeof c === 'string' && c.trim())
+    return ok(parsed.changes).slice(0, n).map(change => ({change, impossible: false}))
+      .concat(ok(parsed.impossible).slice(0, m).map(change => ({change, impossible: true})))
+  } catch (e) { return [] }
 }
 
-/** Whether Jev reads `body` (the edits, or the new section) as making the change. */
+/** Whether Jev reads `body` (the program after the change, or the new section) as making the change. */
 async function jevDoes(change, body) {
   const request = Object.assign(new CustomRequest(), {needs: [change]})
   const answer = await host({asks: [], seq: 0}).askJev(verifyRequest(request, body))
   return undone(request, answer).length === 0
 }
 
-/** What a change did to the program, as Jev is shown it: the lines taken out and the lines put in. */
-function lineChanges(before, after) {
-  const count = text => text.split('\n').reduce((m, l) => m.set(l, (m.get(l) || 0) + 1), new Map())
-  const a = count(before), b = count(after)
-  const out = (from, to) => [...from].flatMap(([l, n]) => Array(Math.max(0, n - (to.get(l) || 0))).fill(l)).filter(l => l.trim())
-  return 'Lines taken out:\n' + out(a, b).join('\n') + '\n\nLines put in:\n' + out(b, a).join('\n')
+/**
+ * One change made both ways, every call recorded in refine/<at>/asks.jsonl. `history` is what the screen was made for
+ * with the refinements before this one, as the app keeps it (GeneratePage.ets: "Refinement:" between them). Returns the
+ * outcome and the program (and composition) a later change in the chain starts from, or null when neither way made it.
+ */
+async function refineOne(dir, label, at, history, source, record, item, depth) {
+  const {change, impossible} = item
+  const log = {asks: [], seq: 0}
+  const outcome = {at, depth, change, impossible}
+  let next = null
+  await requestLog.run(log, async () => {
+    log.task = 'program-edit'
+    try {
+      const made = await editProgram(source, change, history, host(log))
+      const ok = made.source.length > 0
+      const does = ok ? await jevDoes(change, made.source) : false
+      outcome.program = {ok, does, edits: made.edits, rounds: made.rounds, attempts: made.attempts, failed: made.failed, cannot: made.cannot}
+      log.asks.push({kind: 'edit', seq: log.seq++, route: 'program', change, impossible, depth, ok, does, edits: made.edits,
+        rounds: made.rounds, attempts: made.attempts, failed: made.failed, cannot: made.cannot, source: made.source, base: source})
+      if (ok && does && !impossible) next = {source: made.source, record: null}
+    } catch (e) { outcome.program = {error: e.message} }
+    if (record && writtenSectionAt(record) >= 0) {
+      log.task = 'section-edit'
+      log.code = []
+      try {
+        const made = await editSection(record, change, history, host(log))
+        const ok = made !== null && made.source.length > 0
+        const declined = made ? [...made.written.declined.keys()] : []
+        outcome.section = {ok, failed: made ? made.written.failed : '', cannot: made ? made.written.cannot : '', declined, attempts: made ? made.written.attempts : 0}
+        log.asks.push({kind: 'edit', seq: log.seq++, route: 'section', change, impossible, depth, ok, does: ok,
+          failed: outcome.section.failed, cannot: outcome.section.cannot, declined, attempts: outcome.section.attempts, source: ok ? made.source : '', base: source})
+        // A chain keeps the section way when it made the change: its screen still has a record.
+        if (ok && !impossible) next = {source: made.source, record: made.composition}
+      } catch (e) { outcome.section = {error: e.message} }
+    }
+  })
+  const where = path.join(dir, 'refine', at)
+  fs.mkdirSync(where, {recursive: true})
+  fs.writeFileSync(path.join(where, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt: history, change}, a)) + '\n').join(''))
+  return {outcome, next}
 }
 
-/** Each proposed change made both ways, every call recorded. */
+/** Each proposed change made both ways; each one made is followed by --chain more, each on the program before it. */
 async function refineAll(dir, label, prompt, source, record) {
-  const changes = await proposeChanges(prompt, source, refineCount)
+  const items = await proposeChanges(prompt, source, refineCount, impossibleCount)
   fs.mkdirSync(path.join(dir, 'refine'), {recursive: true})
-  fs.writeFileSync(path.join(dir, 'refine', 'changes.json'), JSON.stringify(changes, null, 1))
+  fs.writeFileSync(path.join(dir, 'refine', 'changes.json'), JSON.stringify(items, null, 1))
   const lines = []
-  for (let k = 0; k < changes.length; k++) {
-    const change = changes[k]
-    const log = {asks: [], seq: 0}
-    const outcome = {change}
-    await requestLog.run(log, async () => {
-      // Edits of the whole program.
-      log.task = 'program-edit'
-      const h = host(log)
-      try {
-        const made = await editProgram(source, change, prompt, h)
-        const ok = made.source.length > 0
-        // The whole program after the change: lines taken out and put in lost their order and read as broken code.
-        const does = ok ? await jevDoes(change, made.source) : false
-        outcome.program = {ok, does, edits: made.edits, rounds: made.rounds, attempts: made.attempts, failed: made.failed}
-        log.asks.push({kind: 'edit', seq: log.seq++, route: 'program', change, ok, does, edits: made.edits, rounds: made.rounds,
-          attempts: made.attempts, failed: made.failed, source: made.source})
-      } catch (e) { outcome.program = {error: e.message} }
-      // The written section changed, when the screen has one.
-      if (record && writtenSectionAt(record) >= 0) {
-        log.task = 'section-edit'
-        log.code = []
-        try {
-          const made = await editSection(record, change, prompt, host(log))
-          const ok = made !== null && made.source.length > 0
-          outcome.section = {ok, failed: made ? made.written.failed : '', cannot: made ? made.written.cannot : '', attempts: made ? made.written.attempts : 0}
-          log.asks.push({kind: 'edit', seq: log.seq++, route: 'section', change, ok, does: ok, failed: outcome.section.failed,
-            cannot: outcome.section.cannot, attempts: outcome.section.attempts, source: ok ? made.source : ''})
-        } catch (e) { outcome.section = {error: e.message} }
-      }
-    })
-    const at = path.join(dir, 'refine', String(k))
-    fs.mkdirSync(at, {recursive: true})
-    fs.writeFileSync(path.join(at, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt, change}, a)) + '\n').join(''))
-    lines.push(outcome)
+  for (let k = 0; k < items.length; k++) {
+    let history = prompt
+    let state = {source, record}
+    let item = items[k]
+    let at = String(k)
+    for (let depth = 0; depth <= chainDepth && item; depth++) {
+      const {outcome, next} = await refineOne(dir, label, at, history, state.source, state.record, item, depth)
+      lines.push(outcome)
+      if (!next || depth === chainDepth) break
+      history = history + '\n\nRefinement:\n' + item.change
+      state = next
+      const following = await proposeChanges(history, state.source, 1, 0)
+      item = following[0]
+      at = at + '.' + (depth + 1)
+    }
   }
   fs.writeFileSync(path.join(dir, 'refine', 'outcomes.json'), JSON.stringify(lines, null, 1))
-  const n = key => lines.filter(l => l[key] && l[key].ok && l[key].does !== false).length
-  console.log(label.padEnd(24), 'refine', changes.length, 'changes: program edits ok', n('program'), ', section ok', n('section'),
-    record && writtenSectionAt(record) >= 0 ? '' : '(no written section)')
+  const made = key => lines.filter(l => !l.impossible && l[key] && l[key].ok && l[key].does !== false).length
+  const refused = lines.filter(l => l.impossible && ((l.program && l.program.cannot) || (l.section && (l.section.cannot || (l.section.declined || []).length)))).length
+  console.log(label.padEnd(24), 'refine', lines.length, 'changes: program edits ok', made('program'), ', section ok', made('section'),
+    ', impossible refused', refused, 'of', lines.filter(l => l.impossible).length)
 }
 
 function one(request) {
