@@ -42,6 +42,7 @@ import { requestWithCancellation } from './VeraWebSearch'
 import { http } from '@kit.NetworkKit'
 import { noteService, SERVICE_JEV } from './ServiceHealth'
 import { settings } from './SettingsStore'
+import { SelectorCall, selectorUsage } from './SelectorMetrics'
 
 const LETTERS: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 // How many alternative tokens to ask for at the decision point. 20 covers A..F
@@ -74,6 +75,7 @@ class QAnswer {
   choice: string = ''
   confidence: number = 0
   noul: number = 0
+  validNoul: boolean = false
 }
 
 function optLetters(count: number): string[] {
@@ -273,7 +275,7 @@ function buildPayload(model: string, messages: Record<string, Object>[], withLog
 }
 
 async function sendCloud(base: string, cloudKey: string, payloadJson: string,
-    cancellation?: OperationCancellation): Promise<CloudReply> {
+    cancellation?: OperationCancellation, metrics?: SelectorCall): Promise<CloudReply> {
   throwIfCancelled(cancellation)
   let reply = new CloudReply()
   try {
@@ -285,6 +287,7 @@ async function sendCloud(base: string, cloudKey: string, payloadJson: string,
       url = url.substring(0, url.length - 1)
     }
     url = url + '/chat/completions'
+    if (metrics !== undefined) { metrics.requests++ }
     let response = await requestWithCancellation(url, {
       method: http.RequestMethod.POST,
       header: header,
@@ -293,6 +296,10 @@ async function sendCloud(base: string, cloudKey: string, payloadJson: string,
       connectTimeout: CONNECT_TIMEOUT,
       readTimeout: READ_TIMEOUT
     }, cancellation)
+    if (metrics !== undefined) {
+      let payload = JSON.parse(payloadJson) as Record<string, Object>
+      selectorUsage(metrics, String(response.result), response.responseCode as number, base, payload['model'] as string)
+    }
     throwIfCancelled(cancellation)
     reply.status = response.responseCode as number
     reply.bodyText = String(response.result)
@@ -300,6 +307,7 @@ async function sendCloud(base: string, cloudKey: string, payloadJson: string,
     throwIfCancelled(cancellation)
     if ((e as Error).name === 'OperationCancelledError') { throw (e as Error) }
     console.warn('VERA-JEVPROXY cloud failed: ' + (e as Error).message)
+    if (metrics !== undefined) { metrics.partial = true }
     reply.status = 0
     reply.bodyText = ''
   }
@@ -314,16 +322,17 @@ async function sendCloud(base: string, cloudKey: string, payloadJson: string,
  * short backoff. Never throws; {} on any failure.
  */
 async function cloudPick(base: string, model: string, cloudKey: string,
-    messages: Record<string, Object>[], cancellation?: OperationCancellation): Promise<Record<string, Object>> {
+    messages: Record<string, Object>[], cancellation?: OperationCancellation,
+    metrics?: SelectorCall): Promise<Record<string, Object>> {
   throwIfCancelled(cancellation)
   let withLogprobs = !logprobsRejected
   let payload = buildPayload(model, messages, withLogprobs)
-  let reply = await sendCloud(base, cloudKey, payload, cancellation)
+  let reply = await sendCloud(base, cloudKey, payload, cancellation, metrics)
   throwIfCancelled(cancellation)
   if (reply.status === 400 && reply.bodyText.indexOf('logprobs') >= 0) {
     logprobsRejected = true
     payload = buildPayload(model, messages, false)
-    reply = await sendCloud(base, cloudKey, payload, cancellation)
+    reply = await sendCloud(base, cloudKey, payload, cancellation, metrics)
     throwIfCancelled(cancellation)
   }
   let backoff = 500
@@ -332,7 +341,7 @@ async function cloudPick(base: string, model: string, cloudKey: string,
     await sleep(backoff, cancellation)
     throwIfCancelled(cancellation)
     backoff *= 2
-    reply = await sendCloud(base, cloudKey, payload, cancellation)
+    reply = await sendCloud(base, cloudKey, payload, cancellation, metrics)
     throwIfCancelled(cancellation)
   }
   if (reply.status !== 200) {
@@ -374,7 +383,8 @@ function sleep(ms: number, cancellation?: OperationCancellation): Promise<void> 
 }
 
 async function answerQuestion(key: string, q: Record<string, Object>, state: string,
-    base: string, model: string, cloudKey: string, cancellation?: OperationCancellation): Promise<QAnswer> {
+    base: string, model: string, cloudKey: string, cancellation?: OperationCancellation,
+    metrics?: SelectorCall): Promise<QAnswer> {
   throwIfCancelled(cancellation)
   let ans = new QAnswer()
   ans.key = key
@@ -389,15 +399,19 @@ async function answerQuestion(key: string, q: Record<string, Object>, state: str
       // composer's readNoulProbability (values[1] is the branch taken when the
       // probability clears the threshold).
       let userText = instructions + '\nReply with a single letter: A for yes, B for no. Nothing else.'
-      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, userText), cancellation)
+      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, userText), cancellation, metrics)
+      if (Object.keys(cloud).length === 0) { return ans }
       throwIfCancelled(cancellation)
       let pick = parseChoice(cloud)
       let letters: string[] = ['A', 'B']
       let probs = letterProbs(pick.tokenProbs, letters)
       if (Object.keys(probs).length > 0) {
         ans.noul = probs['A']
+        ans.validNoul = true
       } else {
-        ans.noul = firstLetter(pick.content) === 'A' ? 1.0 : 0.0
+        let letter = firstLetter(pick.content)
+        ans.validNoul = letter === 'A' || letter === 'B'
+        ans.noul = letter === 'A' ? 1.0 : 0.0
       }
     } else {
       let critRaw = q['criteria']
@@ -413,7 +427,7 @@ async function answerQuestion(key: string, q: Record<string, Object>, state: str
         let desc = criteria[criteriaKeys[i]]
         lines.push(letters[i] + ') ' + criteriaKeys[i] + ' — ' + (desc !== undefined ? desc : ''))
       }
-      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, lines.join('\n')), cancellation)
+      let cloud = await cloudPick(base, model, cloudKey, buildMessages(state, lines.join('\n')), cancellation, metrics)
       throwIfCancelled(cancellation)
       let pick = parseChoice(cloud)
       let probs = letterProbs(pick.tokenProbs, letters)
@@ -459,11 +473,12 @@ function emptyAnswersBody(): string {
  * cloud key is set or the body could not be parsed. Never throws; failures are
  * noted through ServiceHealth so the Generate UI's service chip reflects them.
  */
-export async function askJevViaCloud(body: string, cancellation?: OperationCancellation): Promise<string> {
+export async function askJevViaCloud(body: string, cancellation?: OperationCancellation,
+    metrics?: SelectorCall): Promise<string> {
   throwIfCancelled(cancellation)
   let cloudKey = settings.getApiKey()
   if (cloudKey.length === 0) {
-    noteService(SERVICE_JEV, false, 'no cloud key for Jev proxy')
+    if (metrics === undefined) { noteService(SERVICE_JEV, false, 'no cloud key for Jev proxy') }
     return ''
   }
   let base = settings.getBaseUrl()
@@ -472,7 +487,7 @@ export async function askJevViaCloud(body: string, cancellation?: OperationCance
   try {
     root = JSON.parse(body) as Record<string, Object>
   } catch (_e) {
-    noteService(SERVICE_JEV, false, 'bad Jev body')
+    if (metrics === undefined) { noteService(SERVICE_JEV, false, 'bad Jev body') }
     return ''
   }
   let stateRaw = root['state']
@@ -498,7 +513,7 @@ export async function askJevViaCloud(body: string, cancellation?: OperationCance
       cursor++
       if (i >= keys.length) { return }
       let q = questions[keys[i]] as Record<string, Object>
-      results[i] = await answerQuestion(keys[i], q, state, base, model, cloudKey, cancellation)
+      results[i] = await answerQuestion(keys[i], q, state, base, model, cloudKey, cancellation, metrics)
       throwIfCancelled(cancellation)
     }
   }
@@ -512,8 +527,10 @@ export async function askJevViaCloud(body: string, cancellation?: OperationCance
   for (let ans of results) {
     let entry: Record<string, Object> = {}
     if (ans.isNoul) {
+      if (!ans.validNoul) { continue }
       entry['noul'] = ans.noul
     } else {
+      if (ans.choice.length === 0) { continue }
       entry['choice'] = ans.choice
       entry['confidence'] = ans.confidence
       // A confidence other than exactly 1.0 could only come from logprobs (the
@@ -525,7 +542,7 @@ export async function askJevViaCloud(body: string, cancellation?: OperationCance
   }
   console.info('VERA-JEVPROXY batch model=' + model + ' questions=' + results.length.toString() +
     ' calibrated=' + calibrated.toString() + ' elapsedMs=' + (Date.now() - batchStart).toString())
-  noteService(SERVICE_JEV, true)
+  if (metrics === undefined) { noteService(SERVICE_JEV, Object.keys(answers).length === keys.length) }
   let wrapper: Record<string, Object> = {}
   wrapper['answers'] = answers
   return JSON.stringify(wrapper)

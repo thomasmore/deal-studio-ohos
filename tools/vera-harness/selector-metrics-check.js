@@ -1,0 +1,108 @@
+// Shared-boundary accounting: fake native/HTTP only, no credentials or model calls.
+'use strict'
+const assert = require('node:assert/strict')
+const fs = require('node:fs'), path = require('node:path')
+const {loadVera, sourceRoot} = require('./source-loader')
+const {settings} = loadVera('SettingsStore')
+const {OperationController} = loadVera('OperationCancellation')
+const M = loadVera('SelectorMetrics'), H = loadVera('ServiceHealth'), S = loadVera('RunStages')
+const {askSelector} = loadVera('VeraSelector')
+const {localJev} = loadVera('LocalJev')
+const {resetLogprobsProbe} = loadVera('JevProxy')
+const body = JSON.stringify({questions:{part:{type:'choice',criteria:{a:'checklist',b:'timer'}},unit:{type:'choice',criteria:{a:'minutes',b:'seconds'}}}})
+const answer = {answers:{part:{choice:'a'},unit:{choice:'a'}}}
+let queue = [], requests = 0, release
+function httpReply(responseCode, result) { return {responseCode,result:JSON.stringify(result)} }
+globalThis.__veraHttp = () => ({on(){},destroy(){},async request(){requests++;if(release)await release;assert(queue.length,'unexpected HTTP request');const next=queue.shift();if(next instanceof Error)throw next;return next}})
+const cloud = usage => httpReply(200,{choices:[{message:{content:'A'}}],usage})
+const usage = {prompt_tokens:100,prompt_cache_hit_tokens:60,completion_tokens:1}
+const near = (actual, expected) => assert(Math.abs(actual-expected)<1e-12,`${actual} != ${expected}`)
+;(async () => {
+  globalThis.__veraLocalJev = {status:async()=>JSON.stringify({ready:true,abi:1,productionAllowed:false}),experimentalDecisions:async()=>JSON.stringify({...answer,local:{status:'diagnostic',diagnostic:true,productionAllowed:false}})}
+  settings.setLocalSelector(true)
+  await localJev.prepare()
+  H.resetServiceHealth()
+  const owner=new OperationController(),other=new OperationController()
+  await askSelector(body,'',owner)
+  await askSelector(body,'',owner) // initial selection plus a later phase
+  const calls=M.selectorCalls(owner),totals=M.selectorTotals(calls)
+  assert.equal(calls.length,2);assert.equal(totals.localCalls,2);assert.equal(totals.requests,0)
+  assert.equal(totals.estimatedUsd,0);assert.equal(totals.partial,false);assert.equal(requests,0)
+  assert(calls.every(c=>c.ok&&c.answered===2&&c.questions===2))
+  assert.deepEqual(M.selectorCalls(other),[])
+  calls[0].ok=false;assert.equal(M.selectorCalls(owner)[0].ok,true,'snapshot isolation')
+  assert.equal(H.serviceNotes()[0].service,'Local Jev (experimental)');assert.equal(H.serviceNotes()[0].answered,2)
+  const fast=M.selectorCalls(owner);fast[0].ms=8;fast[1].ms=0
+  const coarse=[new S.Stage('initial choice',S.WHO_JEV,500),new S.Stage('plan',S.WHO_MODEL,1000)]
+  const stages=M.selectorStages(coarse,fast)
+  assert.equal(S.appMs(stages),1008,'replace coarse Jev timing; retain fast/zero calls')
+  assert.equal(stages[1].ms,8);assert.match(stages[1].note,/2 selector call/)
+  assert.deepEqual(M.selectorStages(stages,fast),stages,'idempotent close/finish')
+  globalThis.__veraLocalJev.experimentalDecisions=async()=>{throw Error('inference failed')}
+  const failed=new OperationController();await askSelector(body,'',failed)
+  assert.equal(M.selectorCalls(failed)[0].ok,false);assert.equal(H.serviceNotes()[0].failed,1)
+  assert.equal(requests,0,'no fallback on inference failure')
+  const cancelled=new OperationController();cancelled.cancel()
+  await assert.rejects(askSelector(body,'',cancelled),{name:'OperationCancelledError'})
+  assert.deepEqual(M.selectorCalls(cancelled),[],'pre-cancel is not a call')
+
+  settings.setLocalSelector(false);settings.setJevProxy('')
+  queue.push(httpReply(200,{...answer,usage:{input_tokens:2000,output_tokens:10}}))
+  const remote=new OperationController();await askSelector(body,'fixture-key',remote)
+  let r=M.selectorCalls(remote)[0]
+  assert.equal(r.backend,'typesafe');assert.equal(r.requests,1);near(r.estimatedUsd,0.000084)
+  assert.equal(r.inputTokens,2000);assert.equal(r.cacheHitTokens,0);assert.equal(r.partial,false)
+  queue.push(httpReply(200,answer));await askSelector(body,'fixture-key',remote)
+  assert.equal(M.selectorCalls(remote)[1].estimatedUsd,-1,'missing usage is not zero')
+  assert.equal(M.selectorTotals(M.selectorCalls(remote)).partial,true)
+  queue.push(httpReply(403,{error:'denied'}));await askSelector(body,'fixture-key',remote)
+  assert.equal(M.selectorCalls(remote)[2].ok,false)
+
+  settings.setApiKey('fixture-only');settings.setBaseUrl('https://api.deepseek.com');settings.setModel('deepseek-flash');settings.setJevProxy('1')
+  resetLogprobsProbe()
+  queue.push(httpReply(400,{error:'logprobs unsupported'}),cloud(usage),cloud(usage))
+  const proxy=new OperationController();await askSelector(body,'',proxy)
+  r=M.selectorCalls(proxy)[0]
+  assert.equal(r.backend,'llm');assert.equal(r.requests,3,'real requests, not one batch or two questions')
+  assert.equal(r.inputTokens,200);assert.equal(r.cacheHitTokens,120);assert.equal(r.outputTokens,2)
+  assert.equal(r.partial,true,'retry with unknown usage leaves explicit partial estimate')
+  assert.equal(r.ok,true)
+  assert(H.serviceNotes().some(n=>n.service==='Cloud LLM Jev approximation'))
+  const direct=M.beginSelectorCall('llm','deepseek-flash','{}')
+  M.selectorUsage(direct,JSON.stringify({usage}),200,'https://api.deepseek.com','deepseek-flash',Date.parse('2026-11-22T12:00:00Z'))
+  near(direct.estimatedUsd,(40*.15+60*.003+1*.60)/1e6)
+  const peak=M.beginSelectorCall('llm','deepseek-flash','{}')
+  M.selectorUsage(peak,JSON.stringify({usage}),200,'https://api.deepseek.com','deepseek-flash',Date.parse('2026-11-23T02:00:00Z'))
+  near(peak.estimatedUsd,direct.estimatedUsd*2)
+  const unknown=M.beginSelectorCall('llm','another','{}')
+  M.selectorUsage(unknown,JSON.stringify({usage}),200,'https://other.invalid','another')
+  assert.equal(unknown.estimatedUsd,-1);assert.equal(unknown.partial,true)
+  const detailed=M.beginSelectorCall('llm','another','{}')
+  M.selectorUsage(detailed,JSON.stringify({usage:{prompt_tokens:10,prompt_tokens_details:{cached_tokens:4},completion_tokens:2}}),200)
+  assert.equal(detailed.cacheHitTokens,4)
+
+  // Failed noul must not become a successful, fully confident no.
+  queue.push(httpReply(500,{error:'failed'}))
+  const badNoul=new OperationController()
+  await askSelector(JSON.stringify({questions:{live:{type:'noul',instructions:'Is this live?'}}}),'',badNoul)
+  assert.equal(M.selectorCalls(badNoul)[0].ok,false)
+  assert.equal(M.selectorCalls(badNoul)[0].answered,0)
+  // Late transport completion stays with the cancelled owner, not a subsequent run.
+  let resolve;release=new Promise(r=>{resolve=r})
+  queue.push(cloud(usage))
+  const oldOwner=new OperationController()
+  const pending=askSelector(JSON.stringify({questions:{part:{type:'choice',criteria:{a:'a'}}}}),'',oldOwner)
+  await new Promise(r=>setImmediate(r))
+  const frozen=M.selectorCalls(oldOwner);oldOwner.cancel();resolve();release=null
+  await assert.rejects(pending,{name:'OperationCancelledError'})
+  assert.equal(frozen[0].cancelled,false,'finished report is immutable')
+  assert.equal(M.selectorCalls(oldOwner)[0].cancelled,true)
+  assert.deepEqual(M.selectorCalls(new OperationController()),[])
+  const page=fs.readFileSync(path.join(sourceRoot,'pages/GeneratePage.ets'),'utf8')
+  assert(!page.includes('let askJevForRun'),'no double counting wrappers')
+  assert.match(page,/fields\['initialJevMs'\] = composed.jevMs/)
+  assert.match(page,/rec.selectorHttpRequests = selectors.requests/)
+  assert.match(page,/this.selectorMetrics.length > 0\) \{ this.selectorPanel\(\)/)
+  assert.equal(queue.length,0)
+  console.log('selector-metrics-check: local/TypeSafe/proxy, all phases, fast stages, usage/rates/retries, failures, ownership and cancellation passed')
+})().catch(e=>{console.error(e);process.exitCode=1})

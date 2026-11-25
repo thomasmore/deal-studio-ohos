@@ -326,6 +326,37 @@ Evidence (private local artifacts): `/tmp/local-jev-q8-device/` contains archive
 library hash, verified update log, standalone outputs/summary, filtered run trace,
 generated sources and UI layouts. Full historical trace remains private.
 
+## Selector metrics correction (host/build verification)
+
+The shared selector boundary now measures every phase and attributes it to Local
+Jev, TypeSafe Jev or the cloud LLM approximation. Native calls retain zero API
+cost/HTTP requests; short calls are not discarded by the stage cutoff. Coarse
+agent Jev timing is replaced rather than added. The run log separates writer
+requests, selector HTTP attempts (including retries) and local invocations, and
+stores immutable operation-scoped selector snapshots. TypeSafe/proxy usage is
+priced independently of writer usage; unsupported tariffs and missing usage
+remain unknown/partial. Failed proxy noul calls no longer report a confident no.
+
+Verification for this correction:
+
+- `selector-metrics-check`: fake native/HTTP tests cover three backends, initial
+  and later phases, 8ms/zero-rounded stages, retries, peak/off-peak rates,
+  unpriced endpoints, missing usage, failed/uncertain calls and cancellation.
+- `prompt-check`: **59 passed, 0 failed**, including actual controller finalization
+  and run logging, repeated finish and operation isolation. Its extraction fixture
+  now includes the metrics/run-log methods and native unavailable stub.
+- `metrics`, `local-selector`, `selector-settings`, `agent`, `needs-choose`,
+  `composition`, `surface-route` and `widget-refine` checks pass. The widget fixture
+  now supplies the previously missing metrics dependencies.
+- Unsigned model-bearing ArkTS HAP builds with **zero diagnostics**; generated
+  native link still names the supplied Q8 archive. JS syntax and diff checks pass.
+- Host-only synthetic proof sheet: `/tmp/vera-selector-metrics-checks/proof.png`
+  (not an ArkUI screenshot). Test logs and HAP are local, not committed.
+
+No model calls, phone update or provider switch were made for this correction.
+The historical measurements above retain the old UI undercount as observed;
+this build has not yet been visually verified on a device.
+
 ## Still not verified
 
 - Broad phone structural-edit quality beyond the failed checklist case above.

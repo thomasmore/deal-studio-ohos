@@ -129,9 +129,47 @@ tar -tzf "$ARCHIVE"
 
 The archive listing includes the HAP and all four notice and license files.
 
+## Selector metrics
+
+`SelectorMetrics.ets` records every `askSelector` invocation under its operation owner,
+including initial choice, later verification, structural edits, surface edits and
+widget generation. It stores no prompts, answers or credentials. Finished UI/log
+records are snapshots: a cancelled operation's late native/HTTP completion cannot
+rewrite another run. The local model's eager preparation outside a run is not
+charged as inference time; preparation awaited inside a selector call is included.
+
+The Metrics tab separates **Writer model calls** from **Selector calls**. Selector
+rows name Local Jev (experimental), TypeSafe Jev or Cloud LLM Jev approximation,
+show batch wall time, answered/requested question counts and actual HTTP attempts
+(including proxy retries). Local calls show **$0 API cost** and zero HTTP requests;
+this does not mean cloud planning/writing is free. Sub-50ms and even zero-rounded
+selector calls are retained. Coarse agent Jev stages are replaced, not added to,
+with the measured boundary totals. `compose.jevMs` now sums all selector phases;
+`initialJevMs` preserves the earlier initial-selection-only diagnostic.
+
+Run-log records retain `modelCalls` as the total invocation count and add
+`writerCalls`, `selectorCalls`, `selectorMs`, `selectorHttpRequests` and
+`localSelectorCalls`. Selector usage/cost is added once to run/version totals with
+its own tariff, never priced as writer tokens. TypeSafe estimates use $0.042/M
+input and free output; the approximation uses reported chat-completions usage and
+the existing official DeepSeek Flash peak/off-peak tariff. Other endpoints, missing
+usage and incomplete attempts remain **unknown/partial**, not free. These are
+published-rate estimates, not invoices. Writer cost is hidden for unpriced models.
+A failed proxy noul request is no longer counted as a confident negative answer.
+
 ## Verification
 
 Run these checks without downloading a model or setting API keys.
+
+```sh
+node tools/vera-harness/selector-metrics-check.js
+node tools/vera-harness/metrics-check.js
+```
+
+The selector-metrics check uses fake native/HTTP transports for all three providers,
+fast/later phases, retries, missing usage, tariffs, uncertainty, cancellation and
+operation isolation. `prompt-check.js` executes the real controller's finalization
+and run logging, including repeated finish and unknown-cost regression cases.
 
 ```sh
 cargo test --locked --manifest-path native/local-jev/Cargo.toml

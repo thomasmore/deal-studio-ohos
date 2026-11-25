@@ -36,6 +36,7 @@ function load(file){
     if(name==='@kit.NetworkKit')return {http};
     if(name==='@ohos.net.http')return http;
     if(name==='@kit.ArkTS')return {util:{TextDecoder:{create:()=>({decodeToString:bytes=>new TextDecoder().decode(bytes)})}}};
+    if(name==='liblocaljev.so')return {default:{status:async()=>JSON.stringify({ready:false,reason:'host-fixture'})}};
     if(name.startsWith('@kit.')||name==='libllama.so')return {};
     if(name.startsWith('.'))return load(path.join(path.dirname(file),name+'.ets'));
     throw Error('Unexpected dependency '+name);
@@ -203,7 +204,7 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     throw Error('Unclosed method '+name);
   }
   // The route and the trace are swapped per check: tpl.build answers buildScreen, traces collects trace().
-  const tpl={build:async()=>{throw Error('No template build set')}},traces=[];
+  const tpl={build:async()=>{throw Error('No template build set')}},traces=[],runLogs=[];
   const route=load(path.join(base,'agent','VeraBuildRoute.ets')),agent=load(path.join(base,'agent','VeraAgent.ets')),agentHost=load(path.join(base,'agent','AgentHost.ets'));
   // side.selectUi answers selectUiForPrompt and side.edit answers editComposition.
   const side={compose:false,selectUi:async()=>null,edit:async()=>{throw Error('No structural edit set')}};
@@ -216,11 +217,12 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     const controller=preview.statements.find(node=>ts.isClassDeclaration(node)&&node.name.text==='VeraPreviewController');
     assert(controller,'Preview controller class');
     const prefix=icons.slice(0,icons.indexOf('@Component')).replace(/^import .*$/gm,'').replace(/^export /gm,'')+'\n'+src.slice(0,src.indexOf('@Component')).replace(/^import .*$/gm,'');
-    const code=prefix+'\n'+controller.getText(preview).replace(/^export /,'')+'\nclass Controller { saveIcon = DEFAULT_APP_ICON; previewController = new VeraPreviewController(); '+['beginOperation','resetRunMetrics','startFresh','startNew','openWhole','setFullscreen','doServerGenerate','aboutToDisappear','hostContext','callModel','runAttempt','doRefine','traceEnd','closeRun','doGenerate','tryRoute','traceAgent','showAgent','settleQuestion','askPerson','startAttemptOne','tryStructuralEdit','refineWithModel','stopGeneration','originLabel','measuredTotal','addMetricUsage','metricWork','collectMetricSideCalls','beginMetricAttempt','recordMetricResult','finishMetrics','acceptRequest','copyMetrics','modelRequestHistory','prepareRequest','currentBase','ratePerMillion','modeLabel','hasResult','doSave','confirmName','cancelName','afterSave','close','commitSave','keepWidget','versionCount','isSaved'].map(n=>method(src,n)).join('\n')+' } module.exports=Controller;';
+    const code=prefix+'\n'+controller.getText(preview).replace(/^export /,'')+'\nclass Controller { saveIcon = DEFAULT_APP_ICON; previewController = new VeraPreviewController(); '+['beginOperation','resetRunMetrics','startFresh','startNew','openWhole','setFullscreen','doServerGenerate','aboutToDisappear','hostContext','callModel','runAttempt','doRefine','traceEnd','closeRun','doGenerate','tryRoute','traceAgent','showAgent','settleQuestion','askPerson','startAttemptOne','tryStructuralEdit','refineWithModel','stopGeneration','originLabel','measuredTotal','addMetricUsage','metricWork','collectMetricSideCalls','markMetricsPartial','countModelCall','beginMetricAttempt','recordMetricResult','finishMetrics','writeRunLog','acceptRequest','copyMetrics','modelRequestHistory','prepareRequest','currentBase','ratePerMillion','modeLabel','hasResult','doSave','confirmName','cancelName','afterSave','close','commitSave','keepWidget','versionCount','isSaved'].map(n=>method(src,n)).join('\n')+' } module.exports=Controller;';
     const compiled=ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020},reportDiagnostics:true});
     assert.equal((compiled.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,'Extracted generation controller syntax');
     const versions=[],projects=[],toasts=[],scrollEdges=[];
-    const globals={AppRouteParams:load(path.join(base,'AppNavigation.ets')).AppRouteParams,
+    const globals={...load(path.join(base,'SelectorMetrics.ets')),
+      RunLogRecord:load(path.join(base,'VeraRunLog.ets')).RunLogRecord,appendRunLog:(_dir,rec)=>runLogs.push(rec),AppRouteParams:load(path.join(base,'AppNavigation.ets')).AppRouteParams,
       ...load(path.join(base,'AppName.ets')),withoutWidgetRequests:load(path.join(base,'ProjectText.ets')).withoutWidgetRequests,
       veraStateStamp:load(path.join(base,'VeraStateStamp.ets')).veraStateStamp,hasWidgetFunction:load(path.join(base,'WidgetStatus.ets')).hasWidgetFunction,refreshForms:()=>{},
       store:{createProject(name,icon){const project={id:'project-'+(projects.length+1),name,icon};projects.push(project);return project;},
@@ -245,7 +247,7 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     c.getUIContext=()=>({getHostContext:()=>host,animateTo:(options,update)=>update(),getPromptAction:()=>({showToast:toast=>toasts.push(toast)})});
     Object.assign(c,{resourcesLoaded:true,runOnOpen:false,projectId:'',baseVersionId:'',baseVersionNumber:0,nextVersionNumber:1,savedVbc2:'',naming:false,saveName:'',iconsOpen:false,leaveAfterSave:false,closing:false,pendingBase:null,acceptedBase:null,versions,projects,toasts,scrollEdges,scroller:{scrollEdge:edge=>scrollEdges.push(edge)},pathStack:{pop(){}},activeOperation:new OperationController(),activeServerAbort:null,activeServerAbortRun:-1,modelReady:true,skillText:'',promptTemplate:skill,surfaceGuide:'',liveState:'',stages:[],sideCalls:[],disposed:false,keyboardWindow:null,lastRequest:'',questionText:'',questionOptions:[],questionFallback:0,answerQuestion:null,mode:'deepseek',attempt:1,systemPrompt:skill,uiSelected:[],grammar:'',previousSource:'',failedSource:'',
       attempts:[],compiledVbc2:'',cancelRequested:false,completionBase:'',completionBaseVbc2:'',completionComposition:'',compositionJson:'',templateKinds:[],modelWrote:false,runId:0,prompt:'',refinePrompt:'',repairByEdit:true,genStartTime:Date.now(),generatedSource:'',generating:true,
-      metricTotals:{runs:0,attempts:0,elapsedMs:0,inputTokens:-1,cacheHitTokens:-1,outputTokens:-1,estimatedUsd:-1,partial:false},metricRunId:-1,metricMode:'',metricModel:'',metricPriced:false,metricRates:[0,0,0],metricSeenSideCalls:new Set(),metricPendingRuns:new Set(),metricStaleRuns:new Set(),
+      runMetrics:{runs:0,attempts:0,elapsedMs:0,inputTokens:-1,cacheHitTokens:-1,outputTokens:-1,estimatedUsd:-1,partial:false},runModelCalls:0,metricTotals:{runs:0,attempts:0,elapsedMs:0,inputTokens:-1,cacheHitTokens:-1,outputTokens:-1,estimatedUsd:-1,partial:false},metricRunId:-1,metricMode:'',metricModel:'',metricPriced:false,metricRates:[0,0,0],metricSeenSideCalls:new Set(),metricPendingRuns:new Set(),metricStaleRuns:new Set(),
       requestHistory:'',pendingHistory:'',pendingRequest:'',acceptedRequest:'',acceptedComposition:'',acceptedOrigin:'',acceptedMetrics:null,compiledSource:'',totalMs:0,baseError:''});
     c.addToProgram=()=>{};c.currentRun=()=>null;c.startRun=()=>{};
     const runAttempt=c.runAttempt,callModel=c.callModel;
@@ -636,6 +638,33 @@ run('Parser recovery: every syntax error in one compile, without cascades',()=>{
     assert.deepEqual([c.metricTotals.inputTokens,c.metricTotals.cacheHitTokens,c.metricTotals.outputTokens],[17,7,5]);
     assert.equal(c.sideCalls.length,1);assert.equal(c.sideCalls[0].inputTokens,17);assert.equal(deep.deepseek.getSideCalls(independent).length,1);
     return {ownerSideCalls:1,independentSideCalls:1,doubleCounted:false};
+  });
+  await runAsync('Generate selector metrics retain fast later phases, split counts and snapshot once per run',async()=>{
+    const metrics=load(path.join(base,'SelectorMetrics.ets')),st=load(path.join(base,'RunStages.ets'));
+    reset();deep.deepseek.clearSideCalls();const c=page();c.prepareRequest('Selector metrics');c.runId++;
+    c.recordMetricResult(c.runId,Object.assign(new llama.GenerateResult(),{inputTokens:100,cacheHitTokens:40,outputTokens:10}));
+    c.runModelCalls=1;c.stages=[new st.Stage('coarse initial selection',st.WHO_JEV,500)];
+    for(const ms of [8,17]){
+      const call=metrics.beginSelectorCall('local-experimental','fixture',JSON.stringify({questions:{part:{}}}),c.activeOperation);
+      Object.assign(call,{ms,finished:true,ok:true,answered:1});
+    }
+    c.finishMetrics(c.runId);c.finishMetrics(c.runId);
+    const rec=runLogs.at(-1);
+    assert.equal(rec.writerCalls,1);assert.equal(rec.modelCalls,3);assert.equal(rec.localSelectorCalls,2);
+    assert.equal(rec.selectorHttpRequests,0);assert.equal(rec.selectorMs,25);
+    assert.equal(rec.inputTokens,100,'local inference adds no cloud tokens');
+    assert.equal(rec.selectorCalls[0].estimatedUsd,0);
+    assert.equal(st.appMs(c.stages),25,'initial coarse time replaced, all local phases retained');
+    assert.equal(c.metricTotals.inputTokens,100,'repeated finish does not double count');
+    c.prepareRequest('Next run');c.runId++;c.beginOperation();
+    const remote=metrics.beginSelectorCall('typesafe','fixture','{}',c.activeOperation);
+    Object.assign(remote,{ms:11,finished:true,requests:1});
+    c.finishMetrics(c.runId);
+    const next=runLogs.at(-1);
+    assert.equal(next.selectorCalls.length,1);assert.equal(next.localSelectorCalls,0);
+    assert.equal(next.selectorHttpRequests,1);assert.equal(next.estimatedUsd,-1,'unknown is not free');
+    assert.equal(rec.selectorCalls.length,2,'next run does not rewrite prior record');
+    return {allSelectorMs:rec.selectorMs,localCalls:2,httpRequests:0,doubleCounted:false,unknownCost:true};
   });
   await runAsync('Widget first candidate compiles with uniform settings',async()=>{
     reset();responses.push(example);const result=await chat.buildMiniApp(skill+widget,'An editable amount log.',()=>{});

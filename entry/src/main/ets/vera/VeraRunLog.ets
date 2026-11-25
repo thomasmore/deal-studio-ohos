@@ -1,5 +1,6 @@
 import { fileIo as fs } from '@kit.CoreFileKit'
 import { util } from '@kit.ArkTS'
+import { SelectorCall } from './SelectorMetrics'
 
 /**
  * An append-only record of one completed generation run, kept so that
@@ -37,9 +38,15 @@ export class RunLogRecord {
   attempts: number = 0
   /** How many model requests the run sent: program attempts and compile
    *  repairs, tool round trips inside them, the agent's auxiliary calls, selector
-   *  calls, and one for a server run's /compile request. Not the number of user
+   *  HTTP attempts (including retries), local selector invocations, and one for a server run's /compile request. Not the number of user
    *  requests -- each record is already one of those. */
   modelCalls: number = 0
+  /** Writer-only requests, separate from paid selector HTTP and native inference. */
+  writerCalls: number = 0
+  selectorMs: number = 0
+  selectorHttpRequests: number = 0
+  localSelectorCalls: number = 0
+  selectorCalls: SelectorCall[] = []
   /** Prompt tokens (-1 when the provider did not report usage). */
   inputTokens: number = -1
   /** Prompt tokens reported as a cache hit (-1 when not reported). */

@@ -530,7 +530,8 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
       }
     }
     const dependencies = {
-      store, appUsesWidgetError, withoutWidget, hasWidgetFunction, veraStateStamp, validateWidgetRefinement,
+      store, VersionMetrics: loadVera('ProjectStore').VersionMetrics,
+      appUsesWidgetError, withoutWidget, hasWidgetFunction, veraStateStamp, validateWidgetRefinement,
       widgetRefinementError: loadVera('VeraCompiler').widgetRefinementError,
       validateWidgetOffMain: async (...args) => validateWidgetRefinement(...args),
       compileVeraSource, spliceWidget, smokeRun, widgetRefinementPrompt, Curve: {EaseInOut: 'ease-in-out'},
@@ -574,7 +575,8 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
       loadResources: async () => {}, currentBase: () => ({}), ratePerMillion: () => 0,
       modeLabel: () => 'fixture', originLabel: () => '', copyMetrics: metrics => metrics,
       beginOperation: () => new OperationController(), resetRunMetrics() { this.attempt = 1; this.attempts = [] },
-      beginMetricAttempt() {}, recordMetricResult() {}, addToProgram() {}, traceEnd() {}, currentRun: () => null,
+      beginMetricAttempt() {}, recordMetricResult() {}, markMetricsPartial() {}, countModelCall() {},
+      addToProgram() {}, traceEnd() {}, currentRun: () => null,
       closeRun() {}, grammar: '', skillText: '',
       metricWork: (run, work) => work(), finishMetrics() {}, startRun() {}
     })
