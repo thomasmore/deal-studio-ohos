@@ -42,6 +42,10 @@ const holeTemperature = Number(option('-t', '0'))
 // A lookup the cache does not hold answers '' and is recorded as a miss in asks.jsonl, so a hole written without what the
 // phone would have shown is never trained on.
 const lookupFile = option('--lookups', '')
+// --refine N: after each screen is built, N changes a person might type under it (proposed by DeepSeek) are each made both
+// ways a refine can make them -- the written section changed (agent/AgentSectionEdit.ets) and edits of the whole program
+// (AgentSurfaceEdit.ets's editProgram) -- with every call recorded in OUTDIR/<label>/refine/<k>/asks.jsonl.
+const refineCount = Number(option('--refine', '0'))
 const lookups = lookupFile ? new Map(Object.entries(JSON.parse(fs.readFileSync(lookupFile, 'utf8')))) : null
 const lookupKey = (tool, query, both) => tool + '\u0000' + query + '\u0000' + (both ? '1' : '0')
 // The log of the request being run, for the lookups the route's own modules make (they are not given a host); requests run
@@ -166,8 +170,86 @@ function host(log) {
   }
   // AGENT_ANSWER=other picks an answer other than the suggested one, to exercise drawing the plan again; else the default.
   h.ask = async q => process.env.AGENT_ANSWER === 'other' ? (q.fallback === 0 ? 1 : 0) : null
-  h.askCode = async (system, user, budget, think) => { const reply = await asked(log, 'section', system, user, budget, think); (log.code = log.code || []).push(reply); return reply }
+  h.askCode = async (system, user, budget, think) => { const reply = await asked(log, log.task || 'section', system, user, budget, think); (log.code = log.code || []).push(reply); return reply }
   return h
+}
+
+const {compositionToJson} = loadVera('VeraComposition')
+const {editProgram} = loadVera('agent/AgentSurfaceEdit')
+const {editSection, writtenSectionAt} = loadVera('agent/AgentSectionEdit')
+const {CustomRequest, verifyRequest, undone} = loadVera('agent/AgentCustom')
+
+const CHANGE_PROMPT = 'You suggest changes a person would type under an app on their phone to refine it, after seeing it ' +
+  'run. Each is one short request in plain English, 3 to 12 words, the way people type: a small new feature, a different ' +
+  'behaviour, a different look or wording, or something removed. Each must be something this app could do on a phone, about ' +
+  'this app, and different from the others. Reply with JSON only: {"changes": ["...", "..."]}'
+
+/** Changes a person might type under the program, from DeepSeek (not trained on). */
+async function proposeChanges(prompt, source, n) {
+  const reply = await deepseek(CHANGE_PROMPT, 'The app was made for: ' + prompt + '\n\nIts program:\n' + source +
+    '\n\nSuggest ' + n + ' changes.', 400, true, false, 0.9)
+  try { return (JSON.parse(reply).changes || []).filter(c => typeof c === 'string' && c.trim()).slice(0, n) } catch (e) { return [] }
+}
+
+/** Whether Jev reads `body` (the edits, or the new section) as making the change. */
+async function jevDoes(change, body) {
+  const request = Object.assign(new CustomRequest(), {needs: [change]})
+  const answer = await host({asks: [], seq: 0}).askJev(verifyRequest(request, body))
+  return undone(request, answer).length === 0
+}
+
+/** What a change did to the program, as Jev is shown it: the lines taken out and the lines put in. */
+function lineChanges(before, after) {
+  const count = text => text.split('\n').reduce((m, l) => m.set(l, (m.get(l) || 0) + 1), new Map())
+  const a = count(before), b = count(after)
+  const out = (from, to) => [...from].flatMap(([l, n]) => Array(Math.max(0, n - (to.get(l) || 0))).fill(l)).filter(l => l.trim())
+  return 'Lines taken out:\n' + out(a, b).join('\n') + '\n\nLines put in:\n' + out(b, a).join('\n')
+}
+
+/** Each proposed change made both ways, every call recorded. */
+async function refineAll(dir, label, prompt, source, record) {
+  const changes = await proposeChanges(prompt, source, refineCount)
+  fs.mkdirSync(path.join(dir, 'refine'), {recursive: true})
+  fs.writeFileSync(path.join(dir, 'refine', 'changes.json'), JSON.stringify(changes, null, 1))
+  const lines = []
+  for (let k = 0; k < changes.length; k++) {
+    const change = changes[k]
+    const log = {asks: [], seq: 0}
+    const outcome = {change}
+    await requestLog.run(log, async () => {
+      // Edits of the whole program.
+      log.task = 'program-edit'
+      const h = host(log)
+      try {
+        const made = await editProgram(source, change, prompt, h)
+        const ok = made.source.length > 0
+        const does = ok ? await jevDoes(change, lineChanges(source, made.source)) : false
+        outcome.program = {ok, does, edits: made.edits, rounds: made.rounds, attempts: made.attempts, failed: made.failed}
+        log.asks.push({kind: 'edit', seq: log.seq++, route: 'program', change, ok, does, edits: made.edits, rounds: made.rounds,
+          attempts: made.attempts, failed: made.failed, source: made.source})
+      } catch (e) { outcome.program = {error: e.message} }
+      // The written section changed, when the screen has one.
+      if (record && writtenSectionAt(record) >= 0) {
+        log.task = 'section-edit'
+        log.code = []
+        try {
+          const made = await editSection(record, change, prompt, host(log))
+          const ok = made !== null && made.source.length > 0
+          outcome.section = {ok, failed: made ? made.written.failed : '', cannot: made ? made.written.cannot : '', attempts: made ? made.written.attempts : 0}
+          log.asks.push({kind: 'edit', seq: log.seq++, route: 'section', change, ok, does: ok, failed: outcome.section.failed,
+            cannot: outcome.section.cannot, attempts: outcome.section.attempts, source: ok ? made.source : ''})
+        } catch (e) { outcome.section = {error: e.message} }
+      }
+    })
+    const at = path.join(dir, 'refine', String(k))
+    fs.mkdirSync(at, {recursive: true})
+    fs.writeFileSync(path.join(at, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt, change}, a)) + '\n').join(''))
+    lines.push(outcome)
+  }
+  fs.writeFileSync(path.join(dir, 'refine', 'outcomes.json'), JSON.stringify(lines, null, 1))
+  const n = key => lines.filter(l => l[key] && l[key].ok && l[key].does !== false).length
+  console.log(label.padEnd(24), 'refine', changes.length, 'changes: program edits ok', n('program'), ', section ok', n('section'),
+    record && writtenSectionAt(record) >= 0 ? '' : '(no written section)')
 }
 
 function one(request) {
@@ -205,6 +287,8 @@ async function runOne(log, [label, prompt]) {
     ms: Date.now() - started, answers: c.answers}
   if (o) { result.route = o.kind; try { result.engine = JSON.parse(c.sketch || '{}').engine } catch (e) {} }
   fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(result, null, 1))
+  if (r.record) fs.writeFileSync(path.join(dir, 'composition.json'), compositionToJson(r.record))
+  if (refineCount > 0 && c.source) await refineAll(dir, label, prompt, c.source, r.record || null)
   if (o) {
     return console.log(label.padEnd(24), o.kind.padEnd(9), (result.ms / 1000).toFixed(1).padStart(5) + 's',
       r.note.slice(0, 120))
