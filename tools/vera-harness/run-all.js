@@ -14,6 +14,11 @@ const manifest = require('./manifest')
 
 const dir = __dirname
 const root = path.resolve(dir, '../..')
+const DEFAULT_TIMEOUT = 300000
+
+function effectiveTimeout(entry, opts) {
+  return opts.timeout != null ? opts.timeout : (entry.timeout || DEFAULT_TIMEOUT)
+}
 
 function usage() {
   console.log([
@@ -24,7 +29,7 @@ function usage() {
     '                     composition, live, ui, compiler, other)',
     '  --filter=TEXT      run only checks whose file name contains TEXT',
     '  --jobs=N           run up to N checks at once (default 1; temp files may collide)',
-    '  --timeout=MS       per-check timeout (default 300000)',
+    '  --timeout=MS       per-check timeout (overrides manifest, default 300000)',
     '  --fail-fast        stop after the first failure',
     '  --json=PATH        write a JSON report',
     '  --verbose          print each check\'s full output',
@@ -35,7 +40,7 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const opts = {family: null, filter: null, list: false, failFast: false, jobs: 1, timeout: 300000, json: null, verbose: false}
+  const opts = {family: null, filter: null, list: false, failFast: false, jobs: 1, timeout: null, json: null, verbose: false}
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--list') opts.list = true
@@ -105,7 +110,7 @@ function runOne(entry, opts) {
     const timer = setTimeout(() => {
       timedOut = true
       child.kill('SIGKILL')
-    }, entry.timeout || opts.timeout)
+    }, effectiveTimeout(entry, opts))
     const done = (code, extra) => {
       clearTimeout(timer)
       resolve({name: entry.name, family: entry.family, code, ms: Date.now() - started, out, err: extra || err})
@@ -146,7 +151,7 @@ async function main() {
   if (!process.env.VERA_TYPESCRIPT_PATH) {
     console.log('note: VERA_TYPESCRIPT_PATH is not set; checks must resolve TypeScript themselves')
   }
-  console.log('running ' + entries.length + ' check(s), jobs=' + opts.jobs + ', timeout=' + opts.timeout + 'ms')
+  console.log('running ' + entries.length + ' check(s), jobs=' + opts.jobs + ', timeout=' + (opts.timeout != null ? opts.timeout + 'ms (explicit)' : 'per-check (manifest or ' + DEFAULT_TIMEOUT + 'ms)'))
 
   const results = []
   let next = 0

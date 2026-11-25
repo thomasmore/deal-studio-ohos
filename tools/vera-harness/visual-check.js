@@ -6,6 +6,7 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
 const cp = require('node:child_process')
 async function main() {
 const args=process.argv.slice(2), runtimeFlags=['--capture-runtime-traces','--compare-runtime-traces']
@@ -25,7 +26,7 @@ new Function('require','module','exports',fs.readFileSync(require.resolve('./pre
 const {createPreview,effectRequest,seedEffects:injectEffects}=fixture.exports
 const {StageTrace} = loadSource(path.join(sourceRoot,'runtime/trace/StageTrace.ets'))
 const C = loadVera('VeraCompiler'), V = loadVera('VeraInterpreter'), U = loadVera('VeraUi')
-const output = path.resolve(runtimeMode?'/tmp/opencode/vera-visual-verification.json':process.argv[2] || '/tmp/opencode/vera-visual-verification.json')
+const output = path.resolve(runtimeMode?path.join(os.tmpdir(),'vera-visual-verification.json'):process.argv[2] || path.join(os.tmpdir(),'vera-visual-verification.json'))
 const baseline = !runtimeMode&&process.argv.includes('--capture-baseline')
 const runtimeScenarios=[], runtimeNames=new Map([
  ['native fields: rapid input waits 400ms after latest, commits once without keystroke traces','field/debounce-400ms'],
@@ -2327,6 +2328,7 @@ const f=await fieldProbe(), {probe,first}=f
  })
 }
 const report={expected:'All workflows and compatibility checks pass. New components decode correctly. Theme targets match the plan. Enabled text and button contrast is at least 4.5:1. Adaptive columns use one column before measurement and two only when both fit. Widget display and metric roles are capped at 32 vp.',revision:cp.execFileSync('git',['rev-parse','HEAD'],{cwd:path.join(__dirname,'../..'),encoding:'utf8'}).trim(), command:process.argv.join(' '), sourceRoot, baseline, results, trees, contrasts, native:'Not run: host-only verification requested. ArkUI and native module calls are mocked; this does not replace an ArkTS build or device validation.'}
+fs.mkdirSync(path.dirname(output),{recursive:true})
 fs.writeFileSync(output,JSON.stringify(report,null,2)+'\n')
 console.log(`${results.filter(r=>r.result==='PASS').length}/${results.length} PASS; report ${output}`)
 for(const r of results.filter(r=>r.result==='FAIL'))console.error(r.name+': '+r.error.split('\n')[0])

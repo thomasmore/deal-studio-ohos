@@ -88,6 +88,10 @@ const overrides = {
     args: [path.join(os.tmpdir(), 'vera-capability-verification.json')],
     family: 'runtime',
   },
+  'visual-check.js': {
+    args: [path.join(os.tmpdir(), 'vera-visual-verification.json')],
+    family: 'visual',
+  },
   'calendar-sdk-check.js': {
     env: ['VERA_CALENDAR_SDK_PATH'],
     family: 'ui',
