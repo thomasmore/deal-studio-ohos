@@ -149,7 +149,8 @@ function host(log) {
   }
   const calls = new BlockCalls()
   if (process.env.EXA_API_KEY) calls.search = search
-  calls.content = (system, user, budget) => deepseek(system, user, budget, false)
+  // The text of the catalogue's sections (VeraTemplateContent.ets), recorded like the holes: 18% of b05-b07's requests ask it.
+  calls.content = (system, user, budget) => asked(log, 'content', system, user, budget, false)
   calls.hole = (system, user) => asked(log, 'catalogue-hole', system, user, 500, false)
   // As the phone asks them (SectionFillApp.ets, AgentAppHost.ets).
   calls.sdkContext = async prompt => (await cachedLookup(log, 'find_sdk_function', prompt.substring(0, 300), false)).substring(0, 2500)
@@ -160,10 +161,11 @@ function host(log) {
       return 'find_intent_function:\n' + intent + '\nfind_sdk_function:\n' + await cachedLookup(log, 'find_sdk_function', asked, false)
     }
   }
-  // What the catalogue holes ended as: the bodies kept, after the asks recorded before it.
+  // What the catalogue holes and text ended as: the bodies kept and the fields filled, after the asks recorded before it.
   h.fillBlocks = async request => {
     const fill = await fillSections(request, calls)
-    log.asks.push({kind: 'fill', seq: log.seq++, bodies: Object.fromEntries(fill.holeBodies || new Map()), note: fill.holesNote || ''})
+    log.asks.push({kind: 'fill', seq: log.seq++, bodies: Object.fromEntries(fill.holeBodies || new Map()), note: fill.holesNote || '',
+      content: fill.contentNote || ''})
     return fill
   }
   h.language = language
