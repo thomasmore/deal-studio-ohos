@@ -1105,7 +1105,7 @@ export struct GeneratePage {
       this.status = 'Loading model...'
       let ok = engine.init({
         modelPath: modelPath,
-        nCtx: 4096,
+        nCtx: 16384,
         nThreads: 4,
         nGpuLayers: 0
       })

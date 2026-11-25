@@ -17,7 +17,7 @@ import nativeLlama from 'libllama.so'
 
 export class LlamaConfig {
   modelPath: string = ''
-  nCtx: number = 4096
+  nCtx: number = 16384
   nThreads: number = 4
   nGpuLayers: number = 0
 }
