@@ -46,6 +46,12 @@ const lookupFile = option('--lookups', '')
 // ways a refine can make them -- the written section changed (agent/AgentSectionEdit.ets) and edits of the whole program
 // (AgentSurfaceEdit.ets's editProgram) -- with every call recorded in OUTDIR/<label>/refine/<k>/asks.jsonl.
 const refineCount = Number(option('--refine', '0'))
+// Read here with the other options: what is left in args once they are taken is the list of labels to run.
+// --chain D: after a change one way made, D more changes in a row, each on the program the one before left.
+const chainDepth = Number(option('--chain', '0'))
+// --impossible M: M of the changes for each built screen are ones no phone app can make (the right answer is a refusal).
+const impossibleCount = Number(option('--impossible', '0'))
+
 const lookups = lookupFile ? new Map(Object.entries(JSON.parse(fs.readFileSync(lookupFile, 'utf8')))) : null
 const lookupKey = (tool, query, both) => tool + '\u0000' + query + '\u0000' + (both ? '1' : '0')
 // The log of the request being run, for the lookups the route's own modules make (they are not given a host); requests run
@@ -187,10 +193,6 @@ const CHANGE_PROMPT = 'You suggest changes a person would type under an app on t
   'location or nearby places, a sound or notification while the app is closed, reading other apps or the web without being ' +
   'asked. Reply with JSON only: {"changes": ["...", "..."], "impossible": ["..."]}'
 
-// --chain D: after a change one way made, D more changes in a row, each on the program the one before left.
-const chainDepth = Number(option('--chain', '0'))
-// --impossible M: M of the changes for each built screen are ones no phone app can make (the right answer is a refusal).
-const impossibleCount = Number(option('--impossible', '0'))
 
 /** Changes a person might type under the program, from DeepSeek (not trained on): [{change, impossible}]. */
 async function proposeChanges(prompt, source, n, m) {
