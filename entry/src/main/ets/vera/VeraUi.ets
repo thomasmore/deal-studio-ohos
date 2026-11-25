@@ -17,6 +17,8 @@ import { invokeStdScene } from './VeraScene'
 export class VeraUiNode {
   id: number = 0
   kind: string = ''
+  /** ui.Screen: native subtree identity, not a second program or state. */
+  screenId: string = ''
   style: string = ''
   text: string = ''
   source: string = ''
@@ -484,6 +486,11 @@ export class UiHostEnvironment extends HostEnvironment {
       case 'Column': return containerNode('column', args)
       case 'Row': return containerNode('row', args)
       case 'Card': return containerNode('card', args)
+      case 'Screen':
+        return viewNode('screen', [
+          ['screenId', new VeraStringValue(argString(args, 0))],
+          ['children', argArray(args, 1)],
+        ])
       case 'Scroll': return containerNode('scroll', args)
       case 'Canvas': return containerNode('canvas', args)
       case 'Transform':
@@ -1052,6 +1059,9 @@ function decodeNode(obj: VeraObjectValue, depth: number): VeraUiNode {
     switch (key) {
       case 'type':
         if (v instanceof VeraStringValue) { node.kind = (v as VeraStringValue).value }
+        break
+      case 'screenId':
+        if (v instanceof VeraStringValue) { node.screenId = (v as VeraStringValue).value }
         break
       case 'style':
         if (v instanceof VeraStringValue) { node.style = (v as VeraStringValue).value }

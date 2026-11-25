@@ -77,6 +77,32 @@ Each new process loads its selected sources again, so a previous build cannot su
 `visual-check.js` records the tested revision, command, decoded trees, and expected-versus-observed checks in JSON.
 Native validation still requires the toolchain described in `CLAUDE.md`.
 
+For shared-state screen identity, stale controls, timer/surface teardown and Back:
+
+```bash
+node tools/vera-harness/multiscreen-check.js
+```
+
+See the [runtime contract](../../docs/multiscreen-runtime.md). Host SVGs are approximate proofs, not native-device evidence.
+
+For the multi-screen planning/shared-writer path and refinement preservation:
+
+```bash
+VERA_TYPESCRIPT_PATH=/path/to/typescript/lib/typescript.js node tools/vera-harness/app-plan-check.js
+```
+
+Real compiler/VM with mocked model/phone boundaries: planning, Generate/Chat handoff, drafts, refinement preservation and repair feedback. `template-run-check.js` covers existing Chat tabs; `chat-prompt-check.js` covers terminal multi-view failures.
+
+For deterministic screen reachability (no phone or model calls):
+
+```bash
+node tools/vera-harness/reachability-check.js                 # regression tests
+node tools/vera-harness/reachability-check.js /path/app.vera # check generated c_view_<id> screens
+# Or append explicit screen IDs: /path/app.vera list detail editor
+```
+
+The same bounded UI-path check runs automatically in `smokeRun` for declared pages and planned named Chat tabs; failures feed the existing repair loop. Single-view apps and legacy fragment-to-tab compositions keep their ordinary smoke contract. See [multi-view generation](../../docs/multiscreen-agent.md) for search limits and coverage caveats.
+
 A `ui.Surface` is drawn by the program itself, frame by frame, so its proofs come from playing it.
 `gfx-run.js` runs `init()`, `view()`, then fixed-step frames with scripted fingers, and draws chosen frames to SVG with `VeraGfx.paintGfx`, the phone's own painter, through the canvas recorder in `gfx-svg.js`:
 

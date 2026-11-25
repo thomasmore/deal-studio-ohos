@@ -16,6 +16,7 @@ import { CompileResult } from './VeraCompiler'
 import { decodeGfx, pointerValue } from './VeraGfx'
 import { decodeScene, sceneEventValue } from './VeraScene'
 import { checkWidget } from './VeraWidgetRefine'
+import { checkScreenReachability } from './VeraReachability'
 
 /** Twice through the handlers: a list's second entry, a toggle switched back. */
 const PASSES: number = 2
@@ -57,13 +58,35 @@ function runaway(e: Object): boolean {
  * app asks for that; `requireContent` is false only in the host checks (agent-check, parts-check, merge-check), which run a screen
  * that has nothing drawn yet to see that it starts and answers every handler.
  */
-export function smokeRun(compiled: CompileResult, requireContent: boolean = true): string {
+export function smokeRun(compiled: CompileResult, requireContent: boolean = true, expectedScreens: string[] = [], startScreen: string = ''): string {
   let host = new UiHostEnvironment()
-  let vm = new VirtualMachine(deserializeVbc2(compiled.vbc2), host)
+  let module = deserializeVbc2(compiled.vbc2)
+  let vm = new VirtualMachine(module, host)
+  let names = module.functions.map((fn): string => fn.name)
+  // Generic refinements have no stored plan; generated c_view_ functions still retain the bounded view gate.
+  let inferred = names.filter((name: string): boolean => name.startsWith('c_view_')).map((name: string): string => name.substring(7))
+  let screens = expectedScreens.length > 0 ? expectedScreens : (requireContent && inferred.length > 1 ? inferred : [])
   let state: RuntimeValue
   try {
     state = vm.execute('init')
     let roots = decodeVeraUi(vm.execute('view', [state]))
+    if (screens.length > 0) {
+      let shape = appTreeProblem(roots, screens, startScreen)
+      if (shape.length > 0) { return shape }
+      // Every declared view, including an editor with no selection, is invoked once on the SAME initial state.
+      for (let id of screens) {
+        let name = 'c_view_' + id
+        if (names.indexOf(name) < 0) { return 'Missing planned screen function ' + name + '(state: AppState): ui.View' }
+        try {
+          let drawn = decodeVeraUi(vm.execute(name, [state]))
+          if (drawn.length !== 1 || drawn[0].kind !== 'screen' || !screenIs(drawn[0].screenId, id) || !hasContent(drawn[0]) ||
+              countKind(drawn[0], 'screen') !== 1 || countKind(drawn[0], 'apptheme') !== 0) {
+            return name + ' must return a nonempty ui.Screen("' + id + '", children), with an optional :recordId suffix'
+          }
+          drawSurfaces(vm, drawn[0], state)
+        } catch (e) { return diagnostic(e as Error, 'drawing ' + name + ' with empty/missing selection') }
+      }
+    }
     let nodes = 0
     for (let root of roots) { nodes += countNodes(root) }
     for (let root of roots) { drawSurfaces(vm, root, state) }
@@ -92,6 +115,12 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
       return diagnostic(e as Error, 'checking the program\'s own expectation (function expect)')
     }
   }
+  // Reachability starts from fresh state and uses only rendered controls, never the synthetic
+  // all-handler state below. Return its diagnostic through the same existing repair loop.
+  if (screens.length > 1) {
+    let reach = checkScreenReachability(compiled.vbc2, screens)
+    if (reach.diagnostic.length > 0) { return reach.diagnostic }
+  }
   let tapped: string[] = []
   for (let pass = 0; pass < PASSES; pass++) {
     let names: string[] = []
@@ -111,7 +140,12 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
       }
       tapped.push(name)
       try {
-        for (let root of decodeVeraUi(vm.execute('view', [state]))) { drawSurfaces(vm, root, state) }
+        let roots = decodeVeraUi(vm.execute('view', [state]))
+        if (screens.length > 0) {
+          let shape = appTreeProblem(roots, screens)
+          if (shape.length > 0) { return shape + after(tapped) }
+        }
+        for (let root of roots) { drawSurfaces(vm, root, state) }
       } catch (e) {
         return diagnostic(e as Error, 'drawing the screen' + after(tapped))
       }
@@ -126,6 +160,43 @@ export function smokeRun(compiled: CompileResult, requireContent: boolean = true
         '\nKeep the widget working with the card-safe components and limits; change it only as far as the request needs.'
     }
   }
+  return ''
+}
+
+function hasContent(node: VeraUiNode): boolean {
+  for (let child of node.children) { if (hasContent(child)) { return true } }
+  // Wrappers and invisible lifecycle nodes alone do not make a usable screen.
+  return ['screen', 'apptheme', 'column', 'row', 'section', 'adaptivecolumns', 'actionbar', 'listgroup', 'metricgroup',
+    'when', 'empty', 'backhandler', 'ticker', 'spacer'].indexOf(node.kind) < 0
+}
+
+function countKind(node: VeraUiNode, kind: string): number {
+  let count = node.kind === kind ? 1 : 0
+  for (let child of node.children) { count += countKind(child, kind) }
+  return count
+}
+
+function screenIs(actual: string, id: string): boolean {
+  return actual === id || actual.startsWith(id + ':')
+}
+
+/** One theme and one active, declared screen, not eagerly built inactive screens. */
+function appTreeProblem(roots: VeraUiNode[], screens: string[], start: string = ''): string {
+  let themes = 0
+  let active: VeraUiNode[] = []
+  let visit = (node: VeraUiNode): void => {
+    if (node.kind === 'apptheme') { themes++ }
+    if (node.kind === 'screen') { active.push(node) }
+    for (let child of node.children) { visit(child) }
+  }
+  for (let root of roots) { visit(root) }
+  if (roots.length !== 1 || roots[0].kind !== 'apptheme' || themes !== 1 || active.length !== 1) {
+    return 'The shared app must draw exactly one AppTheme containing exactly one active Screen'
+  }
+  if (countNodes(active[0]) < 2) { return 'The active planned Screen is empty: ' + active[0].screenId }
+  if (!hasContent(active[0])) { return 'The active planned screen is empty: ' + active[0].screenId }
+  if (!screens.some((id: string): boolean => screenIs(active[0].screenId, id))) { return 'The active Screen has an undeclared id: ' + active[0].screenId }
+  if (start.length > 0 && !screenIs(active[0].screenId, start)) { return 'The app must start on screen ' + start }
   return ''
 }
 

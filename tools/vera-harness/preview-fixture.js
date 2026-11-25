@@ -23,9 +23,9 @@ function declaration(source, prefix) {
 function extractPreview(source) {
   source = source.replace(/\r\n/g, '\n')
   source = source.replace(declaration(source, '  build()'), '')
-  const builders = [...source.matchAll(/^  @LocalBuilder\s*\n  (\w+)\(/gm)].map(match => match[1])
+  const builders = [...source.matchAll(/^  @(LocalBuilder|Builder)\s*\n  (\w+)\(/gm)]
   assert(builders.length > 0, 'must exclude ArkUI builders')
-  for (const name of builders) source = source.replace('  @LocalBuilder\n' + declaration(source, '  ' + name + '('), '')
+  for (const [, decorator, name] of builders) source = source.replace('  @' + decorator + '\n' + declaration(source, '  ' + name + '('), '')
   return source.replace('export struct VeraPreview', 'export class VeraPreview')
     .replace(/@(Watch|StorageProp)\([^)]*\)/g, '')
     .replace(/@(Component|ObservedV2|Trace|Prop|State)\b/g, '')

@@ -34,6 +34,16 @@ assert.equal(chat.chatAgentRequest(after), null)
 // The chat searches for a current figure rather than refusing it.
 assert.match(chat.chatSystemPrompt(true), /search before you answer: do not say you cannot get it/)
 assert.doesNotMatch(chat.chatSystemPrompt(false), /web_search/)
+// Recognized multi-view failures are terminal in direct Chat builds as well as the route.
+{
+  const {AgentResult} = loadVera('agent/VeraAgent')
+  const failed = new AgentResult(); failed.composed.appPlanFailed = true; failed.errors = 'navigation metadata missing'
+  const result = new chat.MiniApp()
+  assert.equal(chat.recordChatAgent(failed, context({request:'open a record'}), result), true)
+  assert.match(result.error, /navigation metadata missing/); assert.equal(result.vbc2, '')
+  const ordinary = new AgentResult()
+  assert.equal(chat.recordChatAgent(ordinary, context({request:'calculator'}), new chat.MiniApp()), false)
+}
 console.log('chat-prompt-check: ok')
 
 // A reply that writes out the record line of an earlier widget (the history shows them as "[widget messageId=3, status=ready: ...]")

@@ -4,6 +4,8 @@ A new screen (the Generate screen, or a widget in the chat) is built by the **ro
 the **whole screen as one hole**. A new screen is never written from scratch: what neither builds is reported as *not built*, with the
 reason, on the Generate screen and in the chat alike. A change to an existing program goes to the model (refine), as before.
 
+For a plan with several screens, the route now branches **before the flat Sketch and part selection**: one shared-module contribution implements the full app, with named views over one `AppState`. It does not run this screen pipeline once per screen. Single-screen requests keep the existing path. See [multi-view generation](multiscreen-agent.md) for the shared Generate/Chat path, validation and limitations.
+
 The idea: planning and building each have a fast path, where Jev picks something ready, and a slow path, where the model writes it. A simple
 request is built from Jev's picks alone; the more a request asks that nothing ready does, the more of it the model writes, down to the whole
 screen. **The composer's parts and the catalogue's sections are chosen together**, by the same Jev call, so there is no second planner: a

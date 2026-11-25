@@ -69,6 +69,7 @@ size: those come from `VeraTheme.ets` and the renderer.
 | `ui.Spinner` | Feedback | A small spinning indicator that something is in progress |
 | `ui.Snackbar` | Feedback | A one-line status strip the program raised itself, with one optional action |
 | `ui.Sparkline` | Chart | A small line chart from a series of whole numbers |
+| `ui.Screen` | Navigation | Identifies the active native screen subtree; all screens share one module and state |
 | `ui.BackHandler` | Navigation | Draws nothing; calls the handler on the system back gesture |
 | `ui.When` | — | Draws the child when the condition is true, nothing when it is false |
 | `ui.intToString` | — | A whole number as text |
@@ -529,7 +530,15 @@ One row of a ui.Table: one string per column, in order.
 
 ## Navigation
 
-*the system back gesture*
+*screen identity and the system back gesture*
+
+### `ui.Screen(id: string, children: View[]): View`
+
+The active screen, with a stable identity. Changing `id` replaces its native controls without restarting the program or replacing shared application state. Same-screen updates retain field identity. Native entry starts at the top; there is no automatic focus-restoration or navigation stack.
+
+Use one named view function per screen, all taking the same AppState. `view(state)` calls only the active function using `if/else`, inside one AppTheme. A handler switches screens by returning updated navigation state. Keep the ID stable while typing; include the record ID for an editor/detail screen. Do not construct inactive screen functions with `ui.When`, whose arguments are evaluated eagerly.
+
+See [Multi-screen runtime](multiscreen-runtime.md) for the contract, a minimal example and regression checks.
 
 ### `ui.BackHandler(action: string): View`
 
@@ -537,7 +546,7 @@ Draws nothing; calls the handler, with 0, on the system back gesture.
 
 **Handler receives:** `int`
 
-> VERA has no separate navigation stack -- "screens" are just a state.screen-style field and ui.When choosing which View to draw. Add one ui.BackHandler wherever a screen other than the first is showing, so the hardware/system back gesture does something sensible (return to the previous screen, close a dialog) instead of the OS default, which exits the app. Leave it out of the first screen so back still exits normally. Only one should be live at a time; if several are drawn in the same frame the last one decoded wins.
+> VERA has no separate navigation stack -- screens are a state.screen-style field and if/else choosing which named screen function to call, wrapped in ui.Screen. Add one ui.BackHandler wherever a screen other than the first is showing, so the hardware/system back gesture does something sensible (return to the previous screen, close a dialog) instead of the OS default, which exits the app. Leave it out of the first screen so back still exits normally. Only one should be live at a time; if several are drawn in the same frame the last one decoded wins.
 
 ## Drawing frame by frame
 

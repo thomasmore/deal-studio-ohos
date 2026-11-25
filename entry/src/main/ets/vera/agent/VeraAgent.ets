@@ -22,6 +22,7 @@ import { FragmentSpec } from '../VeraTemplates'
 import { buildSlotRequest, readSlotValues, specsOf } from '../VeraSectionCompose'
 import { buttonsOnScreen, claimsDone, claimsUndone, putBack } from './AgentClaims'
 import { composeNeeds } from '../NeedsChoose'
+import { NEED_ACTION, NEED_LIVE } from '../NeedsPlan'
 import { AlignResult, alignCandidates, alignIsEnabled, alignLeftovers } from './AgentAlign'
 import { Composition as ScreenRecord, compositionFromPlan, rebuilds } from '../VeraComposition'
 import { holeBodiesBySlot } from '../VeraHoles'
@@ -173,6 +174,54 @@ export async function runAgent(request: AgentRequest, host: AgentHost): Promise<
   addStage(result.stages, 'Your answers', WHO_YOU, waitedOnYou, result.asked.length.toString() + ' question(s)')
   addStage(result.stages, 'Planning, the rest', WHO_PHONE, planning - composed.sketchMs - composed.jevMs - waitedOnYou, 'building the sketch, checks')
   result.plan = composed.parsed !== null && composePlanEnabled() ? sketchPlan(composed.parsed!) : ''
+  // The full app plan has not entered the one-list/one-clock composer. One module, one state and one writer call chain.
+  if (composed.appPlan !== null) {
+    let app = composed.appPlan!
+    let plan = new ScreenPlan()
+    plan.appPlan = app
+    plan.widget = request.widget
+    plan.prompt = request.prompt
+    plan.globals.set('__HEADER_STYLE__', 'none')
+    plan.globals.set('__TITLE__', typeof app.base['title'] === 'string' ? app.base['title'] as string : 'App')
+    for (let n of app.needs) { plan.addToWrite(n.id, n.words, n.type === NEED_ACTION || n.type === NEED_LIVE) }
+    result.screen = plan
+    result.plan = JSON.stringify(app)
+    try {
+      host.status('Writing the shared app...')
+      let writeStart = Date.now()
+      let writeTools = toolCount()
+      let written = await writeHole(plan, app.request || request.prompt, [], host)
+      checkAgent(host)
+      result.custom = written
+      let wrote = Date.now() - writeStart
+      let lookups = Math.min(toolSpanSince(writeTools), wrote)
+      addStage(result.stages, 'Looking up phone functions', WHO_PHONE, lookups)
+      addStage(result.stages, 'Model writes the shared app', WHO_MODEL, wrote - lookups,
+        written !== null ? written.attempts.toString() + ' attempt(s)' : '')
+      if (written !== null && written.section !== null && plan.open().length === 0 && written.missed.length === 0) {
+        let settled = await settleProgram(assemblePlan(plan), app.request || request.prompt, host, app)
+        checkAgent(host)
+        result.checkMs = settled.checkMs
+        result.repair = settled.repair
+        result.errors = settled.errors
+        result.note += settled.note
+        addStage(result.stages, 'Compile and check app views', WHO_PHONE, settled.checkMs)
+        if (settled.errors.length === 0) {
+          result.source = settled.source
+          result.vbc2 = settled.vbc2
+          composed.source = settled.source
+        }
+      } else { result.errors = written !== null ? written.failed : 'no shared app contribution' }
+      if (result.source.length === 0) { result.note += '; app not built: ' + result.errors }
+      // No flat composition record: structural block edits cannot preserve this app's named views and shared data.
+    } catch (e) {
+      checkAgent(host)
+      result.errors = (e as Error).message
+      result.note += '; shared app failed: ' + result.errors
+    }
+    result.ms = Date.now() - started
+    return result
+  }
   // What the composition leaves to be written is first offered to the catalogue: a section may do exactly that.
   if (composed.composition !== null && alignIsEnabled() && !host.cancelled() && alignCandidates(composed.composition!).length > 0) {
     host.status('Looking for ready-made parts...')

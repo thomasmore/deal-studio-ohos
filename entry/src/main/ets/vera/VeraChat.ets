@@ -18,6 +18,7 @@ import { GenerateRequest } from './LlamaEngine'
 import { compileVeraSource, CompileError } from './VeraCompiler'
 import { applyRepair, repairPrompt, RepairOutcome } from './VeraRepair'
 import { smokeRun } from './VeraSmoke'
+import { smokeRefinement, appRefinementNote } from './VeraAppRefine'
 import { composeEnabled, ComposeResult } from './VeraCompose'
 import { AgentRequest, AgentResult, runAgent } from './agent/VeraAgent'
 import { appAgentHost } from './agent/AgentAppHost'
@@ -757,7 +758,8 @@ export function chatAgentRequest(context: WidgetBuildContext): AgentRequest | nu
 
 /**
  * Records what the agent made of a chat widget -- the trace, the attempt in `result`'s stats -- and puts the
- * widget into `result` when it was served. True when it was.
+ * widget into `result` when served. True when handled: served, or a recognized multi-view failure
+ * that must not fall through to flat generation (result.error explains it).
  */
 export function recordChatAgent(agent: AgentResult, context: WidgetBuildContext, result: MiniApp): boolean {
   let composed: ComposeResult = agent.composed
@@ -784,7 +786,13 @@ export function recordChatAgent(agent: AgentResult, context: WidgetBuildContext,
   stat.success = agent.vbc2.length > 0
   stat.verdict = agent.vbc2.length > 0 ? 'composed' : 'not composed'
   result.stats.push(stat)
-  if (agent.vbc2.length === 0) { return false }
+  if (agent.vbc2.length === 0) {
+    if (composed.appPlan !== null || composed.appPlanFailed) {
+      result.error = 'Not built: ' + (agent.errors || agent.note)
+      return true // Recognized multi-view failure is terminal, not a flat generation fallback.
+    }
+    return false
+  }
   result.vbc2 = agent.vbc2
   result.source = agent.source
   result.error = ''
@@ -839,7 +847,7 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
     let doing = attempt === 1 ? 'Building a widget' : 'Fixing the widget (' + attempt.toString() + '/' + MAX_ATTEMPTS.toString() + ')'
     if (!isCancelled(cancellation)) { onStatus(doing + '...') }
     let request = new GenerateRequest()
-    request.systemPrompt = systemPrompt
+    request.systemPrompt = systemPrompt + appRefinementNote(previousSource)
     request.uiTool = false
     request.temperature = 0.2
     request.maxTokens = DEEPSEEK_GENERATION_MAX_TOKENS
@@ -914,7 +922,7 @@ export async function buildMiniApp(systemPrompt: string, description: string | W
       let compiled = compileVeraSource(text)
       // As on the Generate screen: run once before serving, and repair a runtime error like a compile error.
       let smokeStart = Date.now()
-      let ran = smokeRun(compiled)
+      let ran = smokeRefinement(compiled, previousSource)
       throwIfCancelled(cancellation)
       logStep('smoke', smokeStart, 'src=widget attempt=' + attempt.toString() + ' ok=' + (ran.length === 0).toString())
       if (ran.length > 0) { throw new Error(ran) }
