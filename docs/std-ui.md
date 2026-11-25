@@ -290,6 +290,18 @@ A calendar date, as a local day number; the handler takes (state, value: number)
 
 > For a date the person chooses -- a due date, a birthday, a trip. The value is the day number time.daysSinceEpoch() returns, so start it at today with time.daysSinceEpoch(), compare it with today directly, and subtract two of them for a count of days. ui.dateToString(day) writes it as "30 Oct 2026" inside another component's text; (day + 4) % 7 is its weekday, 0=Sunday, as time.weekday() counts. Pair it with ui.TimeField for a date and a time.
 
+#### Converting a selected date and time to a timestamp
+
+`time.atLocalTime(day: number, minutes: number): number` returns Unix milliseconds for a `DateField` day and a `TimeField` minute-of-day. Both arguments must be whole numbers; `day` is in -1,000,000..1,000,000 and `minutes` in 0..1439. Invalid values trap rather than silently wrapping into another day.
+
+Use it in init/handlers when constructing a calendar event or deadline:
+
+```ts
+let startMillis: number = time.atLocalTime(state.date, state.time);
+```
+
+The selected date's local timezone/DST offset applies, not today's offset. Like the platform `Date` constructor, a skipped local time advances by the timezone gap, and an ambiguous repeated time chooses the earlier occurrence. Day 0 remains 1 January 1970; this does not change date-picker defaults, which still use `time.daysSinceEpoch()`.
+
 ### `ui.Toggle(style: string, label: string, checked: boolean, action: string): View`
 
 On/off switch; the handler takes (state, value: boolean).

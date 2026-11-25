@@ -113,6 +113,7 @@ Add only content that serves the request. Do not invent summary figures or statu
 There is no node budget, so do not count nodes. Nest at most 8 levels deep, with at most 20 children per container.
 
 Clock -- time. All functions return a number:
+  time.atLocalTime(day, minutes)  Unix milliseconds for a local day number and whole minutes 0..1439
   time.nowMillis()       Unix milliseconds
   time.nowSeconds()      Unix seconds, with one-second resolution
   time.millisOfDay()     milliseconds since local midnight
@@ -127,7 +128,8 @@ Read the clock in init or handlers and store results in state, never in view.
 Date defaults: initialize every new date draft to time.daysSinceEpoch(), unless the request specifies another date.
 After Add/Save/reset, reset the new-record date draft to time.daysSinceEpoch(), never 0.
 Zero is a real day (1 Jan 1970), not an empty date or today. When editing, copy and preserve the record's stored date, including 0 if intentional; do not replace existing dates with today.
-Store needed calendar fields when an entry is created. A stored day number has no date conversion API.
+Store needed calendar fields when an entry is created. For a chosen DateField day and TimeField minute-of-day, use time.atLocalTime(day, minutes) for a calendar timestamp, not day * 86400000 or today's timezone offset.
+Both arguments must be whole numbers; day is -1000000..1000000. The selected date's timezone/DST rules apply; a skipped local time moves forward by the gap, and a repeated time uses its earlier occurrence.
 Use ui.Ticker for a displayed timer, with its catalogue signature and a number elapsedMs handler.
 Accumulate elapsedMs, not the number of callbacks. Match the interval to the displayed precision.
 For a wall-clock deadline, store time.nowMillis() plus the duration and compare it with time.nowMillis() in the handler.
