@@ -1,0 +1,31 @@
+{
+  "family_ids": {
+    "asked": 1,
+    "blocking": 2,
+    "clock": 3,
+    "countdown": 4,
+    "does": 5,
+    "edit": 6,
+    "expr": 7,
+    "list": 8,
+    "need": 9,
+    "ready": 10,
+    "real_data": 11,
+    "section1": 12,
+    "section2": 13,
+    "section3": 14,
+    "show": 15,
+    "steps": 16,
+    "theme": 17,
+    "unit": 18,
+    "whose": 19,
+    "widget": 20,
+    "within": 21,
+    "written": 22
+  },
+  "asset_sha256": {
+    "tokenizer.json": "4bf112bb984187f0ebc5698b0e63c035dd3e3089171d9687fb3499299093aaf8",
+    "ranker.safetensors": "6eccfda147a7448ed1a6ace9d9af7f2367ac9e07d7cf5bfb910393c764c47d69",
+    "embeddings.q8": "9349e1f085cf7df69e98372ba17f1dcc5c39b17b2320c8a87fab1c5089f4abe6"
+  }
+}

@@ -1,18 +1,45 @@
 # Cloud Jev and Local Rust playground
 
-Run the same mini-app request with Cloud Jev and a local Q4 selector. DeepSeek
+Run the same mini-app request with Cloud Jev and the local mmBERT shared-state Q8 selector. DeepSeek
 makes one plan and both paths verify and use that plan. DeepSeek still writes
 section content and code in both paths. The host runs the app's compiler and VM
 to draw each preview.
 
 ## Start from a fresh checkout
 
-Use Node.js 22 or later and Rust 1.93.1 or later. The public model export also
-requires Python 3.11 or later.
-Run these commands from the repository root.
+Use Node.js 22 or later and Rust 1.93.1 or later. Run these commands from
+the repository root.
 
 ```sh
 npm install --no-save --package-lock=false typescript@5.9.3
+cargo build --locked --release --manifest-path native/local-jev/Cargo.toml \
+  --bin local-jev-shared
+```
+
+The repository supplies the shared-state Q8 bundle in `tools/vera-playground/models`.
+[Bundle provenance and license notices](models/mmbert-shared-state-q8/README.md)
+
+### Start the playground
+
+Set `DEEPSEEK_API_KEY` and `TYPESAFE_API_KEY` in your environment or
+`~/.env`. Search in section fill also uses `EXA_API_KEY` when set in the
+environment.
+
+```sh
+node tools/vera-playground/server.js
+```
+
+Open the playground. Set `VERA_PLAYGROUND_PORT` if port 4173 is in use.
+[Playground](http://127.0.0.1:4173/)
+
+## Select a Laya Q4 bundle
+
+Build the runners first. Set `VERA_LAYA_MANIFEST` to select an existing
+Q4 bundle. Set `VERA_LAYA_CLI` to select an alternate Laya runner.
+If you set only `VERA_LAYA_CLI`, the server reads the manifest from
+`.local-jev/bundle-q4/laya-manifest.json`. Restart the server after a change.
+
+```sh
 cargo build --locked --release --manifest-path native/local-jev/Cargo.toml \
   --bin local-laya --bin laya-quantize
 ```
@@ -36,8 +63,9 @@ directory works for the [embedded app build](../../native/local-jev/README.md).
 
 ### Export the public Laya Multilingual Q4 bundle
 
-Build from the pinned [Apache-2.0 checkpoint](https://huggingface.co/convaiinnovations/laya-multilingual/tree/1720e3e3357cfe1e281542e223f8273b0890ca34).
-The download uses about 678 MB. This model uses mmBERT-base.
+Use Python 3.11 or later to export this model. The download uses about 678 MB.
+This model uses mmBERT-base.
+[Pinned Apache-2.0 checkpoint](https://huggingface.co/convaiinnovations/laya-multilingual/tree/1720e3e3357cfe1e281542e223f8273b0890ca34)
 
 ```sh
 python3 -m venv .local-jev/venv
@@ -49,21 +77,8 @@ hf download convaiinnovations/laya-multilingual --revision "$revision" \
   --include encoder/config.json --include 'tokenizer/*'
 python tools/local-jev/laya-export.py .local-jev/laya-base .local-jev/bundle-q4 \
   --base-revision "$revision" --q4-embeddings
+export VERA_LAYA_MANIFEST="$PWD/.local-jev/bundle-q4/laya-manifest.json"
 ```
-
-### Start the playground
-
-Set `DEEPSEEK_API_KEY` and `TYPESAFE_API_KEY` in your environment or
-`~/.env`. Search in section fill also uses `EXA_API_KEY` when set in the
-environment.
-
-```sh
-node tools/vera-playground/server.js
-```
-
-Open [the playground](http://127.0.0.1:4173/). Set `VERA_PLAYGROUND_PORT` if
-that port is in use. Set `VERA_LAYA_CLI` to an absolute path to use a different
-build of the runner. Restart the server when you change the bundle or the runner.
 
 ## Run a comparison
 
@@ -81,8 +96,9 @@ build of the runner. Restart the server when you change the bundle or the runner
    DeepSeek novelty check against saved prompts. **Stop** ends automatic runs.
 
 The local model supplies uncalibrated scores for this experiment. The previews
-use approximate host SVG layout. The public model has a different size, accuracy,
-and latency from Cycle 2. Wide requests can take tens of seconds on a CPU. Use the same bundle and machine when comparing results.
+use approximate host SVG layout. Wide requests with the public Laya model can
+take tens of seconds on a CPU. Use the same bundle and machine when comparing
+results.
 
 Reports, decision logs, and plan hashes are saved under `.local-jev/playground/`.
 A custom port uses `.local-jev/playground-<port>/`.
@@ -102,12 +118,13 @@ node tools/vera-playground/pipeline-check.js
 
 The last two checks print their report paths. The reports record the shared-plan
 hash and Rust worker identity. The pipeline check also covers restart, request
-matching, uncertainty, and failed providers.
+matching, uncertainty, and failed providers. Run the same checks with
+`VERA_LAYA_MANIFEST` set to test the explicit Laya path.
 
 For standalone generation and structural editing on host and phone, see
 [experimental selector integration](../../docs/local-selector-integration.md).
-The worker now uses Rust's `--experimental-decisions`; score conversion is no longer
-implemented separately in JavaScript.
+The Laya worker uses Rust's `--experimental-decisions`. Both workers convert
+logits to experimental decisions in Rust.
 
 See [OpenHarmony integration](../../native/local-jev/README.md) for the
 embedded build, C ABI verification, and the app call sites.
@@ -132,6 +149,6 @@ median warm formula call took 0.30 ms. In the replay, 513 of 603 formulas passed
 the Vera VM numeric checks, including one of three formulas from a saved app plan.
 The UI scorer reproduced 45 of 45 decisions from the earlier Qwen scorer.
 
-The standalone CLI accepts framed Jev-shaped requests. The browser playground
-and OpenHarmony build still use Laya-compatible bundles. Full Vera code
-generation and phone timing remain open.
+The archive includes a standalone CLI that accepts framed Jev-shaped requests.
+The playground uses the mmBERT shared-state Q8 bundle described above.
+The OpenHarmony build uses Laya-compatible bundles.

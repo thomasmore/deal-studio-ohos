@@ -1,6 +1,6 @@
 # Experimental local selector integration
 
-Local Laya can supply generation and structural-edit decisions on the host and phone.
+The experimental local selector supplies generation and structural-edit decisions on the host and phone.
 This is developer-only, uncalibrated selection, **not offline generation**. Planning,
 section fill, custom code and model refinement still use the configured cloud writer.
 Cloud defaults are unchanged. No local selector failure triggers TypeSafe or the
@@ -22,32 +22,33 @@ fallbacks, not a cloud selector fallback.
   report busy until the current call completes.
 - Rust owns the experimental temperature-1 softmax, finite-score/type/option validation,
   deterministic ties, and warnings. No separate ArkTS/JS probability conversion exists.
-- `local_jev_predict` remains guarded for Laya. Experimental answers require the explicit
-  `local_jev_experimental_decisions` C API or `--experimental-decisions` CLI flag.
-- Replies retain raw logits and token truncation records. They are always marked
+- `local_jev_predict` refuses the shared-state Q8 and Laya Q4 profiles. Use the
+  `local_jev_experimental_decisions` C API for experimental answers.
+- Replies retain raw logits. Laya replies also retain token truncation records. Decisions are marked
   diagnostic, uncalibrated and `productionAllowed:false`. Choice confidence is not
   claimed to be calibrated; existing caller option filters still apply.
 
 ## Model baseline
 
-Follow `tools/vera-playground/README.md` to export the public pinned Q4 bundle.
-Keep all four assets together. Cycle 2 remains an optional, separately supplied bundle.
-The public bundle is 216,489,817 bytes; its token embeddings expand in memory, so
-bundle size is **not** a runtime-memory estimate.
+The host and the default embedded archive use the checked-in mmBERT shared-state
+Q8 bundle. Readiness reports model ID `mmbert-shared-state-q8-experimental`
+and manifest SHA-256 `4d40ff9d998cb139df51104bcf3c3d9a23f8bf609bc74c25819b5017e1eec7d5`.
+[Bundle assets and terms](../tools/vera-playground/models/mmbert-shared-state-q8/README.md)
 
-The [shared Qwen archive and Mac example](../tools/vera-playground/README.md#run-the-shared-qwen-prototype-on-a-mac)
-use a separate CLI for UI selection and formula generation. Use the Laya-compatible
-manifest for the NAPI build and phone benchmark below.
+Follow the playground guide to select the public Laya Q4 bundle or the
+separately supplied Cycle 2 bundle. Keep all four assets together.
+Use an explicit Laya bundle for the serial and batched phone benchmark.
+[Laya Q4 bundle instructions](../tools/vera-playground/README.md#select-a-laya-q4-bundle)
 
 ## Host generation
 
 Set `VERA_TYPESCRIPT_PATH` if TypeScript is not installed in this checkout.
-Set `VERA_LAYA_MANIFEST` to an absolute manifest path if not using
-`.local-jev/bundle-q4/laya-manifest.json`. Build the release CLI first.
+For shared-state Q8, unset `VERA_LAYA_CLI` and `VERA_LAYA_MANIFEST`.
+Build the default release CLI first.
 
 ```sh
 cargo build --locked --release --manifest-path native/local-jev/Cargo.toml \
-  --bin local-laya --bin laya-quantize
+  --bin local-jev-shared
 # requests.tsv contains label<TAB>English request
 ARKESTR_API_KEY="$DEEPSEEK_API_KEY" node tools/vera-harness/agent-run.js \
   -s local -p requests.tsv -o /tmp/local-generation -j 1
@@ -59,13 +60,20 @@ entry points can install the same adapter, then call `VeraSelector.askSelector` 
 `VeraComposition.selectEdit`; close it when finished. The playground retains its
 persistent-worker IPC for comparisons. Both transports use Rust's same policy.
 
+For Laya on the host, build the Laya runner and archive first.
+Export `VERA_LAYA_MANIFEST="$BUNDLE/laya-manifest.json"` to select that bundle.
+Run the same standalone generation command.
+[Laya host build and verification](../native/local-jev/README.md#build-a-laya-q4-host-archive)
+
 ## Phone build and opt-in
 
-Cross-build the embedded Rust archive using the SDK commands in
-`native/local-jev/README.md`, setting `LAYA_BUNDLE_DIR` explicitly to the selected
-public or separately supplied Cycle 2 bundle directory.
-Then build with an explicit archive (or set `VERA_LOCAL_JEV_ARCHIVE` through CMake's
-`-D` arguments):
+Configure the SDK and run the build command for the selected model.
+[SDK setup](../native/local-jev/README.md#build-for-arm64-openharmony)
+[Default Q8 archive](../native/local-jev/README.md#build-the-default-q8-archive-for-openharmony)
+[Laya Q4 archive](../native/local-jev/README.md#build-a-laya-q4-archive-for-openharmony)
+
+Set the explicit archive path and build the HAP. CMake also accepts
+`VERA_LOCAL_JEV_ARCHIVE` through its `-D` arguments.
 
 ```sh
 export VERA_LOCAL_JEV_ARCHIVE="$PWD/native/local-jev/target/aarch64-unknown-linux-ohos/release/liblocal_jev.a"
@@ -104,9 +112,26 @@ Requests and raw replies are captured as `selector` events
 in the existing `vera/trace.jsonl`, including the bundle-manifest hash. Logs may contain
 personal prompt/context data; do not publish them without review.
 
+## Distribute a shared-state Q8 HAP
+
+Distribute the Q8 HAP and model notices together. Run these commands from the repository root.
+Set `HAP` to the absolute path of the existing Q8 HAP.
+
+```sh
+HAP=/absolute/path/to/vera-probe-dyn-signed.hap
+BUNDLE="$PWD/tools/vera-playground/models/mmbert-shared-state-q8"
+ARCHIVE="$PWD/.local-jev/vera-shared-state-q8-hap.tar.gz"
+mkdir -p .local-jev
+COPYFILE_DISABLE=1 tar -czf "$ARCHIVE" -C "$(dirname "$HAP")" "$(basename "$HAP")" \
+  -C "$BUNDLE" NOTICE GEMMA-TERMS.md prohibited-use.md LICENSE-MMBERT-MIT
+tar -tzf "$ARCHIVE"
+```
+
+The archive listing includes the HAP and all four notice and license files.
+
 ## Verification
 
-No model or keys needed:
+Run these checks without downloading a model or setting API keys.
 
 ```sh
 cargo test --locked --manifest-path native/local-jev/Cargo.toml
@@ -118,7 +143,8 @@ node tools/vera-playground/check.js
 node tools/vera-playground/prompt-check.js
 ```
 
-With the release runner and public bundle (cloud replies are fixtures):
+Run these checks with the release runner and checked-in bundle. The checks use
+fixtures for cloud replies.
 
 ```sh
 node tools/local-jev/integration-check.js
@@ -128,13 +154,14 @@ node tools/vera-playground/pipeline-check.js
 
 The integration check runs standalone generation without TypeSafe credentials, then
 sends a structural-edit request through the real application boundary and model.
-The existing C ABI check now verifies readiness and experimental decisions as well
-as guarded prediction and diagnostic logits. Cross-compile it with the OHOS archive
-to run the same probe via `hdc` without replacing the installed app.
+The C ABI probe checks readiness, guarded prediction, diagnostic logits, and
+experimental decisions. Use the ABI commands for the selected model.
+[Host C ABI probe](../native/local-jev/README.md#verify-the-host-c-abi)
+[OpenHarmony C ABI probe](../native/local-jev/README.md#verify-the-openharmony-c-abi)
 
 ## Compare serial and batched inference
 
-Cross-link `tools/local-jev/device-bench.c` with the embedded arm64 archive.
+Cross-link `tools/local-jev/device-bench.c` with an arm64 archive that embeds Laya.
 Send the executable and a saved request to the phone with `hdc file send`.
 Use the same executable, request bytes, and thread count for both modes.
 
@@ -155,16 +182,24 @@ Compare winners and logits by question and option ID. Use the highest
 `peak_rss_kib` in each run for process peak memory. On macOS this field comes
 from `getrusage`. On OpenHarmony it comes from `VmHWM`.
 
-Omit the mode to use the original serial C export and its existing output.
-The app uses its existing serial export.
+Omit the mode to call the app's experimental C entry point. With a Laya archive,
+this calls the serial scorer. With the default archive, it calls the shared-state scorer.
 
 ## Qualification still required
 
-See `docs/local-selector-verification.md` for actual host, installed-app and device
-measurements, including known incorrect selections. Phone generation, NAPI loading,
-repeated requests and Settings persistence have been exercised. Phone structural-edit
-UI, cancellation under native load, app-level peak memory and extended responsiveness
-still require verification. Record the exact bundle and input policy for each run.
+Prior phone runs used Laya Q4. They covered generation, NAPI loading, repeated
+requests, and Settings persistence. The verification report records the public
+Laya and Cycle 2 results.
+[Laya verification report](local-selector-verification.md)
+
+The shared-state Q8 host CLI and embedded C ABI matched the saved reference
+reply for a request with 22 questions. The OpenHarmony Rust archive cross-build
+succeeded and contains the exact pinned assets. Q8 HAP loading and phone
+inference still require verification.
+
+Phone structural-edit UI, cancellation under native load, app-level peak memory,
+and extended responsiveness still require verification. Record the exact bundle
+and input policy for each run.
 
 Before production: independently human-label representative requests, split by task
 family/run to prevent leakage, evaluate raw accuracy, fit calibration and abstention

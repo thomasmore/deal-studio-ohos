@@ -19,15 +19,17 @@ if len(paths) != 1:
 print(paths[0])'
 )"
 
-mkdir "$scratch/local-jev"
-cp "$crate/"{Cargo.lock,Cargo.toml,build.rs} "$scratch/local-jev/"
-cp -R "$crate/src" "$scratch/local-jev/"
+scratch_crate="$scratch/native/local-jev"
+mkdir -p "$scratch_crate" "$scratch/tools"
+ln -s "$tools_dir/../vera-playground" "$scratch/tools/vera-playground"
+cp "$crate/"{Cargo.lock,Cargo.toml,build.rs} "$scratch_crate/"
+cp -R "$crate/src" "$scratch_crate/"
 cp -R "$candle_dir" "$scratch/candle-core"
 patch -s -d "$scratch/candle-core" -p1 < "$tools_dir/candle-row-scheduling.patch"
 
 config="patch.crates-io.candle-core.path='$scratch/candle-core'"
 export CARGO_TARGET_DIR="$crate/target/candle-scheduling"
-cd "$scratch/local-jev"
+cd "$scratch_crate"
 cargo update --offline --config "$config" -p candle-core
 python3 - "$crate/Cargo.lock" Cargo.lock <<'PY'
 from pathlib import Path

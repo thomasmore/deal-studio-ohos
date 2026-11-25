@@ -1,31 +1,60 @@
 # Embed the local selector in the OpenHarmony app
 
-The selector is a Rust static library with embedded weights and tokenizer.
-The experimental C entry point returns scores for the app's existing JSON
-`state` and `questions`. The regular prediction entry point returns an empty
-answer map with `laya_not_human_calibrated` for embedded Laya bundles.
+The Rust static library embeds the same mmBERT shared-state Q8 bundle that
+`local-jev-shared` reads from the repository. Readiness reports the model ID
+and manifest SHA-256. The shared-state and Laya Q4 profiles expose scores
+for the app's JSON `state` and `questions` through the experimental C API.
+Regular prediction returns an empty answer map for both experimental profiles.
+
+Keep the tokenizer notice, Gemma terms, prohibited-use policy, and mmBERT
+license with distributions that include the shared-state bundle.
+[Bundle assets and terms](../../tools/vera-playground/models/mmbert-shared-state-q8/README.md)
+[Q8 HAP distribution](../../docs/local-selector-integration.md#distribute-a-shared-state-q8-hap)
 
 ## Verify on the development machine
 
-Build or obtain a Q4 bundle by following the
-[playground guide](../../tools/vera-playground/README.md). Run from the repository
-root. Set `BUNDLE` to the absolute directory with all four bundle files.
-For Cycle 2, use the directory extracted from `mmbert-small-cycle2-q4.tar.gz`.
-For the public export, use `$PWD/.local-jev/bundle-q4`.
+Run the commands from the repository root. Build the archive for the model
+you want to verify.
+
+### Build the default Q8 host archive
 
 ```sh
-BUNDLE="$PWD/.local-jev/mmbert-small-cycle2-q4"
-LAYA_BUNDLE_DIR="$BUNDLE" cargo build --locked --release \
+env -u LAYA_BUNDLE_DIR -u JEV_BUNDLE_DIR cargo build --locked --release \
   --manifest-path native/local-jev/Cargo.toml --lib
+```
+
+### Build a Laya Q4 host archive
+
+Set `BUNDLE` to the absolute directory with the four Laya Q4 bundle files.
+The command builds the host runner and the embedded archive.
+[Laya Q4 bundle instructions](../../tools/vera-playground/README.md#select-a-laya-q4-bundle)
+
+```sh
+BUNDLE=/absolute/path/to/laya-q4
+env -u JEV_BUNDLE_DIR LAYA_BUNDLE_DIR="$BUNDLE" cargo build --locked --release \
+  --manifest-path native/local-jev/Cargo.toml --lib --bin local-laya
+```
+
+`JEV_BUNDLE_DIR` selects the existing legacy BERT prediction bundle.
+Only one bundle variable can be set for each build.
+
+### Verify the host C ABI
+
+Link the probe again after each change of model.
+
+```sh
+mkdir -p .local-jev
 cc -I native/local-jev/include tools/local-jev/abi-check.c \
   native/local-jev/target/release/liblocal_jev.a -lpthread -ldl -lm \
   -o .local-jev/abi-check
-.local-jev/abi-check
 ```
 
-The check expects ABI version 1, an empty answer map from
-`local_jev_predict`, and finite diagnostic logits from
-`local_jev_diagnostic_scores`. Both diagnostic calls use the same loaded model.
+Run `.local-jev/abi-check` for shared-state Q8.
+Run `.local-jev/abi-check --laya` for Laya Q4.
+
+The check verifies ABI version 1, guarded prediction, finite diagnostic scores,
+and experimental decisions. For Q8, it also verifies the pinned manifest.
+Readiness and scoring use the same loaded model.
 
 ## Build for arm64 OpenHarmony
 
@@ -40,14 +69,47 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER=/path/to/aarch64-unknown-l
 export CC_aarch64_unknown_linux_ohos="$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER"
 export CXX_aarch64_unknown_linux_ohos=/path/to/aarch64-unknown-linux-ohos-clang++.sh
 export AR_aarch64_unknown_linux_ohos=/path/to/native/llvm/bin/llvm-ar
-LAYA_BUNDLE_DIR="$BUNDLE" cargo build --locked --release \
+```
+
+### Build the default Q8 archive for OpenHarmony
+
+```sh
+env -u LAYA_BUNDLE_DIR -u JEV_BUNDLE_DIR cargo build --locked --release \
   --manifest-path native/local-jev/Cargo.toml --lib \
   --target aarch64-unknown-linux-ohos
 ```
 
-The archive path is
+### Build a Laya Q4 archive for OpenHarmony
+
+Set `BUNDLE` to the absolute directory with the four Laya Q4 bundle files.
+
+```sh
+BUNDLE=/absolute/path/to/laya-q4
+env -u JEV_BUNDLE_DIR LAYA_BUNDLE_DIR="$BUNDLE" cargo build --locked --release \
+  --manifest-path native/local-jev/Cargo.toml --lib \
+  --target aarch64-unknown-linux-ohos
+```
+
+Both commands write the archive to
 `native/local-jev/target/aarch64-unknown-linux-ohos/release/liblocal_jev.a`.
 Each app ABI needs its own Rust target and archive.
+
+### Verify the OpenHarmony C ABI
+
+Link the probe with the archive for the selected model.
+Transfer it to the phone and set its executable permission.
+
+```sh
+mkdir -p .local-jev
+"$CC_aarch64_unknown_linux_ohos" -I native/local-jev/include tools/local-jev/abi-check.c \
+  native/local-jev/target/aarch64-unknown-linux-ohos/release/liblocal_jev.a \
+  -ldl -lm -o .local-jev/abi-check-ohos
+hdc file send .local-jev/abi-check-ohos /data/local/tmp/vera-local-jev-abi-check
+hdc shell chmod +x /data/local/tmp/vera-local-jev-abi-check
+```
+
+Run `hdc shell /data/local/tmp/vera-local-jev-abi-check` for shared-state Q8.
+Run `hdc shell /data/local/tmp/vera-local-jev-abi-check --laya` for Laya Q4.
 
 ## Integrated experimental adapter
 
@@ -61,8 +123,9 @@ for the actual build, host usage, cancellation limits and remaining device check
 
 The C ABI also exposes `local_jev_status` (loads the model off-thread) and
 `local_jev_experimental_decisions` (uncalibrated temperature-1 answers plus raw scores).
-The host CLI's matching flag is `--experimental-decisions`. The Rust implementation
-owns this policy on both platforms; neither adapter calibrates or enables production.
+The host uses `local-jev-shared` for shared-state Q8 and
+`local-laya --experimental-decisions` for Laya. Both use the same Rust policy for
+experimental decisions.
 
 ## NAPI wiring reference
 

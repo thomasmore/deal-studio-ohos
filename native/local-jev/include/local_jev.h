@@ -15,7 +15,7 @@ char *local_jev_predict(const uint8_t *data, size_t len);
 char *local_jev_diagnostic_scores(const uint8_t *data, size_t len);
 // Developer opt-in only: uncalibrated decisions with raw scores and diagnostics.
 char *local_jev_experimental_decisions(const uint8_t *data, size_t len);
-// Benchmark-only capped decisions plus phase timings and group lengths.
+// Laya benchmark decisions plus phase timings and group lengths.
 enum {
     LOCAL_JEV_BENCH_SERIAL = 0,
     LOCAL_JEV_BENCH_BATCHED = 1,

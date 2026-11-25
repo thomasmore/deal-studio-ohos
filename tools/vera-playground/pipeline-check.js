@@ -83,9 +83,13 @@ global.fetch = async (url, options) => {
   LayaStream.prototype.query = async function (...args) {
     const test = JSON.parse(fs.readFileSync(${JSON.stringify(scenarioFile)}, 'utf8'));
     if (test.reason) return {response:{answers:{},local:{status:'uncertain',reason:test.reason}},timings:{cold:false,totalMs:1,warmInferenceMs:1,roundtripMs:1}};
-    const pending = query.apply(this, args);
-    if (test.killPid) setTimeout(() => process.kill(test.killPid, 'SIGTERM'), 25);
-    return pending;
+    if (test.killPid) {
+      this.state.child.stdin.write = () => {
+        process.kill(test.killPid, 'SIGTERM');
+        return true;
+      };
+    }
+    return query.apply(this, args);
   };
   const app = require(${JSON.stringify(path.join(__dirname, 'server.js'))}).createPlayground({output:${JSON.stringify(dir)}}); app.server.listen(0, '127.0.0.1', () => console.log(app.server.address().port)); process.on('SIGTERM',()=>{app.close();app.server.close()})`)
   const env = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'VERA_TYPESCRIPT_PATH', 'VERA_LAYA_CLI', 'VERA_LAYA_MANIFEST'].filter(name => process.env[name]).map(name => [name, process.env[name]]))
@@ -99,7 +103,8 @@ global.fetch = async (url, options) => {
     const base = 'http://127.0.0.1:' + String(chunk).trim()
     const state = async () => (await fetch(base + '/api/state')).json()
     const initial = await state()
-    assert.equal(initial.localSelector.available, true, 'the explicit Q4 bundle is available')
+    assert.equal(initial.localSelector.available, true, 'the selected Rust bundle is available')
+    assert.equal(initial.localSelector.id, spec.id)
     const prompt = 'Game night tip calculator: the bill amount, a tip percent slider and the number of people; show the tip, the total and what each person pays.\nPreserve this exact line.'
     const res = await fetch(base + '/api/run', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Playground-Token': initial.token}, body: JSON.stringify({prompt})})
     assert.equal(res.status, 202)
@@ -108,14 +113,13 @@ global.fetch = async (url, options) => {
     assert.ok(completed, 'comparison must finish')
     assert.equal(completed.prompt, prompt)
     assert.equal(completed.paths.cloud.status, 'complete', JSON.stringify(completed.paths.cloud))
-    assert.equal(completed.paths.cloud.preview, true)
-    assert.equal(completed.localModel, 'mmbert-q4')
+    assert.equal(completed.localModel, spec.id)
     assert.equal(completed.paths.local.status, 'diagnostic', JSON.stringify(completed.paths.local))
-    assert.equal(completed.paths.local.selectorSource.model, spec.manifest.base_model)
+    assert.equal(completed.paths.local.selectorSource.model, spec.model)
     assert.equal(completed.paths.local.selectorSource.calibrated, false)
     assert.equal(completed.paths.local.selectorSource.productionAllowed, false)
-    assert.match(completed.paths.local.selectorSource.quantization, /Q4_0/)
-    const assetBytes = ['laya-config.json', 'tokenizer.json', 'model.gguf']
+    assert.match(completed.paths.local.selectorSource.quantization, spec.laya ? /Q4_0/ : /Q8/)
+    const assetBytes = spec.assets
       .reduce((bytes, name) => bytes + fs.statSync(path.join(spec.bundle, name)).size, fs.statSync(spec.manifestFile).size)
     assert.equal(completed.paths.local.selectorSource.bundleBytes, assetBytes)
     assert.equal(completed.plan.planningCalls, 1)
@@ -157,9 +161,17 @@ global.fetch = async (url, options) => {
     }
     assert.equal(fs.readFileSync(path.join(dir, 'cloud-requests.jsonl'), 'utf8').trim().split('\n').length,
       eventsFor(completed, 'cloud').length + compared.summary.replays.cloud, 'cloud replays only missing counterparts')
-    const svg = await (await fetch(base + `/artifacts/${completed.id}/cloud/preview.svg`)).text()
-    assert.match(svg, /<svg/)
-    assert.match(svg, /Tip/)
+    async function checkPreviews(row) {
+      for (const kind of ['cloud', 'local']) {
+        assert.equal(row.paths[kind].preview, true, `${kind} preview is available`)
+        const response = await fetch(base + `/artifacts/${row.id}/${kind}/preview.svg`)
+        assert.equal(response.status, 200)
+        const svg = await response.text()
+        assert.match(svg, /<svg/)
+        assert.match(svg, /Tip/)
+      }
+    }
+    await checkPreviews(completed)
     const scenarios = []
     async function another(test, auto = true) {
       fs.writeFileSync(scenarioFile, JSON.stringify(test))
@@ -177,12 +189,14 @@ global.fetch = async (url, options) => {
       throw Error('failure scenario did not stop Auto mode')
     }
     const repeated = await another({}, false)
+    await checkPreviews(repeated)
     assert.ok(eventsFor(repeated, 'local').every(e => e.timings.pid === rustPid), 'a second pair reuses the Rust process')
     const interrupted = await another({killPid:rustPid}, false)
-    assert.equal(interrupted.paths.local.error, 'Laya process exited')
+    assert.equal(interrupted.paths.local.error, spec.laya ? 'Laya process exited' : 'Rust selector process exited')
     assert.equal(interrupted.paths.local.selectorCalls, 1)
     assert.equal(interrupted.selectorComparison.replays.local, 0, 'the failed Rust call must not replay')
     const restarted = await another({}, false)
+    await checkPreviews(restarted)
     const restartedPid = eventsFor(restarted, 'local')[0].timings.pid
     assert.notEqual(restartedPid, rustPid, 'a later pair restarts after worker exit')
     for (const reason of ['model_unavailable', 'unknown_future_failure']) {
@@ -199,6 +213,7 @@ global.fetch = async (url, options) => {
     assert.equal(budgetComparison.summary.choice.compared, 0)
     assert.equal(budgetComparison.summary.timing, null, 'a 1 ms refusal is not comparable to a 300 ms answer')
     const question = await another({questions:true}, false)
+    await checkPreviews(question)
     assert.equal(question.paths.cloud.status, 'complete', 'default answers must not request replanning')
     assert.equal(question.paths.cloud.planSha256, question.paths.local.planSha256)
     assert.ok(eventsFor(question, 'local').every(e => e.timings.pid === restartedPid))
@@ -226,7 +241,7 @@ global.fetch = async (url, options) => {
       ...diverged.requests.filter(r => r.cloud.source === 'replay').map(r => r.body)])
     const localReplays = diverged.requests.filter(row => row.local.source === 'replay')
     assert.equal(localReplays.length, diverged.summary.replays.local)
-    assert.ok(localReplays.every(row => row.local.timings.pid === restartedPid && row.local.selectorSource.id === 'mmbert-q4'))
+    assert.ok(localReplays.every(row => row.local.timings.pid === restartedPid && row.local.selectorSource.id === spec.id))
     const replayFailure = await another({diverged:true,replayFailure:true})
     assert.equal(replayFailure.paths.cloud.critical, false)
     assert.equal(replayFailure.paths.local.critical, false)
@@ -267,25 +282,28 @@ global.fetch = async (url, options) => {
     for(let i=0;i<100;i++){try{process.kill(heldPid,0)}catch(error){if(error.code==='ESRCH'){terminated=true;break}}await new Promise(r=>setTimeout(r,20))}
     assert.equal(terminated,true,'server shutdown must terminate its active host child')
     assert.throws(() => process.kill(restartedPid, 0), {code: 'ESRCH'}, 'server shutdown must terminate the Rust worker')
-    const probe = `const app = require(${JSON.stringify(path.join(__dirname, 'server.js'))}).createPlayground({output:${JSON.stringify(path.join(dir, 'profile-probe'))}});
-      app.server.listen(0, '127.0.0.1', async () => {
-        try { const state = await (await fetch('http://127.0.0.1:' + app.server.address().port + '/api/state')).json(); console.log(JSON.stringify(state.localSelector)); }
-        finally { app.close(); app.server.close(); }
-      });`
-    const wrongBundle = path.join(dir, 'wrong-profile')
-    fs.mkdirSync(wrongBundle)
-    for (const name of ['laya-config.json', 'tokenizer.json', 'model.gguf']) {
-      fs.symlinkSync(path.join(spec.bundle, name), path.join(wrongBundle, name))
+    let wrongProfile
+    if (spec.laya) {
+      const probe = `const app = require(${JSON.stringify(path.join(__dirname, 'server.js'))}).createPlayground({output:${JSON.stringify(path.join(dir, 'profile-probe'))}});
+        app.server.listen(0, '127.0.0.1', async () => {
+          try { const state = await (await fetch('http://127.0.0.1:' + app.server.address().port + '/api/state')).json(); console.log(JSON.stringify(state.localSelector)); }
+          finally { app.close(); app.server.close(); }
+        });`
+      const wrongBundle = path.join(dir, 'wrong-profile')
+      fs.mkdirSync(wrongBundle)
+      for (const name of ['laya-config.json', 'tokenizer.json', 'model.gguf']) {
+        fs.symlinkSync(path.join(spec.bundle, name), path.join(wrongBundle, name))
+      }
+      const wrongManifest = path.join(wrongBundle, 'laya-manifest.json')
+      fs.writeFileSync(wrongManifest, JSON.stringify({...spec.manifest,
+        quantization: spec.manifest.quantization.replace('Q4_0 token embeddings', 'Q6K token embeddings')}))
+      wrongProfile = JSON.parse(cp.execFileSync(process.execPath, ['-e', probe], {encoding:'utf8',timeout:10000,
+        env:{...env,NODE_OPTIONS:'',VERA_LAYA_MANIFEST:wrongManifest}}))
+      assert.equal(wrongProfile.available, false, 'a Q6 embedding bundle cannot be offered as Q4')
     }
-    const wrongManifest = path.join(wrongBundle, 'laya-manifest.json')
-    fs.writeFileSync(wrongManifest, JSON.stringify({...spec.manifest,
-      quantization: spec.manifest.quantization.replace('Q4_0 token embeddings', 'Q6K token embeddings')}))
-    const wrongProfile = JSON.parse(cp.execFileSync(process.execPath, ['-e', probe], {encoding:'utf8',timeout:10000,
-      env:{...env,NODE_OPTIONS:'',VERA_LAYA_MANIFEST:wrongManifest}}))
-    assert.equal(wrongProfile.available, false, 'a Q6 embedding bundle cannot be offered as Q4')
     const report = {revision: cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), command: 'node tools/vera-playground/pipeline-check.js',
-      inputs: 'recorded tip plan and Jev answers, isolated DeepSeek and TypeSafe, actual framed Laya Q4 Rust CLI, exact multiline prompt',
-      expected: 'One shared plan per pair. Rust reuses its worker and restarts after exit. Complete warm replies count toward timing. Exact replay provenance survives. Operational replay failures stop Auto. The Q6/Q4 profile is unavailable.', observed: completed, compared: compared.summary, scenarios, wrongProfile, status: 'pass',
+      inputs: ['recorded tip plan and Jev answers', 'isolated DeepSeek and TypeSafe', spec.id, 'exact multiline prompt'],
+      expected: 'One shared plan and two SVG previews per successful pair. Rust reuses its worker and restarts after exit. Complete warm replies count toward timing. Exact replay provenance survives. Operational replay failures stop Auto. An explicit Laya Q6/Q4 profile is unavailable.', observed: completed, compared: compared.summary, scenarios, wrongProfile, status: 'pass',
       scopedStatus: cp.execFileSync('git', ['status', '--porcelain', '--', 'tools/vera-playground', 'tools/vera-harness/agent-run.js'], {encoding: 'utf8'}),
       sourceHashes: Object.fromEntries(['server.js','check.js','pipeline-check.js','laya-stream.js','local-selector.js','selector-comparison.js','public/app.js','public/index.html','public/style.css','README.md','../vera-harness/agent-run.js'].map(file => [file, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, file))).digest('hex')]))}
     fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2))
