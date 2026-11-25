@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id)
 let state, selected = '', lastRender = '', posting = false, followLatest = true, clientError = '', historySignature = ''
 let draft = null, lastGeneratedId = '', draftStatusActive = false
+const streamedLabels = {'mmbert-shared-state-q8-experimental': 'mmBERT shared-state Q8', 'mmbert-q4': 'mmBERT-small Q4'}
 const historicalLabels = {e5: 'E5 · safe / uncalibrated', 'laya-safe': 'Laya · safe / uncertain', 'laya-diagnostic': 'Laya · diagnostic / uncalibrated'}
 const duration = ms => Number.isFinite(ms) ? ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(2)} s` : '—'
 function sizePrompt() { $('prompt').style.height = 'auto'; $('prompt').style.height = Math.min(180, $('prompt').scrollHeight) + 'px' }
@@ -63,7 +64,7 @@ function render() {
   } else options.forEach((option,index)=>{if($('history').options[index]?.textContent!==option.label)$('history').options[index].textContent=option.label})
   const row = (followLatest ? state.history[0] : state.history.find(row => row.id === selected)) || state.history[0]
   if (!row) {
-    $('local-title').textContent = state.localSelector?.label || 'Local Rust Q4'
+    $('local-title').textContent = state.localSelector?.label || 'mmBERT shared-state Q8'
     $('local-subtitle').textContent = state.localSelector?.available === false ? 'Local model unavailable' : 'Local Rust · uncalibrated'
     if(generation) {
       $('notes').replaceChildren(text('p',`Request generation: ${generation.status} · ${generation.attemptCount} attempt(s). ${generation.nextRetryAt?'Next retry: '+new Date(generation.nextRetryAt).toLocaleTimeString()+'. ':''}Requests and semantic checks are saved. Novelty is heuristic.`))
@@ -78,11 +79,12 @@ function render() {
   lastRender = signature
   if (!$('prompt').matches(':focus')&&!draft&&row.prompt) { $('prompt').value = row.prompt; sizePrompt() }
   const decisions = [], errors = []
+  const streamed = Object.hasOwn(streamedLabels, row.localModel)
   for (const kind of ['cloud', 'local']) {
-    const value = row.paths[kind], name = kind === 'cloud' ? 'Cloud Jev' : value.selectorSource?.label || row.localLabel || (row.localModel === 'mmbert-q4' ? 'mmBERT-small Q4' : historicalLabels[row.localModel] || 'Local E5')
+    const value = row.paths[kind], name = kind === 'cloud' ? 'Cloud Jev' : value.selectorSource?.label || row.localLabel || streamedLabels[row.localModel] || historicalLabels[row.localModel] || 'Local E5'
     if (kind === 'local') {
       $('local-title').textContent = name
-      $('local-subtitle').textContent = row.localModel === 'mmbert-q4' ? 'Local Rust · uncalibrated' : 'Generated with local Rust model'
+      $('local-subtitle').textContent = streamed ? 'Local Rust · uncalibrated' : 'Generated with local Rust model'
     }
     const base = `/artifacts/${row.id}/${kind}/`
     $(kind + '-selector').textContent = duration(value.selectorMs)
@@ -123,10 +125,11 @@ function render() {
     const link = text('a', 'Shared plan and provenance ↗'); link.href = `/artifacts/${row.id}/shared/shared-plan.json`; link.target = '_blank'; link.rel = 'noopener'; notes.push(link)
     if (row.paths.cloud.planSha256 && row.paths.local.planSha256) notes.push(text('p', row.paths.cloud.planSha256 === row.paths.local.planSha256 ? 'Both paths consumed the same plan hash.' : 'Plan hash mismatch. Do not interpret this comparison.'))
   }
-  if (row.localModel === 'mmbert-q4') {
+  if (streamed) {
     const workers = new Map((row.paths.local.decisions || []).filter(event => event.timings).map(event => [event.timings.pid, event.timings]))
     for (const worker of workers.values()) notes.push(text('p', `Rust process ${worker.pid} · model startup ${duration(worker.modelStartupMs)} · host startup ${duration(worker.coldStartMs)}.`))
-    notes.unshift(text('p', 'Local Rust converts logits to probabilities at temperature 1. The probabilities have no human calibration. Token limits and uncertainty are in the selector log.'))
+    const inputNote = row.localModel === 'mmbert-shared-state-q8-experimental' ? ' The Q8 tokenizer keeps up to the first 48 tokens of each text.' : ''
+    notes.unshift(text('p', 'The selector uses temperature 1 to convert logits to probabilities. The probabilities have no human calibration.' + inputNote))
   } else if (row.localModel === 'laya-diagnostic') notes.unshift(text('p','Laya diagnostic mode uses real raw logits at temperature 1. These probabilities are uncalibrated. Official Laya token caps apply and every truncation appears in the selector log. This mode is playground-only and cannot enable app production answers.'))
   if(row.paths.local.selectorSource)notes.push(text('pre',JSON.stringify(row.paths.local.selectorSource,null,2)))
   if(row.paths.cloud.selectorSource)notes.push(text('p','Cloud selector source: '+JSON.stringify(row.paths.cloud.selectorSource)))
@@ -138,7 +141,7 @@ function render() {
   }
   $('errors').classList.toggle('muted', !errors.length); $('errors').replaceChildren(...(errors.length ? errors : [text('p', row.finishedAt ? 'No errors reported for this comparison.' : 'Results are pending.')]))
   notes.push(text('p', 'Host previews use the real compiler and VM with approximate SVG layout. They do not measure phone rendering or speed.'),
-    text('p', row.localModel === 'mmbert-q4' ? 'Build selector time includes all calls from that build. The server starts Rust separately and reuses it across runs.' : 'Build selector time sums the selector calls. This comparison uses an earlier local runtime.'),
+    text('p', streamed ? 'Build selector time includes all calls from that build. The server starts Rust separately and reuses it across runs.' : 'Build selector time sums the selector calls. This comparison uses an earlier local runtime.'),
     text('p', `Saved comparison: ${row.id}. Both paths consume one shared plan. DeepSeek content and code generation can still vary. A request for replanning stops that path explicitly.`))
   $('notes').replaceChildren(...notes)
 }

@@ -1,6 +1,6 @@
 //! Experimental quantized Laya. Diagnostic scores never authorize production answers.
 use crate::laya_backbone::{attention, Config as EncoderConfig, ModernBert};
-use crate::{parse_with_min_options, uncertain, Question, Request};
+use crate::{parse_diagnostic_request, uncertain, Question};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::LayerNorm;
 use candle_transformers::{
@@ -431,14 +431,7 @@ impl Engine {
         batched: bool,
         mut batch_lengths: Option<&mut Vec<Vec<usize>>>,
     ) -> Result<Value, String> {
-        let request: Request = parse_with_min_options(body, 1)?;
-        let raw: Value = serde_json::from_str(body).map_err(|_| "invalid_request")?;
-        if raw["questions"]
-            .as_object()
-            .is_some_and(|qs| qs.values().any(|q| q.get("labels").is_some()))
-        {
-            return Err("unsupported_custom_noul_labels".into());
-        }
+        let request = parse_diagnostic_request(body)?;
         // Preflight every question before model execution.
         let state_tokens = self.tokens(&request.state)?;
         let mut sequences = request

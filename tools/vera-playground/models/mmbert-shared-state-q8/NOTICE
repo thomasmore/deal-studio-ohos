@@ -1,0 +1,6 @@
+Gemma is provided under and subject to the Gemma Terms of Use found at gemma.ai/resources/terms
+
+The authors of mmBERT adapted the Gemma 2 tokenizer. The Vera export changed
+the tokenizer serialization and settings, including the special-token list.
+Use and distribution of tokenizer.json are subject to Section 3.2 of the
+Gemma Terms of Use in GEMMA-TERMS.md and the Gemma Prohibited Use Policy.

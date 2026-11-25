@@ -1,6 +1,7 @@
 //! Experimental local Jev decisions. Missing answers preserve application safeguards.
 pub mod laya;
 mod laya_backbone;
+pub mod shared_experimental;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
@@ -96,6 +97,19 @@ pub(crate) fn parse_with_min_options(body: &str, min_options: usize) -> Result<R
         }
     }
     Ok(r)
+}
+
+pub(crate) fn parse_diagnostic_request(body: &str) -> Result<Request> {
+    let request = parse_with_min_options(body, 1)?;
+    let raw: Value = serde_json::from_str(body).map_err(|_| "invalid_request")?;
+    if raw["questions"].as_object().is_some_and(|questions| {
+        questions
+            .values()
+            .any(|question| question.get("labels").is_some())
+    }) {
+        return Err("unsupported_custom_noul_labels".into());
+    }
+    Ok(request)
 }
 
 pub fn options(q: &Question) -> Vec<(String, String)> {
@@ -338,6 +352,73 @@ pub fn decisions(raw: &Value, temperature: f64, threshold: f64) -> Value {
         }
     }
     json!({"answers": answers, "local": {"status": if answers.len() == scores.len() {"answered"} else {"uncertain"}}})
+}
+
+/// Developer-only temperature-1 decisions. Never called by regular prediction.
+/// Keep this in Rust so host and phone use exactly the same validation and policy.
+pub fn experimental_decisions(mut raw: Value, body: &str) -> Value {
+    if raw.get("scores").is_none() {
+        return raw;
+    }
+    let request = match parse_with_min_options(body, 1) {
+        Ok(request) => request,
+        Err(reason) => return uncertain(&reason),
+    };
+    let Some(scores) = raw["scores"].as_object() else {
+        return uncertain("invalid_scores");
+    };
+    if scores.len() != request.questions.len() {
+        return uncertain("invalid_scores");
+    }
+    let mut answers = serde_json::Map::new();
+    for (key, question) in &request.questions {
+        let score = &scores.get(key).unwrap_or(&Value::Null);
+        let Some(logits) = score["logits"].as_object() else {
+            return uncertain("invalid_scores");
+        };
+        let ids: Vec<String> = if question.kind == "noul" {
+            vec!["false".into(), "true".into()]
+        } else {
+            question.criteria.keys().cloned().collect()
+        };
+        if score["type"] != question.kind || logits.len() != ids.len() {
+            return uncertain("invalid_scores");
+        }
+        let mut values = Vec::new();
+        for id in &ids {
+            match logits.get(id).and_then(Value::as_f64) {
+                Some(value) if value.is_finite() => values.push(value),
+                _ => return uncertain("invalid_scores"),
+            }
+        }
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let total: f64 = values.iter().map(|value| (value - max).exp()).sum();
+        let mut probabilities = serde_json::Map::new();
+        let mut best = 0;
+        for (i, id) in ids.iter().enumerate() {
+            probabilities.insert(id.clone(), json!((values[i] - max).exp() / total));
+            // Deterministic ties: first lexicographic ID, matching BTreeMap request order.
+            if values[i] > values[best] {
+                best = i;
+            }
+        }
+        let answer = if question.kind == "noul" {
+            json!({"type":"noul", "noul":probabilities["true"], "probabilities":probabilities})
+        } else {
+            json!({"type":"choice", "choice":ids[best], "probabilities":probabilities})
+        };
+        answers.insert(key.clone(), answer);
+    }
+    let production_reason = raw["local"]["reason"].clone();
+    raw["answers"] = Value::Object(answers);
+    raw["local"]["status"] = json!("diagnostic");
+    raw["local"]["reason"] = json!("playground_uncalibrated_logits");
+    raw["local"]["productionReason"] = production_reason;
+    raw["local"]["diagnostic"] = json!(true);
+    raw["local"]["calibrated"] = json!(false);
+    raw["local"]["productionAllowed"] = json!(false);
+    raw["local"]["scoreTemperature"] = json!(1);
+    raw
 }
 
 static ENGINE: OnceLock<Mutex<Result<Engine>>> = OnceLock::new();
