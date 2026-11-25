@@ -497,7 +497,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
   const {OperationController, throwIfCancelled} = loadVera('OperationCancellation')
   const {GenerateRequest, GenerateResult} = loadVera('LlamaEngine')
   const names = ['aboutToAppear', 'makeWidgetAlone', 'doServerGenerate', 'commitSave', 'widgetSaveState', 'checkWidgetSave', 'hasResult', 'versionCount',
-    'modelRequestHistory', 'prepareRequest', 'markMetricsPartial', 'confirmScreenRemovals', 'acceptRequest', 'doRefine', 'refineWithModel', 'startAttemptOne', 'runAttempt', 'callModel']
+    'modelRequestHistory', 'prepareRequest', 'markMetricsPartial', 'confirmScreenRemovals', 'acceptRequest', 'doRefine', 'refineWithModel', 'startAttemptOne', 'runAttempt', 'markMetricsPartial', 'callModel']
   const methods = names.map(name => {
     const match = pageSource.match(new RegExp('^  (?:private )?(?:async )?' + name + '\\([^\\{]*\\{[\\s\\S]*?^  \\}', 'm'))
     assert(match, 'GeneratePage.' + name + ' must exist')
@@ -546,6 +546,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
         hasServerUrl: () => true, getBaseUrl: () => 'https://fixture.invalid'},
       MODE_DEEPSEEK: 'DeepSeek', MODE_LOCAL: 'Local', MODE_SERVER: 'Server', UI_SELECT_MODE: 'full', UI_SELECT_FULL: 'full',
       MAX_RETRIES: 3, GenerateRequest, GenerateResult, throwIfCancelled,
+      VersionMetrics: loadVera('ProjectStore').VersionMetrics,
       CompileError: loadVera('VeraCompiler').CompileError, widgetRepairNote,
       logStep() {}, logMark() {}, traceCompile() {},
       engine: {stop() {}, async generate(request) {
@@ -570,14 +571,16 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
     const page = Object.assign(Object.create(prototype), {
       params: {projectId: 'project', baseVersionId: 'v1', makeWidget: '1', widgetFresh: fresh ? '1' : ''},
       widgetBase: '', widgetFresh: false, disposed: false, generating: false, runId: 0, baseError: '',
-      requestLabel: '', liveState: '', metricTotals: {}, promptTemplate: '',
+      requestLabel: '', liveState: '', metricTotals: {}, runMetrics: {}, promptTemplate: '',
+      compiledSource: original, compiledVbc2: initial.vbc2, snapshotRequestId: 0, snapshotting: false,
+      previewController: {flushAndSnapshot: async () => ''},
       hostContext: () => ({filesDir: '/fixture/files'}), readWidgetCards: () => 0,
       getUIContext: () => ({setKeyboardAvoidMode() {}, animateTo(options, work) { work() },
         getPromptAction: () => ({showToast() {}})}),
       loadResources: async () => {}, currentBase: () => ({}), ratePerMillion: () => 0,
       modeLabel: () => 'fixture', originLabel: () => '', copyMetrics: metrics => metrics,
       beginOperation: () => new OperationController(), resetRunMetrics() { this.attempt = 1; this.attempts = [] },
-      countModelCall() {}, beginMetricAttempt() {}, recordMetricResult() {}, addToProgram() {}, traceEnd() {}, currentRun: () => null,
+      countModelCall() {}, beginMetricAttempt() {}, recordMetricResult() {}, addToProgram() {}, traceEnd() {}, currentRun: () => null, countModelCall() {},
       closeRun() {}, grammar: '', skillText: '',
       metricWork: (run, work) => work(), finishMetrics() {}, startRun() {}
     })
@@ -695,7 +698,7 @@ console.log('PASS widget refinement: additive preservation, signature, catalogue
   async function submit(page, ask, mode) {
     page.mode = mode
     page.refinePrompt = ask
-    page.doRefine()
+    await page.doRefine()
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(page.generating, false, 'the fixture request must finish')
   }
