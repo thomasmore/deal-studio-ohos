@@ -1302,6 +1302,7 @@ function buildStdMathModule(): ModuleInterface {
 function buildStdTimeModule(): ModuleInterface {
   let fns: ExternalFunction[] = [
     new ExternalFunction('nowMillis', [], NUMBER, false),
+    new ExternalFunction('atLocalTime', [NUMBER, NUMBER], NUMBER, false),
     new ExternalFunction('nowSeconds', [], NUMBER, false),
     new ExternalFunction('millisOfDay', [], NUMBER, false),
     new ExternalFunction('daysSinceEpoch', [], NUMBER, false),
