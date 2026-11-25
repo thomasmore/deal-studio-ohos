@@ -2,7 +2,7 @@
 // with fetch for DeepSeek ($ARKESTR_API_KEY), Jev ($TYPESAFE_API_KEY) and Exa ($EXA_API_KEY, optional: without it a
 // request whose sections need real data is refused, as on a phone with no search key).
 //
-//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [--lookups FILE | --host-lookup DIR] [label ...]
+//   node tools/vera-harness/agent-run.js [-o OUTDIR] [-p PROMPTS.tsv] [-w] [-r] [-a] [-j JOBS] [-t TEMP] [--refine N [--impossible M] [--chain D]] [--home-widget] [--lookups FILE | --host-lookup DIR] [label ...]
 //
 // Each written hole goes to OUTDIR/<label>/holes.jsonl, which tools/vera-harness/hole-report.py groups, and every call of a hole
 // writer, whole, to OUTDIR/<label>/asks.jsonl with the hole and fill events that say which reply was kept (-t sets their temperature). -w builds each as a
@@ -51,6 +51,10 @@ const refineCount = Number(option('--refine', '0'))
 const chainDepth = Number(option('--chain', '0'))
 // --impossible M: M of the changes for each built screen are ones no phone app can make (the right answer is a refusal).
 const impossibleCount = Number(option('--impossible', '0'))
+// --home-widget: after each screen is built, a home-screen widget made for it (Make widget, agent/AgentWidget.ets).
+const homeWidget = (() => { const i = args.indexOf('--home-widget'); if (i < 0) return false; args.splice(i, 1); return true })()
+// --widgets-for RUNDIR: no agent: the widget made for the program an earlier run built (RUNDIR/<label>/program.vera).
+const widgetsFor = option('--widgets-for', '')
 
 const lookups = lookupFile ? new Map(Object.entries(JSON.parse(fs.readFileSync(lookupFile, 'utf8')))) : null
 const lookupKey = (tool, query, both) => tool + '\u0000' + query + '\u0000' + (both ? '1' : '0')
@@ -208,6 +212,37 @@ async function proposeChanges(prompt, source, n, m) {
   } catch (e) { return [] }
 }
 
+const {writeWidget} = loadVera('agent/AgentWidget')
+
+const WIDGET_PROMPT = 'You suggest what a person would want a home-screen widget of their phone app to show at a glance. ' +
+  'Write it the way people type it after "The home-screen widget should show: " -- 3 to 12 plain English words about this ' +
+  'app\'s own figures or items (today\'s total, the next one due, a streak), nothing the app does not keep. Reply with JSON ' +
+  'only: {"shows": "..."}'
+
+/** What the widget of the program should show, from DeepSeek (not trained on); '' when it gave nothing usable. */
+async function proposeWidget(prompt, source) {
+  const reply = await deepseek(WIDGET_PROMPT, 'The app was made for: ' + prompt + '\n\nIts program:\n' + source, 200, true, false, 0.9)
+  try { const shows = JSON.parse(reply).shows; return typeof shows === 'string' ? shows.trim() : '' } catch (e) { return '' }
+}
+
+/**
+ * --home-widget: Make widget on the built program (agent/AgentWidget.ets's writeWidget, as GeneratePage's makeWidgetAlone
+ * calls it, with no saved state), every call recorded in widget/asks.jsonl and how it ended in a `widget` event.
+ */
+async function widgetOne(dir, label, prompt, source) {
+  const shows = await proposeWidget(prompt, source)
+  if (!shows) return console.log(label.padEnd(24), 'widget   no suggestion')
+  const log = {asks: [], seq: 0}
+  log.task = 'widget'
+  let made = null
+  try { made = await writeWidget(source, shows, prompt, '', host(log)) } catch (e) { made = {source: '', attempts: 0, failed: e.message, written: ''} }
+  log.asks.push({kind: 'widget', seq: log.seq++, shows, ok: made.source.length > 0, attempts: made.attempts, failed: made.failed,
+    written: made.written || '', source: made.source})
+  fs.mkdirSync(path.join(dir, 'widget'), {recursive: true})
+  fs.writeFileSync(path.join(dir, 'widget', 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt, shows}, a)) + '\n').join(''))
+  console.log(label.padEnd(24), 'widget  ', made.source.length > 0 ? 'ok in ' + made.attempts : 'failed: ' + String(made.failed).slice(0, 100))
+}
+
 /** Whether Jev reads `body` (the program after the change, or the new section) as making the change. */
 async function jevDoes(change, body) {
   const request = Object.assign(new CustomRequest(), {needs: [change]})
@@ -294,6 +329,12 @@ function one(request) {
 async function runOne(log, [label, prompt]) {
   const dir = path.join(out, label)
   fs.mkdirSync(dir, {recursive: true})
+  if (widgetsFor) {
+    const built = path.join(widgetsFor, label, 'program.vera')
+    const source = fs.existsSync(built) ? fs.readFileSync(built, 'utf8') : ''
+    if (!source) return console.log(label.padEnd(24), 'SKIP     no program in ' + widgetsFor)
+    return widgetOne(dir, label, prompt, source)
+  }
   const started = Date.now()
   let r
   let o = null
@@ -323,6 +364,7 @@ async function runOne(log, [label, prompt]) {
   fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(result, null, 1))
   if (r.record) fs.writeFileSync(path.join(dir, 'composition.json'), compositionToJson(r.record))
   if (refineCount > 0 && c.source) await refineAll(dir, label, prompt, c.source, r.record || null)
+  if (homeWidget && c.source) await widgetOne(dir, label, prompt, c.source)
   if (o) {
     return console.log(label.padEnd(24), o.kind.padEnd(9), (result.ms / 1000).toFixed(1).padStart(5) + 's',
       r.note.slice(0, 120))
