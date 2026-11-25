@@ -263,12 +263,76 @@ layout dumps, saved project/library layouts, final screenshot). Private historic
 trace was not published. Install log:
 `/tmp/local-jev-scheduler-device/update-demo.log`.
 
+## Supplied shared-state Q8 OHOS archive (2026-11-25)
+
+Synced PR #63 to `9cce4e0` before testing the supplied
+`vera-local-selector-q8-openharmony-arm64.tar.gz`:
+
+- Archive SHA256: `30338f171c55fe534c569e1569888c61e8145ded680a0894dafe86e198196b61`.
+- Extracted `liblocal_jev.a` and accompanying Gemma terms/notice and mmBERT MIT
+  license into an ignored local directory. No new weights or binaries committed.
+- Set `VERA_LOCAL_JEV_ARCHIVE` to the extracted library's absolute path.
+  The first incremental build reused the old native link configuration despite
+  this environment change. Moved `entry/.cxx` aside, touched `CMakeLists.txt`,
+  rebuilt, and verified `build.ninja` linked the supplied path. The first install
+  is **not** evidence for this model. The verified rebuild had zero diagnostics,
+  took 31 seconds including system signing/install, and produced a ~110 MiB signed
+  HAP. Both updates preserved app identity/UID/first-install time; no clearing.
+- C ABI status: ABI 1, `ready:true`, model
+  `mmbert-shared-state-q8-experimental`, manifest
+  `4d40ff9d998cb139df51104bcf3c3d9a23f8bf609bc74c25819b5017e1eec7d5`,
+  `calibrated:false`, `productionAllowed:false`.
+  App Settings also reported Local experimental ready after restart.
+
+### Exact-request device replay
+
+Same single- and 22-question request hashes as the earlier scheduler experiment.
+Separate standalone processes, `RAYON_NUM_THREADS=8`, one first call reported
+separately and three subsequent measured calls. These are not full app timings,
+filesystem-cold guarantees, or a counterbalanced quality comparison.
+
+| Request | Load | First call | Subsequent calls | Warm median | Peak RSS |
+|---|---:|---:|---|---:|---:|
+| 1 question | 2307.819 ms | 5.749 ms | 1.626 / 1.563 / 1.347 ms | 1.563 ms | 365,292 KiB |
+| 22 questions | 2284.626 ms | 18.665 ms | 12.304 / 12.853 / 11.872 ms | 12.304 ms | 365,384 KiB |
+
+Answers were identical across four calls within each request. Prior patched
+Cycle 2 serial medians were 544 ms / 16,967 ms; the architecture has changed
+from a transformer encoder to pooled embeddings and a trained ranker. These
+historical timings show much faster scoring, not equivalent model quality.
+Loading and peak RSS remain substantial; do not infer memory from Q8 asset size.
+
+### Live app generation and structural edit
+
+Planning and code/content writing still used the configured cloud model. Every
+observed selector trace used `local-experimental` with the shared-state model;
+no automatic TypeSafe/LLM selector fallback was observed.
+
+| Request | Result / timing | Behavioral check |
+|---|---|---|
+| Same countdown prompt as above | First attempt, 1.941 s total; 30 ms local / 10 questions. Original Minutes input omitted. | Start 5:00 to 4:55; Stop held across dumps >3 seconds apart; Reset 5:00; built-in + changed both readouts to 6:00. Selection chose `countdown.length=remainingItem` rather than `minutes` (0.839 vs 0.161), and `unit.minutes=seconds` (0.624). Functional timer, not a clean semantic pass. |
+| Structural edit: “Add a checklist below the timer where I can add, check off and delete my own tasks. Start the checklist empty. Keep the timer.” | 15 ms local / 3 questions. `edit.op=add_block`, but **`edit.kind=progress_line`** (0.162; checklist 0.025). | Timer retained; added only “Tasks done”, 0 of 0, progress bar, no task input/list/add/check/delete. **Failed requested edit.** |
+| Same empty shopping prompt as above | First attempt, 3.950 s total; local calls 11 + 8 + 17 = 36 ms, 1 + 7 + 1 questions; no reported omissions. | Starts empty; Milk add/remove works. Existing row tap does not check it; source has only a draft Checked toggle used when adding a new entry, no existing-item update handler. **Fails checking off existing items.** |
+
+The edit result was saved as **Local Q8 - Timer and failed checklist edit**;
+shopping as **Local Q8 - Shopping missing row check**. Existing saved projects
+were not edited. App process snapshot after these runs: RSS 453,456 KiB,
+VmHWM 591,404 KiB (process high-water mark, not instrumented per-call memory).
+Host `local-selector-check` and `selector-settings-check` pass. These runs do
+not establish calibration or production readiness; significant ranking errors
+remain despite the speed improvement.
+
+Evidence (private local artifacts): `/tmp/local-jev-q8-device/` contains archive
+library hash, verified update log, standalone outputs/summary, filtered run trace,
+generated sources and UI layouts. Full historical trace remains private.
+
 ## Still not verified
 
-- Phone structural-edit end-to-end UI (host structural selection is tested).
+- Broad phone structural-edit quality beyond the failed checklist case above.
 - Guaranteed filesystem-cold load timings, app-level peak memory and extended responsiveness tests.
 - Phone cancellation under sustained native load.
 - Exhaustive behavior for each generated app, quality calibration or production acceptance.
 
-The installed app now uses this PR-based build; the user's original working tree
-and its unrelated uncommitted multi-screen source changes remain untouched.
+The installed app now uses the supplied shared-state Q8 archive in this PR-based
+build. Original-checkout cleanup was a separate authorized operation; no cleanup
+was performed as part of this model test.
