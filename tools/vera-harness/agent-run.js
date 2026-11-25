@@ -362,10 +362,15 @@ async function rewritesOf(dir, label) {
     const program = edits.find(e => e.route === 'program')
     if (!program || program.impossible || (program.ok && program.does) || program.cannot) continue
     if (edits.some(e => e.route === 'section' && (e.ok || e.cannot))) continue
+    // Runs before chains (b05) did not record the program a change was asked of: for a change on the screen as built it is
+    // program.vera; a later change in a chain without it is skipped.
+    const built = path.join(rewritesFor, label, 'program.vera')
+    const base = program.base !== undefined ? program.base : (!at.includes('.') && fs.existsSync(built) ? fs.readFileSync(built, 'utf8') : '')
+    if (!base) continue
     const log = {asks: [], seq: 0, task: 'program-rewrite'}
-    const out = await requestLog.run(log, () => rewriteProgram(program.base, program.change, program.prompt, host(log)))
+    const out = await requestLog.run(log, () => rewriteProgram(base, program.change, program.prompt, host(log)))
     log.asks.push({kind: 'rewrite', seq: log.seq++, change: program.change, depth: program.depth || 0, ok: out.source.length > 0, does: out.does,
-      attempts: out.attempts, rounds: out.rounds, failed: out.failed, written: out.written, source: out.source, base: program.base})
+      attempts: out.attempts, rounds: out.rounds, failed: out.failed, written: out.written, source: out.source, base})
     const where = path.join(dir, 'refine', at)
     fs.mkdirSync(where, {recursive: true})
     fs.writeFileSync(path.join(where, 'asks.jsonl'), log.asks.map(a => JSON.stringify(Object.assign({label, prompt: program.prompt, change: program.change}, a)) + '\n').join(''))
