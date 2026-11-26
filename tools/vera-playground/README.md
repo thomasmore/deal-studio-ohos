@@ -19,6 +19,8 @@ cargo build --locked --release --manifest-path native/local-jev/Cargo.toml \
 The repository supplies the shared-state Q8 bundle in `tools/vera-playground/models`.
 [Bundle provenance and license notices](models/mmbert-shared-state-q8/README.md)
 
+[Rebuild and benchmark the shared-state Q8 selector from public mmBERT-small](../../docs/local-jev-shared-q8-reproduction.md)
+
 ### Start the playground
 
 Set `DEEPSEEK_API_KEY` and `TYPESAFE_API_KEY` in your environment or
