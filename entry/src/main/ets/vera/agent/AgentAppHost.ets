@@ -4,7 +4,7 @@ import { appBlockCalls } from '../SectionFillApp'
 import { askJev } from '../VeraCompose'
 import { deepseek, discoveryToolResult } from '../DeepSeekEngine'
 import { settings } from '../SettingsStore'
-import { trace } from '../VeraTiming'
+import { trace, traceLookup } from '../VeraTiming'
 import { OperationCancellation } from '../OperationCancellation'
 import { checkWidgetProgramOffMain } from './WidgetCheckTask'
 
@@ -61,8 +61,10 @@ export function appAgentHost(status: (text: string) => void, preview: (vbc2: str
     let asked = need.substring(0, 300)
     try {
       let intent = await discoveryToolResult('find_intent_function', asked, 0, true, operation)
+      traceLookup('find_intent_function', asked, true, intent)
       checkAgent(host)
       let sdk = await discoveryToolResult('find_sdk_function', asked, 0, false, operation)
+      traceLookup('find_sdk_function', asked, false, sdk)
       return 'find_intent_function:\n' + intent + '\nfind_sdk_function:\n' + sdk
     } finally {
       checkAgent(host)

@@ -16,6 +16,7 @@
  */
 
 import { FragmentSpec } from './VeraTemplates'
+import { NeedsPlan } from './NeedsPlan'
 import { composeFragments } from './VeraSectionCompose'
 import { findLayout } from './VeraLayouts'
 
@@ -97,6 +98,8 @@ export class PlanComponent {
 }
 
 export class ScreenPlan {
+  /** Shared-module app context for a single whole-app contribution; absent on the old screen path. */
+  appPlan: NeedsPlan | null = null
   /** Which way the plan was made: PLAN_FROM_SKETCH or PLAN_FROM_LAYOUT. */
   origin: string = PLAN_FROM_SKETCH
   prompt: string = ''

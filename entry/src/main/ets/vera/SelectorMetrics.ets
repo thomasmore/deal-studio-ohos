@@ -26,6 +26,7 @@ export class SelectorCall {
 }
 
 const calls: WeakMap<OperationCancellation, SelectorCall[]> = new WeakMap<OperationCancellation, SelectorCall[]>()
+const questionIds: WeakMap<SelectorCall, string[]> = new WeakMap<SelectorCall, string[]>()
 
 export function selectorLabel(backend: string): string {
   if (backend === 'local-experimental') { return 'Local Jev (experimental)' }
@@ -41,7 +42,9 @@ export function beginSelectorCall(backend: string, model: string, body: string,
   try {
     let root = JSON.parse(body) as Record<string, Object>
     if (root['questions'] !== undefined && root['questions'] !== null) {
-      call.questions = Object.keys(root['questions']).length
+      let ids = Object.keys(root['questions'])
+      call.questions = ids.length
+      questionIds.set(call, ids)
     }
   } catch (_e) {}
   if (backend === 'local-experimental') {
@@ -65,8 +68,11 @@ export function selectorCalls(owner: OperationCancellation): SelectorCall[] {
   if (list === undefined) { return out }
   for (let call of list) {
     let copy = JSON.parse(JSON.stringify(call)) as SelectorCall
-    if (!copy.finished) { copy.ms = Math.max(0, Date.now() - copy.startedAt); copy.partial = true }
-    if (owner.isCancelled()) { copy.cancelled = true }
+    if (!copy.finished) {
+      copy.ms = Math.max(0, Date.now() - copy.startedAt)
+      copy.partial = true
+      if (owner.isCancelled()) { copy.cancelled = true }
+    }
     out.push(copy)
   }
   return out
@@ -122,11 +128,13 @@ export function selectorUsage(call: SelectorCall, text: string, status: number,
 
 /** Validate only answer presence for accounting, not correctness/confidence. */
 export function finishSelectorCall(call: SelectorCall, reply: string): void {
+  let ids = questionIds.get(call)
+  questionIds.delete(call)
   try {
     let root = JSON.parse(reply) as Record<string, Object>
     let answers = root['answers'] as Record<string, Object>
-    if (answers !== undefined && answers !== null) {
-      for (let key of Object.keys(answers)) {
+    if (answers !== undefined && answers !== null && ids !== undefined) {
+      for (let key of ids) {
         let answer = answers[key] as Record<string, Object>
         if (answer !== null && answer !== undefined &&
             ((typeof answer['choice'] === 'string' && (answer['choice'] as string).length > 0) ||
@@ -137,7 +145,7 @@ export function finishSelectorCall(call: SelectorCall, reply: string): void {
     if (local !== undefined && local !== null && local['status'] === 'uncertain') {
       call.error = typeof local['reason'] === 'string' ? local['reason'] as string : 'uncertain'
     }
-    call.ok = call.error.length === 0 && call.answered >= call.questions && call.questions > 0
+    call.ok = call.error.length === 0 && call.answered === call.questions && call.questions > 0
   } catch (_e) {}
   if (!call.ok && call.error.length === 0) { call.error = 'incomplete or missing selector answer' }
 }

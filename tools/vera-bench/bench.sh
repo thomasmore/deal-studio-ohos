@@ -2,7 +2,7 @@
 # Generation benchmark: drives the Generate screen on the connected phone, one
 # prompt at a time, and keeps the app's full trace of every run.
 #
-#   tools/vera-bench/bench.sh [-n RUNS] [-o OUTDIR] [-p PROMPTS.tsv] [-e EFFORT] [-a 'LAUNCH ARGS'] [label ...]
+#   tools/vera-bench/bench.sh [-n RUNS] [-o OUTDIR] [-p PROMPTS.tsv|json] [-e EFFORT] [-a 'LAUNCH ARGS'] [label ...]
 #   python3 tools/vera-bench/report.py OUTDIR
 #
 # Each run: force-stop the app, open the first project in the list, open
@@ -43,6 +43,27 @@ while getopts "n:o:p:e:a:" opt; do
 done
 shift $((OPTIND - 1))
 
+# Accept the existing JSON corpora too; the device-driving behavior stays unchanged.
+# Keep the original corpus beside the traces so report.py can group domains/phrasing.
+mkdir -p "$OUT"
+if [[ "$PROMPTS" == *.json ]]; then
+  cp "$PROMPTS" "$OUT/prompts.json" || exit 1
+  TSV=$(mktemp) || exit 1
+  trap 'rm -f "$TSV"' EXIT
+  python3 - "$PROMPTS" > "$TSV" <<'PY' || exit 1
+import json, re, sys
+rows = json.load(open(sys.argv[1]))
+ids = set()
+for row in rows:
+    label, prompt = row['id'], row['prompt']
+    if not re.fullmatch(r'[\w-]+', label) or label in ids or any(c in prompt for c in '\t\r\n'):
+        raise ValueError('Expected unique safe IDs and single-line prompts')
+    ids.add(label)
+    print(label + '\t' + prompt)
+PY
+  PROMPTS=$TSV
+fi
+
 source "$(dirname "$0")/../../tool-paths.sh"
 HDC_BIN_DIR=$(vera_hdc_dir) || exit 1
 export PATH=$HDC_BIN_DIR:$PATH
@@ -71,6 +92,13 @@ wait_for() {
   return 1
 }
 
+# Quote for the REMOTE POSIX shell too: local double quotes alone do not protect
+# dollars, backticks, embedded quotes or command substitutions on the phone.
+prompt_command() {
+  local quoted=${1//\'/\'\\\'\'}
+  printf "uitest uiInput inputText %s '%s'" "$PROMPT_FIELD" "$quoted"
+}
+
 # Taps through to the Generate screen and starts a generation, checking each
 # screen before tapping on it. Succeeds once the trace shows gen-start.
 start_generation() {
@@ -85,9 +113,8 @@ start_generation() {
   tap "$GENERATE_BTN" 1
   wait_for 'Metrics' || { echo "  Generate screen did not appear" >&2; return 1; }
   tap "$PROMPT_FIELD" 2
-  # uitest takes the text as one quoted argument; the prompts use apostrophes
-  # but no double quotes. The keyboard stays up: Generate sits above it.
-  hdc shell "uitest uiInput inputText ${PROMPT_FIELD} \"$prompt\"" >/dev/null; sleep 2
+  # The keyboard stays up: Generate sits above it.
+  hdc shell "$(prompt_command "$prompt")" >/dev/null; sleep 2
   tap "$RUN_BTN" 0
   for _ in $(seq 1 8); do
     sleep 5

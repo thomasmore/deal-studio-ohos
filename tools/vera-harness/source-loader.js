@@ -16,7 +16,12 @@ function loadSource(file) {
   const mod = {exports: {}}
   cache.set(file, mod)
   const localRequire = name => {
-    if (name.endsWith('/VeraSdkIndex')) return loadSource(path.join(__dirname, 'src/VeraSdkIndex.ts'))
+    // A harness that stands in for a platform or native module (tools/vera-harness/host-lookup.js) registers it here
+    // before the first loadVera: globalThis.__veraModules['libllama.so'] = {...}.
+    const standIn = globalThis.__veraModules && globalThis.__veraModules[name]
+    if (standIn) return standIn
+    // The real index once a harness stands in for what it imports (host-lookup.js), the stub otherwise.
+    if (name.endsWith('/VeraSdkIndex') && !(globalThis.__veraModules && globalThis.__veraModules['@kit.LocalizationKit'])) return loadSource(path.join(__dirname, 'src/VeraSdkIndex.ts'))
     // Platform modules the template/selector files import for their network calls; the host checks never reach them.
     if (name === '@kit.PerformanceAnalysisKit') return {hilog: {info() {}, warn() {}, error() {}, debug() {}}}
     // connection.getAddressesByName on node's resolver, for VeraSource.publicHostError; a check may replace it with __veraResolve.

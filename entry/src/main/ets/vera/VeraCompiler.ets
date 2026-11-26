@@ -1302,6 +1302,7 @@ function buildStdMathModule(): ModuleInterface {
 function buildStdTimeModule(): ModuleInterface {
   let fns: ExternalFunction[] = [
     new ExternalFunction('nowMillis', [], NUMBER, false),
+    new ExternalFunction('atLocalTime', [NUMBER, NUMBER], NUMBER, false),
     new ExternalFunction('nowSeconds', [], NUMBER, false),
     new ExternalFunction('millisOfDay', [], NUMBER, false),
     new ExternalFunction('daysSinceEpoch', [], NUMBER, false),
@@ -3196,6 +3197,16 @@ export function appUsesWidgetError(source: string): string {
     }
   }
   return ''
+}
+
+/** Real top-level function names, independent of formatting and declaration-like comments/strings. */
+export function sourceFunctionNames(source: string): string[] {
+  let app = new Parser(source, '<functions>').parse()
+  let names: string[] = []
+  for (let declaration of app.declarations) {
+    if (declaration instanceof FunctionDeclaration) { names.push(declaration.name) }
+  }
+  return names
 }
 
 /** '' when `source` parses (types are not checked); else the parser's message, with its place. */

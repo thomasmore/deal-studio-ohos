@@ -14,6 +14,7 @@ function fixture(options = {}) {
   let release; const gate = new Promise(resolve => { release = resolve })
   const sdk = [{kit:'Kit',module:'camera',name:'setTorchMode',params:'enabled: boolean',returnType:'void',description:'Control flashlight',since:'1',file:'camera',permission:'',deprecated:false,systemapi:false}]
   const stubs = {
+    ...options.dependencies,
     '@kit.PerformanceAnalysisKit': {hilog:{info(){},warn(){}}}, '@kit.CoreFileKit':{fileIo:{mkdirSync(){}}},
     '@kit.AbilityKit': {common:{},insightIntentDriver:{GetInsightIntentFlag:{GET_FULL_INSIGHT_INTENT:1}, async getAllInsightIntentInfo(){events.push('registry');if(options.delayed)await gate;if(options.indexFails)throw Error('registry unavailable');events.push('registry-done');return []}}},
     '@kit.BasicServicesKit': {request:{async downloadFile(){events.push('download');return {on(name,fn){if(name==='fail' && options.downloadFails)setImmediate(()=>fn(1));if(name==='complete' && !options.downloadFails)setImmediate(()=>{exists=true;fn()})}}}}},
@@ -28,8 +29,9 @@ function fixture(options = {}) {
     if(cache.has(name))return cache.get(name).exports
     const file=path.join(base,name+'.ets'), source=fs.readFileSync(file,'utf8'), mod={exports:{}};cache.set(name,mod)
     const result=ts.transpileModule(source,{fileName:name+'.ts',compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS,esModuleInterop:true},reportDiagnostics:true})
-    assert.equal((result.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0)
-    const req=id=>{if(Object.hasOwn(stubs,id))return stubs[id];if(id.startsWith('./'))return load(id.slice(2));throw Error('Unexpected dependency '+id)}
+    assert.equal((result.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error).length,0,
+      file+': '+(result.diagnostics||[]).map(d=>{const at=d.file&&d.file.getLineAndCharacterOfPosition(d.start||0);return (at?`${at.line+1}:${at.character+1} `:'')+ts.flattenDiagnosticMessageText(d.messageText,'\n')}).join('\n'))
+    const req=id=>{if(Object.hasOwn(stubs,id))return stubs[id];if(id.startsWith('.'))return load(path.relative(base,path.resolve(path.dirname(file),id)));throw Error('Unexpected dependency '+id)}
     const timer=(fn,ms)=>setTimeout(fn,ms===10000?20:ms)
     const supports = new Set(['SystemCapability.Request.FileTransferAgent','SystemCapability.MiscServices.Download'])
     if(options.unsupported)supports.delete(options.unsupported)
@@ -78,51 +80,80 @@ async function test(name,fn){try{const observed=await fn();checks.push({name,sta
    const page=fs.readFileSync(path.join(root,'entry/src/main/ets/pages/GeneratePage.ets'),'utf8')
    assert(page.includes('ensureCapabilities('));assert(page.includes('prepareCapabilityEmbeddings('))
    const preview=fs.readFileSync(path.join(root,'entry/src/main/ets/components/VeraPreview.ets'),'utf8')
-   assert(preview.includes('onStateSnapshot'));assert(preview.includes('private notifyStateSnapshot('))
-   const start=preview.indexOf('private dispatch('), end=preview.indexOf('\n  private ',start+1), dispatch=preview.slice(start,end)
-   assert(dispatch.includes('this.notifyStateSnapshot()'));const load=preview.slice(preview.indexOf('private load()'),preview.indexOf('private reconcileTimers('));assert(load.includes('this.notifyStateSnapshot()'))
-   // Execute the renderer lifecycle around an actual compiled widget and VM.
-   const {loadVera}=require('./source-loader'), C=loadVera('VeraCompiler'), V=loadVera('VeraInterpreter'), U=loadVera('VeraUi')
-   function method(name){
-     const start=preview.search(new RegExp('^  (?:private )?(?:async )?'+name+'\\(', 'm'));assert(start>=0)
-     const scan=ts.createScanner(ts.ScriptTarget.Latest,true,ts.LanguageVariant.Standard,preview.slice(start));let depth=0,opened=false
-     while(scan.scan()!==ts.SyntaxKind.EndOfFileToken){if(scan.getToken()===ts.SyntaxKind.OpenBraceToken){depth++;opened=true}if(scan.getToken()===ts.SyntaxKind.CloseBraceToken && --depth===0 && opened)return preview.slice(start,start+scan.getTextPos())}
-     throw Error('Unclosed renderer method '+name)
-   }
-   const methods=['load','dispatch','stateKeys','stamp','seeded','restoreState','persistState','notifyStateSnapshot','onResume','onForegroundChanged'].map(method).join('\n')
-   const code=ts.transpileModule('class Controller { '+methods+' } module.exports=Controller;', {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText
-   const values=new Map(), store={saveState(p,v,stamp,encoded){values.set(p+'/'+v,{stamp,encoded})},loadState(p,v,stamp){const value=values.get(p+'/'+v);return value&&value.stamp===stamp?value.encoded:''}}
-   const globals={store,armReveal:()=>{},carryState:loadVera('VeraStateCarry').carryState,veraStateStamp:loadVera('VeraStateStamp').veraStateStamp,scheduleFormRefresh:()=>{},UiHostEnvironment:U.UiHostEnvironment,deserializeVbc2:V.deserializeVbc2,VirtualMachine:V.VirtualMachine,encodeRuntimeValue:V.encodeRuntimeValue,decodeRuntimeValue:V.decodeRuntimeValue}
-   const mod={exports:{}};new Function('module',...Object.keys(globals),code)(mod,...Object.values(globals))
-   const controller=new mod.exports(), snapshots=[], trees=[]
-   controller.vbc2=C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2
-   controller.persistKey='chat-fixture/1';controller.seedState='';controller.revision=0;controller.stopAllTimers=()=>{};controller.drainEffects=()=>{}
-   controller.onStateSnapshot=encoded=>snapshots.push(JSON.parse(encoded))
-   controller.renderView=()=>{controller.host.effectsAllowed=false;trees.push(U.decodeVeraUi(controller.vm.execute('view',[controller.currentState])))}
-   controller.load();assert.equal(controller.error,'');assert.equal(V.decodeRuntimeValue(snapshots.at(-1)).fields.get('count').value,7)
-   controller.dispatch('change',new V.VeraNumberValue(1));assert.equal(V.decodeRuntimeValue(snapshots.at(-1)).fields.get('count').value,8)
-   controller.load();assert.equal(V.decodeRuntimeValue(snapshots.at(-1)).fields.get('count').value,8)
-   // A refined program (no saved state of its own) starts from the state it replaces.
-   const seed=JSON.stringify(snapshots.at(-1));controller.persistKey='';controller.seedState=seed;controller.load()
-   assert.equal(controller.error,'');assert.equal(V.decodeRuntimeValue(snapshots.at(-1)).fields.get('count').value,8)
-   controller.seedState='';controller.persistKey='chat-fixture/1'
-   trees.pop()
-   assert(trees.every(tree=>tree[0].kind==='apptheme'));assert.equal(values.size,1)
-   function walk(nodes){return nodes.flatMap(n=>[n,...walk(n.children||[])])}
-   assert.deepEqual(trees.map(tree=>walk(tree).find(n=>n.kind==='numbertext').numberValue),[7,8,8])
-   // Resume the SAME runner instance after a widget-side state change: no load/new push.
-   // visual-counter has no widget export: emulate the extension's shared-state commit directly.
-   const external=controller.vm.execute('change',[controller.currentState,new V.VeraNumberValue(5)])
-   store.saveState('chat-fixture','1',controller.stamp(),JSON.stringify(V.encodeRuntimeValue(external)))
-   const vmBefore=controller.vm
-   controller.onResume();assert.equal(controller.vm,vmBefore)
-   assert.equal(V.decodeRuntimeValue(JSON.parse(values.get('chat-fixture/1').encoded)).fields.get('count').value,13)
-   assert.equal(controller.currentState.fields.get('count').value,13)
-   let stopped=0;controller.stopAllTimers=()=>stopped++;controller.appForeground=false
-   controller.onForegroundChanged();assert.equal(stopped,1)
-   return {sharedInitialization:true,initialAndActionSnapshots:true,resumeExistingRunner:true,backgroundTimersStopped:true,snapshots,decodedTrees:trees,savedKeys:[...values.keys()]}
+    assert(preview.includes('onStateSnapshot'));assert(preview.includes('private createSubscriber('))
+
+    const {loadVera,loadSource,sourceRoot}=require('./source-loader'), C=loadVera('VeraCompiler'), V=loadVera('VeraInterpreter'), U=loadVera('VeraUi')
+    const {StageTrace}=loadSource(path.join(sourceRoot,'runtime/trace/StageTrace.ets'))
+    global.ObservedV2=c=>c;global.Trace=()=>{}
+    const {createPreview,declaration}=require('./preview-fixture')
+    assert(declaration(preview,'  private dispatch(').includes('this.dispatchFieldAction('))
+    assert(declaration(preview,'  private async configure(').includes('await this.runtime.acquire('))
+    assert(declaration(preview,'  private createSubscriber(').includes('this.onStateSnapshot(encoded)'))
+    const values=new Map(), store={saveState(p,v,stamp,encoded){values.set(p+'/'+v,{stamp,encoded})},loadState(p,v,stamp){const value=values.get(p+'/'+v);return value&&value.stamp===stamp?value.encoded:''}}
+    let tick, machines=0
+    const actors=fixture({dependencies:{
+      '../vera/ProjectStore':{store},
+      '../vera/VeraInterpreter':{...V,VirtualMachine:class extends V.VirtualMachine {constructor(...args){super(...args);machines++}}},
+      '../vera/VeraUi':U,
+      '../vera/VeraGfx':loadVera('VeraGfx'),
+      '../vera/VeraStateCarry':loadVera('VeraStateCarry'),
+      '../vera/VeraConsentStore':{consent:{has:()=>false,remember(){}}},
+      '../vera/VeraIntents':{runRawIntent:()=>{throw Error('Unexpected intent')}},
+      '../vera/VeraSdkBackend':{runSdkAdapter:()=>{throw Error('Unexpected SDK call')}},
+      './trace/StageTrace':{StageTrace}
+    }})
+    const {InProcessHost,HostOperationFailure}=actors.load('../runtime/InProcessHost')
+    const {HostEffectsBridge}=actors.load('../runtime/HostEffectsBridge')
+    const runtime=new InProcessHost(), errors=[]
+    const {probe:controller}=createPreview({runtime,HostOperationFailure,HostEffectsBridge,mocks:{
+      StageTrace,armReveal:()=>{},scheduleCardRefresh:()=>{},
+      setInterval:fn=>{tick=fn;return 1},clearInterval:()=>{},
+      console:{info(){},warn(){},error(...args){errors.push(args.join(' '))}}
+    }})
+    const snapshots=[], trees=[], render=controller.renderView.bind(controller)
+    controller.renderView=(tree,...args)=>{render(tree,...args);trees.push([tree])}
+    Object.assign(controller,{vbc2:C.compileVeraSource(fs.readFileSync(path.join(__dirname,'examples/visual-counter.vera'),'utf8')).vbc2,
+      persistKey:'chat-fixture/1',onStateSnapshot:encoded=>snapshots.push(JSON.parse(encoded))})
+    const snapshot=()=>runtime.requestSnapshot(controller.handle)
+    const count=encoded=>V.decodeRuntimeValue(JSON.parse(encoded)).fields.get('count').value
+    async function load(){controller.load();await controller.operations;assert.equal(controller.error,'');assert(controller.handle!==null)}
+    try {
+      await load();assert.equal(count(JSON.stringify(snapshots.at(-1))),7)
+      controller.dispatch('change',{kind:'NUMBER',num:1,str:'',bool:false,phase:'',id:0,x:0,y:0})
+      await pause();assert.equal(count(JSON.stringify(snapshots.at(-1))),8)
+       const firstHandle=controller.handle, firstMachines=machines, treesBeforeReload=trees.length
+       await load();assert.strictEqual(controller.handle,firstHandle);assert.equal(count(await snapshot()),8)
+       assert.equal(machines,firstMachines);assert.equal(trees.length,treesBeforeReload+1)
+      controller.aboutToDisappear();await controller.operations
+      assert.deepEqual(errors,[]);assert.equal(controller.flushFailure,null)
+      Object.assign(controller,{disposed:false,acquireGeneration:controller.acquireGeneration+1,activeProgram:'',persistKey:'',seedState:JSON.stringify(snapshots.at(-1))})
+      await load();assert.equal(count(await snapshot()),8)
+      assert(trees.every(tree=>tree[0].kind==='apptheme'));assert.equal(values.size,1)
+      function walk(nodes){return nodes.flatMap(n=>[n,...walk(n.children||[])])}
+       assert.deepEqual(trees.map(tree=>walk(tree).find(n=>n.kind==='numbertext').numberValue),[7,8,8,8])
+      controller.persistKey='chat-fixture/1';controller.seedState='';await load()
+      const extensionVm=new V.VirtualMachine(V.deserializeVbc2(controller.vbc2),new U.UiHostEnvironment())
+      const external=extensionVm.execute('change',[V.decodeRuntimeValue(JSON.parse(await snapshot())),new V.VeraNumberValue(5)])
+      store.saveState('chat-fixture','1',controller.stamp(),JSON.stringify(V.encodeRuntimeValue(external)))
+      const handleBefore=controller.handle, machinesBefore=machines
+      controller.onResume();await pause()
+      assert.strictEqual(controller.handle,handleBefore);assert.equal(machines,machinesBefore)
+      assert.equal(count(values.get('chat-fixture/1').encoded),13);assert.equal(count(await snapshot()),13)
+      controller.startTimer('fixture',{interval:100,action:'change'});controller.appForeground=false
+      const stateBefore=await snapshot(), snapshotsBefore=snapshots.length, lastFire=controller.timerLastFire.get('fixture')
+      tick();await pause();assert.equal(await snapshot(),stateBefore);assert.equal(snapshots.length,snapshotsBefore);assert.equal(controller.timerLastFire.get('fixture'),lastFire)
+      let stopped=0;const stopSurfaceLoop=controller.stopSurfaceLoop.bind(controller)
+      controller.stopSurfaceLoop=(...args)=>{stopped++;return stopSurfaceLoop(...args)}
+      const released=controller.handle
+      controller.aboutToDisappear();await controller.operations
+      assert.deepEqual(errors,[]);assert.equal(controller.flushFailure,null)
+      assert.equal(stopped,1);assert.equal(controller.timers.size,0);assert.equal(controller.timerConfigs.size,0);assert.equal(controller.timerLastFire.size,0)
+      assert.equal(controller.handle,null);await assert.rejects(runtime.requestSnapshot(released),/INVALID_HANDLE/)
+    } finally {await runtime.dispose()}
+
+   return {sharedInitialization:true,initialAndActionSnapshots:true,resumeExistingRunner:true,backgroundTicksSkipped:true,disappearTimersStopped:true,snapshots,decodedTrees:trees,savedKeys:[...values.keys()]}
  })
- const hashes={};for(const file of ['entry/src/main/ets/vera/VeraCapabilities.ets','entry/src/main/ets/vera/VeraSdkIndex.ets','entry/src/main/ets/vera/VeraIntentRegistry.ets','entry/src/main/ets/vera/VeraIntentIndex.ets','entry/src/main/ets/pages/GeneratePage.ets','entry/src/main/ets/components/VeraPreview.ets','tools/vera-harness/capability-check.js'])hashes[file]=crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')
+ const hashes={};for(const file of ['entry/src/main/ets/vera/VeraCapabilities.ets','entry/src/main/ets/vera/VeraSdkIndex.ets','entry/src/main/ets/vera/VeraIntentRegistry.ets','entry/src/main/ets/vera/VeraIntentIndex.ets','entry/src/main/ets/pages/GeneratePage.ets','entry/src/main/ets/components/VeraPreview.ets','entry/src/main/ets/runtime/AppActor.ets','entry/src/main/ets/runtime/InProcessHost.ets','entry/src/main/ets/runtime/HostEffectsBridge.ets','entry/src/main/ets/runtime/EffectController.ets','tools/vera-harness/capability-check.js'])hashes[file]=crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')
  const report={source_sha256:hashes,expected:'All capability and renderer lifecycle workflows PASS; current values are emitted without migrating state.',observed:checks.every(c=>c.status==='PASS')?'PASS':'FAIL',revision:cp.execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),command:process.argv.join(' '),inputs:'mocked native registry, SDK rawfile, download, embedding boundaries; 10000ms timeout accelerated to 20ms',checks}
  fs.mkdirSync(path.dirname(output),{recursive:true});fs.writeFileSync(output,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify({passed:checks.filter(c=>c.status==='PASS').length,failed:checks.filter(c=>c.status==='FAIL').length,output}));if(checks.some(c=>c.status==='FAIL'))process.exitCode=1
 })()

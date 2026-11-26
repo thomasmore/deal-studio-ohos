@@ -62,6 +62,29 @@ def require(condition, message):
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
+# Text files are hashed as committed; a windows checkout may hold them with CRLF
+# while the manifest records LF (or the reverse), so accept either line ending.
+TEXT_FILES = {'models.json', 'LICENSE.txt', 'VeraModels.ets'}
+
+def text_bytes(data):
+    return data.replace(b'\r\n', b'\n')
+
+def matches_sha(path, digest):
+    data = path.read_bytes()
+    return sha(data) == digest or (path.name in TEXT_FILES and sha(text_bytes(data)) == digest)
+
+def same_text(path, expected):
+    data = path.read_bytes()
+    return data == expected or (path.name in TEXT_FILES and text_bytes(data) == text_bytes(expected))
+
+def close(a, b, tol=1e-9):
+    """Compare geometry across platforms: the same GLB can round its last bits
+    differently, so floats match within a relative tolerance."""
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(close(x, y, tol) for x, y in zip(a, b))
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) <= tol * max(1.0, abs(a), abs(b))
+    return a == b
 
 def json_bytes(value, pretty=False):
     return (json.dumps(value, sort_keys=True, allow_nan=False,
@@ -483,17 +506,17 @@ def check_local():
         digest, name = line.split('  ')
         require(name in expected_files and name not in sums and name != 'SHA256SUMS', 'bad checksum entry')
         sums[name] = digest
-        require(sha((OUTPUT / name).read_bytes()) == digest, 'checksum mismatch: ' + name)
+        require(matches_sha(OUTPUT / name, digest), 'checksum mismatch: ' + name)
     require(set(sums) == expected_files - {'SHA256SUMS'}, 'incomplete checksums')
-    require(sha((OUTPUT / 'LICENSE.txt').read_bytes()) == catalogue['provenance']['licenseSha256'], 'license hash')
+    require(matches_sha(OUTPUT / 'LICENSE.txt', catalogue['provenance']['licenseSha256']), 'license hash')
     for model in models:
         data = (OUTPUT / (model['name'] + '.glb')).read_bytes()
         require(len(data) == model['bytes'] <= 100000 and sha(data) == model['sha256'], 'model hash/size')
         require(model['description'] == SELECTION[model['name']], 'description drift')
         for key, value in geometry(data).items():
-            require(model[key] == value, model['name'] + ': geometry drift in ' + key)
+            require(close(model[key], value), model['name'] + ': geometry drift in ' + key)
     require(sum(p.stat().st_size for p in OUTPUT.iterdir()) <= 3000000, 'total budget')
-    require(MODULE.read_bytes() == module_text(models).encode(), 'VeraModels.ets is stale')
+    require(same_text(MODULE, module_text(models).encode()), 'VeraModels.ets is stale')
     return models
 
 

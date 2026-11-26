@@ -12,6 +12,13 @@ const directory = path.join(root, 'entry/src/main/resources/rawfile/models')
 const moduleFile = path.join(root, 'entry/src/main/ets/vera/VeraModels.ets')
 const catalog = JSON.parse(fs.readFileSync(path.join(directory, 'models.json'), 'utf8'))
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex')
+// Text files are hashed as committed; a windows checkout may hold them with CRLF
+// while the manifest records LF (or the reverse), so accept either line ending.
+// .glb stays binary and is only ever hashed raw.
+const textFiles = new Set(['models.json', 'LICENSE.txt'])
+const lfBytes = bytes => Buffer.from(bytes.toString('utf8').replace(/\r\n/g, '\n'), 'utf8')
+const checksumMatches = (file, bytes, expected) =>
+  sha(bytes) === expected || (textFiles.has(file) && sha(lfBytes(bytes)) === expected)
 const near = (actual, expected, label, tolerance = 1e-8) => {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${label}: ${actual} vs ${expected}`)
 }
@@ -135,7 +142,7 @@ detachedNames.length = 0
 assert.equal(M.modelNames().length, names.length)
 const expectedFiles = [...names.map(n => n + '.glb'), 'LICENSE.txt', 'models.json', 'SHA256SUMS'].sort()
 assert.deepEqual(fs.readdirSync(directory).sort(), expectedFiles)
-const checksumLines = fs.readFileSync(path.join(directory, 'SHA256SUMS'), 'utf8').trim().split('\n')
+const checksumLines = fs.readFileSync(path.join(directory, 'SHA256SUMS'), 'utf8').replace(/\r\n/g, '\n').trim().split('\n')
 const checksums = new Map(checksumLines.map(line => {
   assert.match(line, /^[a-f0-9]{64}  [A-Za-z0-9_.-]+$/)
   const [digest, file] = line.split('  ')
@@ -147,10 +154,10 @@ let totalBytes = 0, maxBytes = 0
 for (const file of expectedFiles) {
   const bytes = fs.readFileSync(path.join(directory, file))
   totalBytes += bytes.length
-  if (checksums.has(file)) assert.equal(sha(bytes), checksums.get(file), file + ': checksum')
+  if (checksums.has(file)) assert.ok(checksumMatches(file, bytes, checksums.get(file)), file + ': checksum')
 }
 assert.ok(totalBytes <= 3000000)
-assert.equal(sha(fs.readFileSync(path.join(directory, 'LICENSE.txt'))), catalog.provenance.licenseSha256)
+assert.ok(checksumMatches('LICENSE.txt', fs.readFileSync(path.join(directory, 'LICENSE.txt')), catalog.provenance.licenseSha256), 'LICENSE.txt: provenance checksum')
 for (const model of catalog.models) {
   const spec = M.modelSpec(model.name)
   assert.ok(spec)
@@ -220,14 +227,18 @@ nearVector(applyNode({matrix: [1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 3, 0, -1, 4, 5, 1]}
 const moduleSource = fs.readFileSync(moduleFile, 'utf8')
 assert.doesNotMatch(moduleSource, /\bimport\b|@kit\.|VeraScene|BodySpec/)
 const ts = process.env.VERA_TYPESCRIPT_PATH ? require(process.env.VERA_TYPESCRIPT_PATH) : require('typescript')
-const virtualFile = path.join(path.dirname(moduleFile), 'VeraModels.ts')
+const virtualFile = path.join(path.dirname(moduleFile), 'VeraModels.ts').replace(/\\/g, '\n')
 const options = {strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS}
 const host = ts.createCompilerHost(options), getSourceFile = host.getSourceFile.bind(host)
-host.getSourceFile = (file, languageVersion, onError, shouldCreateNewSourceFile) => file === virtualFile
+host.getSourceFile = (file, languageVersion, onError, shouldCreateNewSourceFile) => file.replace(/\\/g, '\n') === virtualFile
   ? ts.createSourceFile(virtualFile, moduleSource, languageVersion, true)
   : getSourceFile(file, languageVersion, onError, shouldCreateNewSourceFile)
 const program = ts.createProgram([virtualFile], options, host)
 const diagnostics = ts.getPreEmitDiagnostics(program)
 assert.deepEqual(diagnostics.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')), [], 'strict catalogue typecheck')
-execFileSync('python3', ['tools/model-catalog.py', '--check'], {cwd: root, stdio: 'inherit'})
+const python =[['python3'], ['python'], ['py', '-3']].find(candidate => {
+  try { execFileSync(candidate[0], [...candidate.slice(1), '--version'], {stdio: 'ignore'}); return true } catch { return false }
+})
+if (python) execFileSync(python[0], [...python.slice(1), 'tools/model-catalog.py', '--check'], {cwd: root, stdio: 'inherit'})
+else console.log('models-check: python not found; skipped tools/model-catalog.py --check')
 console.log(`models-check: ${names.length} models, ${totalBytes} total bytes, ${maxBytes} largest GLB; hashes, hulls, containment, scaling, transforms and strict types passed`)

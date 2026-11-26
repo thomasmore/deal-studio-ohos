@@ -17,7 +17,7 @@
  * part of.
  */
 export function isValidSdkTarget(target: string): boolean {
-  // A check can stand in for the bundled index by setting globalThis.__sdkTargetHook (timer-check.js does).
+  // A check can stand in for the bundled index by setting globalThis.__sdkTargetHook (template-suite.js does).
   const hook = (globalThis as any).__sdkTargetHook
   if (typeof hook === 'function') { return hook(target) }
   return typeof target === 'string' && target.length > 0

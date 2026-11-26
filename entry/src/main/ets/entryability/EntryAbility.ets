@@ -18,6 +18,7 @@ import { requestUiAb } from '../vera/VeraUiAb'
 import { setComposeEnabled, setComposePlanEnabled, setCustomSectionsEnabled } from '../vera/VeraCompose'
 import { setWholeScreenEnabled } from '../vera/agent/VeraBuildRoute'
 import { setSurfaceRouteEnabled } from '../vera/agent/AgentSurface'
+import { setRefineEditEnabled } from '../vera/agent/AgentSectionEdit'
 import { setAlignEnabled, setAlignWide } from '../vera/agent/AgentAlign'
 import { loadCatalogFile } from '../vera/VeraCatalogFile'
 import { startPowerKeyProbe } from '../vera/PowerKeyProbe'
@@ -26,6 +27,7 @@ import { util } from '@kit.ArkTS'
 import { enableTemplateSelect, disableTemplateSelect } from '../vera/VeraTemplateSelectFlag'
 import { setFloorGainOverride } from '../vera/VeraLook3D'
 import { startedByApp, presentDevParameters, describeCaller } from '../components/LaunchTrust'
+import { StageTrace } from '../runtime/trace/StageTrace'
 
 const DOMAIN = 0x0000
 
@@ -107,6 +109,9 @@ export default class EntryAbility extends UIAbility {
     if (present.length > 0) {
       hilog.info(DOMAIN, 'VERA', 'Development launch parameters from a native caller: ' + describeCaller(want))
     }
+
+    if (want.parameters === null || want.parameters === undefined) { return }
+
     this.extractApiKey(want)
     this.extractApiBase(want)
     this.extractApiModel(want)
@@ -133,6 +138,16 @@ export default class EntryAbility extends UIAbility {
     this.extractTemplateSelect(want)
     this.extractProof(want)
     this.extractWorldFloorGain(want)
+    this.extractTrace(want)
+  }
+
+  /**
+   * Development only: used to set tracing mode need for data flow debugging
+   */
+  private extractTrace(want: Want): void {
+    const trace = (want.parameters as Record<string, Object>)['stageTrace']
+    if (typeof trace !== 'string' || trace.trim().length === 0) { return }
+    if (trace === '1' || trace === '0') { StageTrace.configure(trace === '1') }
   }
 
   /**
@@ -145,7 +160,6 @@ export default class EntryAbility extends UIAbility {
    * A source that does not compile is logged (VERA-PROOF) and nothing opens.
    */
   private extractProof(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let encoded = (want.parameters as Record<string, Object>)['proofSource']
     if (typeof encoded !== 'string' || encoded.trim().length === 0) { return }
     try {
@@ -173,7 +187,6 @@ export default class EntryAbility extends UIAbility {
    * The key itself is never logged -- only the fact that one arrived.
    */
   private extractApiKey(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let key = params['deepseekKey']
     if (key === null || key === undefined || typeof key !== 'string') {
@@ -201,7 +214,6 @@ export default class EntryAbility extends UIAbility {
    * DeepSeek-only `thinking` and `reasoning_effort` fields (SettingsStore.isDeepSeek).
    */
   private extractApiBase(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let url = params['apiBase']
     if (url === null || url === undefined || typeof url !== 'string') { return }
@@ -222,7 +234,6 @@ export default class EntryAbility extends UIAbility {
    * so a provider switch carries its model with it.
    */
   private extractApiModel(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let model = params['apiModel']
     if (model === null || model === undefined || typeof model !== 'string') { return }
@@ -249,7 +260,6 @@ export default class EntryAbility extends UIAbility {
    * Optional: without it the chat assistant has no search tool. Never logged.
    */
   private extractExaKey(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let key = params['exaKey']
     if (key === null || key === undefined || typeof key !== 'string') { return }
@@ -271,7 +281,6 @@ export default class EntryAbility extends UIAbility {
    * benchmark can switch it without a rebuild.
    */
   private extractReasoningEffort(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let value = params['reasoningEffort']
     if (value === null || value === undefined || typeof value !== 'string') { return }
@@ -283,7 +292,6 @@ export default class EntryAbility extends UIAbility {
   }
 
   private extractSelectorKey(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let key = params['typesafeKey']
     if (key === null || key === undefined || typeof key !== 'string') { return }
@@ -318,7 +326,6 @@ export default class EntryAbility extends UIAbility {
    * Optional: without it the selector calls go to TypeSafe directly.
    */
   private extractJevProxy(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let url = params['jevProxy']
     if (url === null || url === undefined || typeof url !== 'string') { return }
@@ -334,7 +341,6 @@ export default class EntryAbility extends UIAbility {
    *     --ps veraServer http://host:port
    */
   private extractServerUrl(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let url = params['veraServer']
     if (url === null || url === undefined || typeof url !== 'string') { return }
@@ -353,7 +359,6 @@ export default class EntryAbility extends UIAbility {
    * Applied only for a native caller such as `hdc shell aa start` (extractDevParameters).
    */
   private extractProbe(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let target = params['probeTarget']
     if (target === null || target === undefined || typeof target !== 'string') { return }
@@ -372,7 +377,6 @@ export default class EntryAbility extends UIAbility {
    * Applied only for a native caller such as `hdc shell aa start` (extractDevParameters).
    */
   private extractSdkProbe(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let target = params['probeSdkTarget']
     if (target === null || target === undefined || typeof target !== 'string') { return }
@@ -390,7 +394,6 @@ export default class EntryAbility extends UIAbility {
    * loading. See VeraSdkProbe.ets.
    */
   private extractSdkSearchProbe(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let need = params['probeSdkSearch']
     if (need === null || need === undefined || typeof need !== 'string') { return }
@@ -411,7 +414,6 @@ export default class EntryAbility extends UIAbility {
    * runSearchBenchmark(), once ready.
    */
   private extractBenchmark(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let flag = params['veraBenchmark']
     if (flag === null || flag === undefined) { return }
@@ -427,7 +429,6 @@ export default class EntryAbility extends UIAbility {
    *   hdc shell aa start -a EntryAbility -b com.vera.probe.dyn --ps veraSdkEval 1
    */
   private extractSdkEval(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let flag = params['veraSdkEval']
     if (flag === null || flag === undefined) { return }
@@ -443,7 +444,6 @@ export default class EntryAbility extends UIAbility {
    *   hdc shell aa start -a EntryAbility -b com.vera.probe.dyn --ps veraUiEval 1
    */
   private extractUiEval(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let flag = params['veraUiEval']
     if (flag === null || flag === undefined) { return }
@@ -453,7 +453,6 @@ export default class EntryAbility extends UIAbility {
 
   /** Development only: `--ps veraUiAb 1` compares the UI selection modes (VeraUiAb.ets). */
   private extractUiAb(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let flag = params['veraUiAb']
     if (flag === null || flag === undefined) { return }
@@ -462,7 +461,6 @@ export default class EntryAbility extends UIAbility {
   }
 
   private extractCompose(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let flag = params['veraCompose']
     if (flag !== null && flag !== undefined) {
@@ -501,6 +499,12 @@ export default class EntryAbility extends UIAbility {
       setSurfaceRouteEnabled(!(text === '0' || text === 'false' || text === 'off'))
       hilog.info(DOMAIN, 'VERA', 'VERA-ROUTE surface ' + text + ' from launch parameter')
     }
+    let refineEdit = params['veraRefineEdit']
+    if (refineEdit !== null && refineEdit !== undefined) {
+      let text = String(refineEdit).trim()
+      setRefineEditEnabled(!(text === '0' || text === 'false' || text === 'off'))
+      hilog.info(DOMAIN, 'VERA', 'VERA-ROUTE refine by edits ' + text + ' from launch parameter')
+    }
   }
 
   /**
@@ -509,7 +513,6 @@ export default class EntryAbility extends UIAbility {
    * need the TypeSafe key (extractSelectorKey).
    */
   private extractTemplateSelect(want: Want): void {
-    if (want.parameters === null || want.parameters === undefined) { return }
     let params = want.parameters as Record<string, Object>
     let flag = params['veraTemplateSelect']
     if (flag === null || flag === undefined) { return }

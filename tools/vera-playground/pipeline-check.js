@@ -68,7 +68,7 @@ global.fetch = async (url, options) => {
   if(body.messages[0].content.includes('mini-app request generator')) return Response.json({choices:[{message:{content:JSON.stringify({prompt:scenario().replayFailure?'Game night tip calculator: the bill amount, a tip percent slider and the number of people; show the tip, the total and what each person pays. Give it the name Crew Tip.':'A tip calculator for a different dinner group. Keep the bill, tip percent, people, total and share. Session '+JSON.parse(body.messages[1].content).seed})}}]})
   if(body.messages[0].content.includes('semantic novelty')) return Response.json({choices:[{message:{content:JSON.stringify({duplicate:false,matching_id:null,reason:'Isolated transport scenario accepts this fixture.'})}}]})
   if (body.response_format) fs.appendFileSync(${JSON.stringify(path.join(dir, 'planning-calls.jsonl'))}, JSON.stringify({user:body.messages[1].content}) + '\\n')
-  if (scenario().httpFailure) return new Response('upstream unavailable', {status:503})
+  if (scenario().httpFailure || scenario().failPrompt === body.messages[1].content) return new Response('upstream unavailable', {status:503})
   const plan=JSON.parse(asPlan(fixture('sketch.json')))
   if (scenario().exaFailure || scenario().diverged) plan.needs.push({type:'content',what:'Current local information for the bill and tip',from:'Tip calculator'})
   if (scenario().questions || scenario().replan) plan.questions=[{id:'style',ask:'Which style?',options:['Simple','Detailed'],default:0}]
@@ -269,6 +269,28 @@ global.fetch = async (url, options) => {
     const exa = await another({exaFailure:true})
     assert.equal(exa.paths.cloud.error, 'Exa HTTP 503')
     assert.ok(fs.readFileSync(path.join(dir,'search-calls.jsonl'),'utf8').length>0)
+    const failedPrompt = 'Tip calculator with a mocked planning failure.'
+    const healthyPrompt = prompt.split('\n')[0].replace('Game night', 'Dinner')
+    const promptFile = path.join(dir, 'isolated-labels.tsv')
+    fs.writeFileSync(promptFile, `failed\t${failedPrompt}\nhealthy\t${healthyPrompt}\n`)
+    fs.writeFileSync(scenarioFile, JSON.stringify({failPrompt: failedPrompt}))
+    const isolatedLabels = []
+    for (const jobs of [1, 2]) {
+      const output = path.join(dir, 'isolated-labels-' + jobs)
+      const callLog = path.join(dir, 'planning-calls.jsonl')
+      const before = fs.statSync(callLog).size
+      cp.execFileSync(process.execPath, ['tools/vera-harness/agent-run.js', '-r', '-s', 'cloud', '-j', String(jobs), '-p', promptFile, '-o', output],
+        {cwd: root, env: {...env, ARKESTR_API_KEY: 'fixture-offline'}, stdio: 'pipe'})
+      const readResult = label => JSON.parse(fs.readFileSync(path.join(output, label, 'result.json'), 'utf8'))
+      const failed = readResult('failed'), healthy = readResult('healthy')
+      const planned = fs.readFileSync(callLog).subarray(before).toString().trim().split('\n').map(line => JSON.parse(line).user)
+      assert.equal(failed.transportFailure, 'DeepSeek HTTP 503')
+      assert.equal(fs.existsSync(path.join(output, 'failed', 'selector-events.jsonl')), false)
+      assert.deepEqual(planned.sort(), [failedPrompt, healthyPrompt].sort(), `both labels plan with -j ${jobs}`)
+      assert.equal(healthy.transportFailure, '')
+      assert.equal(healthy.served, true)
+      isolatedLabels.push({jobs, planned, failed, healthy})
+    }
     fs.writeFileSync(scenarioFile, '{}')
     const localOnlyEnv = {...env, ARKESTR_API_KEY: 'fixture-offline'}; delete localOnlyEnv.TYPESAFE_API_KEY
     cp.execFileSync(process.execPath, ['tools/vera-harness/agent-run.js','-r','-s','local','-i',path.join(dir,completed.id,'local/input.json'),'-o',path.join(dir,'local-without-typesafe'),'--shared-plan',path.join(dir,completed.id,'shared/shared-plan.json')], {cwd:root,env:localOnlyEnv})
@@ -303,7 +325,7 @@ global.fetch = async (url, options) => {
     }
     const report = {revision: cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), command: 'node tools/vera-playground/pipeline-check.js',
       inputs: ['recorded tip plan and Jev answers', 'isolated DeepSeek and TypeSafe', spec.id, 'exact multiline prompt'],
-      expected: 'One shared plan and two SVG previews per successful pair. Rust reuses its worker and restarts after exit. Complete warm replies count toward timing. Exact replay provenance survives. Operational replay failures stop Auto. An explicit Laya Q6/Q4 profile is unavailable.', observed: completed, compared: compared.summary, scenarios, wrongProfile, status: 'pass',
+      expected: 'One shared plan and two SVG previews per successful pair. Rust reuses its worker and restarts after exit. Complete warm replies count toward timing. Exact replay provenance survives. Operational replay failures stop Auto. Planning failures stay within each label. An explicit Laya Q6/Q4 profile is unavailable.', observed: completed, compared: compared.summary, scenarios, isolatedLabels, wrongProfile, status: 'pass',
       scopedStatus: cp.execFileSync('git', ['status', '--porcelain', '--', 'tools/vera-playground', 'tools/vera-harness/agent-run.js'], {encoding: 'utf8'}),
       sourceHashes: Object.fromEntries(['server.js','check.js','pipeline-check.js','laya-stream.js','local-selector.js','selector-comparison.js','public/app.js','public/index.html','public/style.css','README.md','../vera-harness/agent-run.js'].map(file => [file, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, file))).digest('hex')]))}
     fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2))

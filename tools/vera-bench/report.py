@@ -14,6 +14,7 @@ Sections:
 --reasoning also writes OUTDIR/<run>/reasoning.md with every request's
 reasoning text, for reading what the model spent its time on.
 """
+import csv
 import json
 import re
 import statistics
@@ -88,11 +89,75 @@ def error_key(line):
 
 
 def secs(ms):
-    return f"{ms / 1000:.1f}"
+    return '—' if ms is None else f"{ms / 1000:.1f}"
+
+
+def reported(turns, key):
+    # Unknown usage is not zero. Include every traced model source and retry.
+    known = [t for t in turns if t.get('inTok', 0) > 0 or t.get('outTok', 0) > 0]
+    return sum(t.get(key, 0) for t in known) if known else None
+
+
+def percentile(values, p):
+    values = sorted(values)
+    if not values:
+        return None
+    at = (len(values) - 1) * p
+    lo = int(at)
+    return values[lo] + (values[min(lo + 1, len(values) - 1)] - values[lo]) * (at - lo)
+
+
+def aggregate(rows):
+    active = [r['active_ms'] for r in rows if r['active_ms'] is not None]
+    def total(key):
+        values = [r[key] for r in rows if r[key] is not None]
+        return sum(values) if values else None
+    cached, inputs = total('cached_input_tokens'), total('input_tokens')
+    return {'runs': len(rows), 'accepted': sum(r['ok'] for r in rows), 'timed_runs': len(active),
+            'active_mean_ms': statistics.mean(active) if active else None,
+            'active_median_ms': statistics.median(active) if active else None,
+            'active_p90_ms': percentile(active, .9), 'input_tokens': inputs,
+            'cached_input_tokens': cached, 'cached_ratio': cached / inputs if cached is not None and inputs else None,
+            'output_tokens': total('output_tokens'),
+            'calls_with_reported_usage': sum(r['calls_with_reported_usage'] for r in rows),
+            'traced_model_calls': sum(r['requests'] for r in rows)}
+
+
+def write_exports(out, runs, corpus):
+    metadata = {row['id']: row for row in corpus}
+    rows, turns = [], []
+    for r in runs:
+        label, suffix = r['name'].rsplit('-', 1) if '-' in r['name'] else (r['name'], '')
+        label = label if suffix.isdigit() else r['name']
+        meta = metadata.get(r['name'], metadata.get(label, {}))
+        rows.append({**{k: meta.get(k) for k in ['domain', 'phrasing', 'split', 'negative']},
+                     'name': r['name'], 'prompt': (r['start'] or {}).get('prompt', meta.get('prompt', '')),
+                     **{k: r[k] for k in ['ok', 'active_ms', 'input_tokens', 'cached_input_tokens', 'output_tokens',
+                                          'requests', 'calls_with_reported_usage']}})
+        for t in r['turns']:
+            turns.append({'name': r['name'], 'src': t.get('src'), 'round': t.get('round'),
+                          'total_ms': t.get('totalMs'),
+                          **{key: reported([t], field) for key, field in
+                             [('input_tokens', 'inTok'), ('cached_input_tokens', 'cachedTok'), ('output_tokens', 'outTok')]}})
+    for filename, data in [('results.csv', rows), ('turns.csv', turns)]:
+        with (out / filename).open('w', newline='') as stream:
+            if data:
+                writer = csv.DictWriter(stream, fieldnames=list(data[0]))
+                writer.writeheader(); writer.writerows(data)
+    summary = {'overall': aggregate(rows),
+               'non_negative': aggregate([r for r in rows if r['negative'] is False]),
+               'cohorts': {key: {str(v): aggregate([r for r in rows if r[key] == v])
+                                   for v in sorted({r[key] for r in rows if r[key] is not None}, key=str)}
+                           for key in ['domain', 'phrasing', 'split', 'negative']},
+               'limitations': ['Pipeline acceptance is not functional correctness.',
+                               'All traced model sources/retries counted; TypeSafe usage unavailable, totals partial.',
+                               'Cached tokens are a subset of input, not additional tokens.',
+                               'Active time excludes reported clarification wait; missing gen-end stays unknown.']}
+    (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
 
 
 def summarize(name, events):
-    turns = [e for e in events if e["event"] == "turn" and e.get("src") == "gen"]
+    turns = [e for e in events if e["event"] == "turn"]
     tools = [e for e in events if e["event"] == "tool"]
     compiles = [e for e in events if e["event"] == "compile"]
     start = next((e for e in events if e["event"] == "gen-start"), None)
@@ -101,17 +166,22 @@ def summarize(name, events):
     compose = next((e for e in events if e["event"] == "compose"), None)
     wall = (end["at"] - start["at"]) if start and end else (events[-1]["at"] - start["at"] if start and events else 0)
     final_source = next((c["source"] for c in reversed(compiles) if c.get("ok")), compiles[-1]["source"] if compiles else "")
-    if compose and compose.get("served"):
+    served = bool(compose and (compose.get('served') or ((end or {}).get('ok') and (end or {}).get('via') == 'compose')))
+    if served:
         final_source = compose.get("source", "")
-    route = "off" if not compose else ("composed" if compose.get("served") else "fell through")
+    route = "off" if not compose else ("composed" if served else "fell through")
     return {
         "name": name, "turns": turns, "tools": tools, "compiles": compiles, "start": start, "end": end,
         "ui": ui, "compose": compose, "route": route,
         "first_preview": (compose or {}).get("firstPreviewMs", 0), "wall": wall, "ok": bool(end and end.get("ok")),
         "failure": (end or {}).get("failure", "no gen-end" if not end else ""),
         "attempts": len(compiles), "first_ok": bool(compiles and compiles[0].get("ok")),
-        "reason_ms": sum(t["reasonMs"] for t in turns), "reason_tok": sum(t["reasonTok"] for t in turns),
-        "content_ms": sum(t["contentMs"] for t in turns), "model_ms": sum(t["totalMs"] for t in turns),
+        "reason_ms": sum(t.get("reasonMs", 0) for t in turns), "reason_tok": sum(t.get("reasonTok", 0) for t in turns),
+        "content_ms": sum(t.get("contentMs", 0) for t in turns), "model_ms": sum(t.get("totalMs", 0) for t in turns),
+        "active_ms": max(0, wall - end.get('waitedMs', 0)) if start and end else None,
+        "input_tokens": reported(turns, 'inTok'), "cached_input_tokens": reported(turns, 'cachedTok'),
+        "output_tokens": reported(turns, 'outTok'),
+        "calls_with_reported_usage": sum(t.get('inTok', 0) > 0 or t.get('outTok', 0) > 0 for t in turns),
         "tool_ms": sum(t["ms"] for t in tools), "requests": len(turns),
         "final_source": final_source,
     }
@@ -124,19 +194,32 @@ def main():
     out = Path(sys.argv[1])
     want_reasoning = "--reasoning" in sys.argv
     runs = []
-    for d in sorted(p for p in out.iterdir() if p.is_dir()):
+    run_root = out / 'runs' if (out / 'runs').is_dir() else out
+    for d in sorted(p for p in run_root.iterdir() if p.is_dir()):
         events = load(d)
         if events:
             runs.append(summarize(d.name, events))
             if want_reasoning:
                 write_reasoning(d, events)
+    corpus = json.loads((out / 'prompts.json').read_text()) if (out / 'prompts.json').exists() else []
+    write_exports(out, runs, corpus)
     md = []
     build = (out / "build.txt").read_text().strip() if (out / "build.txt").exists() else ""
     efforts = sorted({(r["start"] or {}).get("effort", "") or "default" for r in runs})
     md.append(f"# Generation benchmark: {out.name}\n\nBuild: `{build}`. {len(runs)} runs. "
               f"Reasoning effort: {', '.join(efforts)}.\n")
 
-    md.append("## 1. Runs\n")
+    md.append('Pipeline acceptance is not functional correctness. Tokens include every reported model source/retry; '
+              'TypeSafe usage is unavailable, so totals are partial. Cached input is a subset of input.\n')
+    md.append('## Active time and reported tokens\n')
+    md.append('| run | active s | input | cached (ratio) | output |')
+    md.append('|---|---|---|---|---|')
+    for r in runs:
+        inputs, cached = r['input_tokens'], r['cached_input_tokens']
+        ratio = f'{cached / inputs:.1%}' if inputs and cached is not None else '—'
+        md.append(f"| {r['name']} | {secs(r['active_ms'])} | {inputs if inputs is not None else '—'} | "
+                  f"{cached if cached is not None else '—'} ({ratio}) | {r['output_tokens'] if r['output_tokens'] is not None else '—'} |")
+    md.append("\n## 1. Runs\n")
     md.append("| run | ok | route | first preview s | attempts | wall s | requests | model s | reasoning s | reasoning tok | code s | tool calls | tools s |")
     md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in runs:
@@ -206,12 +289,12 @@ def main():
     md.append(f"Calls by tool: {dict(totals)}. Results offered {offered_used[0]} items, final programs used {offered_used[1]}.\n")
 
     md.append("## 5. Per-request timeline\n")
-    md.append("| run | round | tools offered | first byte s | reasoning s | reasoning tok | code s | total s | in tok | cached | finish | calls |")
-    md.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    md.append("| run | source | round | tools offered | first byte s | reasoning s | reasoning tok | code s | total s | in tok | cached | finish | calls |")
+    md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in runs:
         for t in r["turns"]:
-            calls = ", ".join(c["name"].replace("find_", "") for c in t["calls"])
-            md.append(f"| {r['name']} | {t['round']} | {'yes' if t['toolsOffered'] else 'no'} | {secs(t['firstByteMs'])} | "
+            calls = ", ".join(c["name"].replace("find_", "") for c in t.get("calls", []))
+            md.append(f"| {r['name']} | {t.get('src', 'unknown')} | {t['round']} | {'yes' if t['toolsOffered'] else 'no'} | {secs(t['firstByteMs'])} | "
                       f"{secs(t['reasonMs'])} | {t['reasonTok']} | {secs(t['contentMs'])} | {secs(t['totalMs'])} | "
                       f"{t['inTok']} | {t['cachedTok']} | {t['finish']} | {calls} |")
 

@@ -16,6 +16,10 @@ const AUDIO_WRITE_PARAMS: string = 'buffer?: comma-separated 16-bit samples (-32
 
 export function adapterSdkContract(target: string): CalendarSdkContract | undefined {
   switch (target) {
+    case 'CameraKit.PhotoOutput.capture':
+      return new CalendarSdkContract('facing?: back|front (default back)', 'string',
+        'Opens the system camera for the person to take one photo, then answers the photo as a file URI (file://...) that ui.Image can show. No setup call is needed: call it once per photo, then draw the answer with ui.Image. Cancelling answers an error; show it if you have a slot for one.',
+        'sdk.call("CameraKit.PhotoOutput.capture", ["facing", "back"], "onPhoto")')
     case 'CameraKit.CameraManager.setTorchMode':
       return new CalendarSdkContract('mode: OFF|ON|AUTO|ALWAYS_OPEN (0-3 also accepted)', 'string',
         'Turns the flashlight on or off; answers ok, or an error such as "torch not supported on this device".',

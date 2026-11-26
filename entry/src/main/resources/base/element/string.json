@@ -23,6 +23,10 @@
     {
       "name": "write_calendar_reason",
       "value": "Add reminders to your calendar when a generated app asks"
+    },
+    {
+      "name": "camera_reason",
+      "value": "Take a photo when a generated app asks"
     }
   ]
 }

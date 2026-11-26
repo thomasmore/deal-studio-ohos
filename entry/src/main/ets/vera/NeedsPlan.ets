@@ -39,6 +39,10 @@ const QUANTITIES: string[][] = [['clock.remaining', 'remaining'], ['clock.elapse
   ['entries.count', 'entryCount'], ['entries.total', 'entryTotal']]
 
 export class Need {
+  /** Stable within a plan; old one-screen replies receive a positional id. */
+  id: string = ''
+  /** References to needs whose data this presentation uses, not copies of their collections. */
+  uses: string[] = []
   /** One of NEED_TYPES. */
   type: string = NEED_OTHER
   /** The need's own words: what it is, for the question of what does it. */
@@ -55,10 +59,32 @@ export class Need {
   from: string = ''
 }
 
+export class NeedScreen {
+  id: string = ''
+  needs: string[] = []
+}
+
+export class NeedTransition {
+  from: string = ''
+  to: string = ''
+  on: string = ''
+  /** Optional need id followed by .id: the selected record, never its array position. */
+  record: string = ''
+}
+
 export class NeedsPlan {
+  /** Effective request after blocking questions, set by composeNeeds before the app handoff. */
+  request: string = ''
   /** Title, eyebrow, subtitle, inputs, constants, questions: as the composer's plan has them. */
   base: Record<string, Object> = {}
   needs: Need[] = []
+  /** Omitted in old replies and ordinary one-screen apps. */
+  screens: NeedScreen[] = []
+  startScreen: string = ''
+  /** Presentation is independent of entry point: peer views can be tabs; record flows use pages. */
+  presentation: string = 'pages'
+  compact: boolean = false
+  transitions: NeedTransition[] = []
 }
 
 /**
@@ -87,7 +113,7 @@ export const NEEDS_PROMPT: string =
   '    "unit": the currency or unit it is shown in, "query": 3 to 8 words a web search finds it with as it is now},\n' +
   '   {"type": "countdown", "label": what is being timed, "length": the id of the input, constant or figure that sets how long it runs},\n' +
   '   {"type": "stopwatch", "label": what is being timed},\n' +
-  '   {"type": "entries", "label": what the entries are, "fields": what each entry holds, up to 4: [{"id": camelCase, "label": shown label,\n' +
+  '   {"type": "entries", "label": what the entries are, "fields": what each entry holds, up to 4 for a one-screen app: [{"id": camelCase, "label": shown label,\n' +
   '    "kind": "text" | "number" | "time" | "date" | "toggle" ("date" for a calendar day: an expiry, a due date, a birthday), "measure": ' +
   'for a number, as for inputs, "unit": as for inputs, "value": starting value,\n' +
   '    "decimals": for a plain number, as for a figure}] (no fields when adding an entry takes only a tap)},\n' +
@@ -108,6 +134,17 @@ export const NEEDS_PROMPT: string =
   'The quantities a figure may read: entries.count and entries.total (the first number field of the entries added up) when there are entries; ' +
   'clock.remaining, clock.elapsed and clock.duration, in seconds, when there is a countdown; clock.elapsed, in seconds, when there is a stopwatch. ' +
   'The app keeps its state between visits. ' +
+  'When the request needs distinct views or an editor/detail flow, you MUST add top-level screens, startScreen and transitions to this SAME reply, in Generate AND Chat. ' +
+  'Opening an item to see its details or edit it is a navigation flow even if the person never says screen. Do not hide destinations only in a need\'s prose. ' +
+  'Add presentation: "tabs" for peer views in a compact widget, or "pages" for list/detail/editor navigation. Tabs and pages share the same screen metadata and data ownership. ' +
+  'Do not add screens to an ordinary calculator, form, timer or simple list just to separate related information. A plain inline form is not a separate view. ' +
+  'For a multi-screen app give EVERY need a unique camelCase id (including entries, content and other). Each collection has ONE owning need; ' +
+  'another presentation, editor, summary or history refers to that need with uses: [need ids], never duplicates its records. ' +
+  'screens: [{"id": camelCase, "needs": [need ids shown or edited here]}], startScreen: one screen id, ' +
+  'transitions: [{"from": screen id, "to": screen id, "on": what the person does, "record": optional "owningNeed.id"}]. ' +
+  'Use 2 to 8 screens only when warranted. Every screen is reachable from startScreen through these transitions. ' +
+  'Include navigation, selected-record behavior and Save/Cancel in the relevant needs, not external phone actions. ' +
+  'A list shown on several screens or in an editor remains one collection with stable record IDs. ' +
   'A live figure is a number of the real world that changes by itself and that the app fetches from the internet as it is now and keeps up to date: ' +
   'a price, an exchange rate, an index, the weather now, a live score; at most 3, and the app shows each with where and when it was read. ' +
   'It is never also a figure or content; a figure worked out from it (what the person\'s coins are worth) is a figure whose formula reads its id, and ' +
@@ -157,6 +194,9 @@ export const NEEDS_PROMPT: string =
   'dice that tumble, a drawing or signature area, a physics toy, an animated dial. A chart, a progress bar or a ring that only shows a figure is ' +
   'never a scene, and a scene is planned only when the request asks for something drawn, animated, moving or touched in its own ' +
   'words: a coin flip or a dice roll that does not ask for an animation is built from the other types. ' +
+  'A camera view is never a scene: the person is looking through the camera, not at a picture the app draws. Plan photographing, ' +
+  'scanning or looking through the camera as other. Describe the live preview and what the person captures with the shutter. ' +
+  'A request in which the person photographs, scans or points the camera at something always needs a live camera view; never leave it out. ' +
   'What a scene decides and everything that changes with it -- the result, the winner, a balance or score it pays into, the ' +
   'results so far -- belongs to that scene, written in its what, and is never also a figure, entries or an action; the inputs the person sets ' +
   'for it (a stake, a choice) stay inputs. When what the person draws or signs is kept with each record (a signature on a receipt, ' +
@@ -196,7 +236,7 @@ function composerNames(s: string): string {
 }
 
 /** The plan from the model's reply, or null when it is not one. */
-export function parseNeedsPlan(reply: string): NeedsPlan | null {
+export function parseNeedsPlan(reply: string, problems: string[] = []): NeedsPlan | null {
   let start = reply.indexOf('{')
   let end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) { return null }
@@ -210,13 +250,21 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
   let keep: string[] = ['title', 'eyebrow', 'subtitle', 'inputs', 'constants', 'questions']
   for (let key of keep) { if (o[key] !== undefined) { plan.base[key] = o[key] } }
   let needs = o['needs']
-  if (!Array.isArray(needs)) { return plan }
+  if (!Array.isArray(needs)) { return o['screens'] === undefined ? plan : null }
   for (let item of needs as Object[]) {
     if (item === null || typeof item !== 'object') { continue }
     let raw = item as Record<string, Object>
     let type = text(raw, 'type')
     if (NEED_TYPES.indexOf(type) < 0) { continue }
     let need = new Need()
+    need.id = text(raw, 'id') || 'need' + plan.needs.length.toString()
+    let uses = raw['uses']
+    let multi = Array.isArray(o['screens']) && (o['screens'] as Object[]).length > 1
+    if (multi && uses !== undefined && (!Array.isArray(uses) || (uses as Object[]).some((v: Object): boolean => typeof v !== 'string'))) {
+      problems.push('Need ' + need.id + ' has invalid uses: expected an array of need ids')
+      return null
+    }
+    need.uses = multi && uses !== undefined ? (uses as string[]).slice() : []
     need.type = type
     need.raw = raw
     if (type === NEED_FIGURE) {
@@ -237,7 +285,89 @@ export function parseNeedsPlan(reply: string): NeedsPlan | null {
     }
     plan.needs.push(need)
   }
+  let problem = readScreens(plan, o)
+  if (problem.length > 0) { problems.push(problem); return null }
   return plan
+}
+
+/** Screen plans are validated before they can bypass the one-screen composer. No guessed dangling references. */
+function readScreens(plan: NeedsPlan, raw: Record<string, Object>): string {
+  let screens = raw['screens']
+  // Optional one-screen metadata must not impose the shared-app id/reference contract on legacy plans.
+  if (Array.isArray(screens) && screens.length < 2) { return '' }
+  if (screens === undefined) {
+    return raw['startScreen'] === undefined && raw['transitions'] === undefined ? '' : 'startScreen/transitions require screens'
+  }
+  if (!Array.isArray(screens) || screens.length > 8) { return 'screens must be an array of 2 to 8 screens' }
+  let presentation = raw['presentation']
+  if (presentation !== undefined && presentation !== 'pages' && presentation !== 'tabs') { return 'presentation must be pages or tabs' }
+  if (presentation !== undefined) { plan.presentation = presentation as string }
+  let validId = (id: string): boolean => /^[a-z][A-Za-z0-9_]{0,47}$/.test(id)
+  let ids: string[] = []
+  for (let n of plan.needs) {
+    if (!validId(text(n.raw, 'id'))) { return 'Every multi-screen need requires a valid id: missing/invalid id for ' + n.words }
+    if (ids.indexOf(n.id) >= 0) { return 'Duplicate need id: ' + n.id }
+    ids.push(n.id)
+  }
+  for (let n of plan.needs) {
+    for (let id of n.uses) {
+      if (ids.indexOf(id) < 0 || id === n.id) { return 'Need ' + n.id + ' has dangling/self uses reference: ' + id }
+    }
+  }
+  let screenIds: string[] = []
+  for (let item of screens as Object[]) {
+    if (item === null || typeof item !== 'object') { return 'Each screen must be an object with id and needs' }
+    let value = item as Record<string, Object>
+    let screen = new NeedScreen()
+    screen.id = text(value, 'id')
+    if (!validId(screen.id) || screenIds.indexOf(screen.id) >= 0) { return 'Missing, invalid or duplicate screen id: ' + screen.id }
+    let refs = value['needs']
+    if (!Array.isArray(refs) || refs.some((id: Object): boolean => typeof id !== 'string' || ids.indexOf(id as string) < 0)) {
+      return 'Screen ' + screen.id + ' needs must reference declared need ids'
+    }
+    screen.needs = (refs as string[]).slice()
+    screenIds.push(screen.id)
+    plan.screens.push(screen)
+  }
+  plan.startScreen = text(raw, 'startScreen')
+  if (screenIds.indexOf(plan.startScreen) < 0) { return 'startScreen must reference a declared screen id' }
+  let transitions = raw['transitions']
+  if (transitions !== undefined && !Array.isArray(transitions)) { return 'transitions must be an array' }
+  for (let item of (transitions ?? []) as Object[]) {
+    if (item === null || typeof item !== 'object') { return 'Each transition must be an object' }
+    let value = item as Record<string, Object>
+    let t = new NeedTransition()
+    t.from = text(value, 'from'); t.to = text(value, 'to'); t.on = text(value, 'on'); t.record = text(value, 'record')
+    if (value['record'] !== undefined && typeof value['record'] !== 'string') { return 'Transition record must be a need id or need.id string' }
+    // A bare declared owner names the same record source. Canonicalize locally rather than buying another plan.
+    if (ids.indexOf(t.record) >= 0) { t.record += '.id' }
+    if (screenIds.indexOf(t.from) < 0 || screenIds.indexOf(t.to) < 0 || t.on.length === 0) { return 'Transition requires declared from/to screens and a nonempty on' }
+    if (t.record.length > 0 && (!t.record.endsWith('.id') || ids.indexOf(t.record.substring(0, t.record.length - 3)) < 0)) { return 'Transition has an undeclared record owner: ' + t.record }
+    plan.transitions.push(t)
+  }
+  let reached: string[] = [plan.startScreen]
+  for (let i = 0; i < screenIds.length; i++) {
+    for (let t of plan.transitions) { if (reached.indexOf(t.from) >= 0 && reached.indexOf(t.to) < 0) { reached.push(t.to) } }
+  }
+  return reached.length === screenIds.length ? '' : 'Every screen must be reachable from startScreen through transitions'
+}
+
+/** A named destination in prose must not silently go through the lossy flat composer.
+ * Conservative English structural guard, not a semantic classifier of every possible request.
+ */
+export function navigationPlanProblem(plan: NeedsPlan): string {
+  if (plan.screens.length > 1) { return '' }
+  // Action needs describe the PHONE's destinations, not this app's internal views.
+  let words = plan.needs.filter((n: Need): boolean => n.type !== NEED_ACTION).map((n: Need): string => n.words).join('\n')
+  if (!/\b(?:detail|editor|edit|second|another|separate)\s+(?:screen|view|page)\b|\b(?:opens?|navigat\w*)\b[^.\n]{0,80}\b(?:details|editor|screen|page)\b/i.test(words)) { return '' }
+  return 'The needs describe navigation to a detail/editor or another view, but the plan has no multi-view metadata. ' +
+    'Declare screens, startScreen and transitions for every destination; use one shared collection and record IDs. ' +
+    'Use presentation pages for list/detail/editor flows or tabs for peer views. Do not flatten the navigation into a single inline section.'
+}
+
+/** Only metadata and questions, not the lossy one-list/one-clock projection, for the app-plan handoff. */
+export function planningSketch(plan: NeedsPlan): Sketch | null {
+  return plan.screens.length > 1 ? parseSketch(JSON.stringify(plan.base)) : sketchFrom(plan)
 }
 
 /** The first need of a type, or null. One countdown, one stopwatch and one list of entries make a screen: a second is left to `other`. */
@@ -293,8 +423,13 @@ export function sketchFrom(plan: NeedsPlan): Sketch | null {
     } else if (n.type === NEED_ACTION) {
       events.push(r)
     } else if (n.type === NEED_SCENE) {
-      // Marked, so it goes to the written section as a scene: nothing of the catalogue or the parts draws one.
-      other.push(SCENE_MARK + n.words)
+      if (isCameraNeed(n.words)) {
+        // A camera view is not a drawn scene: the written section uses ui.Camera, with a live preview, not a Surface.
+        other.push(n.words)
+      } else {
+        // Marked, so it goes to the written section as a scene: nothing of the catalogue or the parts draws one.
+        other.push(SCENE_MARK + n.words)
+      }
     } else {
       other.push(n.words)
     }
@@ -305,6 +440,56 @@ export function sketchFrom(plan: NeedsPlan): Sketch | null {
   o['live'] = live
   o['other'] = other
   return parseSketch(JSON.stringify(o))
+}
+
+const CAMERA_SCAN_WORD: RegExp = /\bscan(?:s|ned|ning|ners?)?\b/i
+
+export function isCameraNeed(words: string): boolean {
+  return /\b(?:cameras?|photograph(?:s|ed|ing|y)?)\b/i.test(words) || CAMERA_SCAN_WORD.test(words)
+}
+
+/**
+ * True only for a need the capture fragment can actually satisfy on its own:
+ * framing a live preview, snapping one photo and keeping it. A need that also
+ * asks to scan, decode, recognize or identify something (a QR scanner that
+ * decodes a code and opens its URL), or one that mentions a camera only in
+ * passing (a camera-settings checklist, "display ... without taking photos"),
+ * is not satisfied by appending a captured JPEG to a photo list, so it returns
+ * false and is left for the section writer -- the rest of the behavior stays
+ * open instead of being silently dropped with no unsupported-feature notice.
+ */
+export function isCameraCaptureNeed(words: string): boolean {
+  if (!isCameraNeed(words)) { return false }
+  if (CAMERA_SCAN_WORD.test(words) ||
+      /\b(qr|barcode|bar\s?code|decode|recognize|recognise|identify|detect|checklist|settings)\b/i.test(words)) {
+    return false
+  }
+  if (/without\b[^.]*\b(taking|capturing|snapping|shooting)\b/i.test(words)) { return false }
+  return true
+}
+
+/**
+ * A request that says the person photographs or scans something must keep a
+ * camera need even when the plan leaves it out: the Exam Prep starter does, and
+ * a plan without it served a practice screen with no way to photograph a page.
+ * The need is written as other, so the section writer gets ui.Camera.
+ * For a multi-screen plan, return a retry reason if the camera has no screen.
+ */
+export function ensureCameraNeed(plan: NeedsPlan, prompt: string): string {
+  if (!isCameraNeed(prompt)) { return '' }
+  for (let n of plan.needs) {
+    if ((isCameraNeed(n.words) || isCameraNeed(n.from)) &&
+        (plan.screens.length === 0 || plan.screens.some((s: NeedScreen): boolean => s.needs.indexOf(n.id) >= 0))) { return '' }
+  }
+  if (plan.screens.length > 0) {
+    return 'Describe the requested camera need, give it an id and reference that id on the relevant screen'
+  }
+  let need = new Need()
+  need.type = NEED_OTHER
+  need.words = 'A live camera view inside the app: the person frames what they want to photograph and taps a shutter; ' +
+    'the captured photo is shown and kept.'
+  plan.needs.push(need)
+  return ''
 }
 
 const STOP_WORDS: string[] = ['the', 'and', 'for', 'with', 'that', 'this', 'when', 'from', 'your', 'you', 'are', 'its', 'has', 'have', 'will',
@@ -377,6 +562,13 @@ export function dropUnasked(plan: NeedsPlan, request: string): string[] {
     }
   }
   plan.needs = kept
+  // Do not hand a writer references to a need the request never asked for.
+  let ids = kept.map((n: Need): string => n.id)
+  for (let n of kept) { n.uses = n.uses.filter((id: string): boolean => ids.indexOf(id) >= 0) }
+  for (let s of plan.screens) { s.needs = s.needs.filter((id: string): boolean => ids.indexOf(id) >= 0) }
+  for (let t of plan.transitions) {
+    if (t.record.length > 0 && ids.indexOf(t.record.substring(0, t.record.length - 3)) < 0) { t.record = '' }
+  }
   return dropped
 }
 
@@ -395,7 +587,9 @@ export const WIDGET_ROOM: number = 5
 /** Added to the request the plan is drawn from, for a widget; the cap below holds when the model does not keep to it. */
 export const WIDGET_NEEDS_NOTE: string =
   '\n\nThis app is a small widget inside a chat reply, about 360 by 420 points with no scrolling: plan only the ' +
-  WIDGET_ROOM.toString() + ' things the request names first or most plainly, and leave the rest out.'
+  WIDGET_ROOM.toString() + ' things the request names first or most plainly, and leave the rest out. ' +
+  'Keep requested navigation: declare the same screens/startScreen/transitions as a full app. Use tabs for peer views, pages for record detail/editor flows. ' +
+  'Do not cut a declared multi-view flow into independent blocks; keep each active view compact.'
 
 /**
  * A widget's plan cut to what fits in it: the first `room` needs the person sees, in the plan's order. A figure that only feeds
