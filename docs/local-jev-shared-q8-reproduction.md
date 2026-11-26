@@ -19,6 +19,14 @@ The launcher prepares the historical splits, trains the ranker, builds the
 Rust worker, and measures the saved 22-question request. Use the steps below
 to run the same recipe manually or train on new labeled requests.
 
+## Generate fresh examples and train Q8
+
+Run `shared_q8/fresh.sh` from the private dataset repository to generate
+native requests through `dataset.py`, label them in two passes, and train Q8
+on the resulting fit and selection splits. The live command requires explicit
+call, token, and USD limits. The fixture command uses local responses.
+[Fresh Q8 command and prerequisites](https://github.com/egavrin/vera-classifier-dataset/blob/466316b7e61246d1edeb843ef04503229b0c2a73/shared_q8/README.md#generate-fresh-training-inputs)
+
 ## 1. Download the checkpoint and pin the runner
 
 Use Python 3.12 and Rust 1.93.1. Run these commands from a Deal Studio repository checkout that contains the pinned revision. If necessary, fetch the branch first with `git fetch origin egavrin/local-jev-playground`.
