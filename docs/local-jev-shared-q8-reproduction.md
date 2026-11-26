@@ -4,6 +4,21 @@ Start with the public `jhu-clsp/mmBERT-small` checkpoint and labeled requests fr
 
 The Rust runner pools the request state once, pools each question and offered option, and scores all options with a small feed-forward network. The Transformer layers are dropped. The frozen Q8 table takes 25,600,000 bytes, the tokenizer takes 13,718,521 bytes, and the trained F32 head takes about 1.74 MB. The original bundle took 41,061,517 bytes.
 
+## Run with the archived dataset
+
+Check out the pinned archive in the private Vera dataset repository. Run these
+commands from the dataset checkout. Use a new output directory for each command.
+[Dataset, scripts, and prerequisites](https://github.com/egavrin/vera-classifier-dataset/tree/1a35bcd3a9e01d40fd805c57f6c77aa53ab7ed6c/shared_q8)
+
+```bash
+python3.12 shared_q8/prepare.py --out /path/to/new-q8-inputs
+bash shared_q8/reproduce.sh --app /path/to/deal-studio-ohos --out /path/to/new-q8-run
+```
+
+The launcher prepares the historical splits, trains the ranker, builds the
+Rust worker, and measures the saved 22-question request. Use the steps below
+to run the same recipe manually or train on new labeled requests.
+
 ## 1. Download the checkpoint and pin the runner
 
 Use Python 3.12 and Rust 1.93.1. Run these commands from a Deal Studio repository checkout that contains the pinned revision. If necessary, fetch the branch first with `git fetch origin egavrin/local-jev-playground`.
@@ -44,7 +59,7 @@ To collect new requests, follow the dataset repository's native-builder rehearsa
 
 The original run used **15,399 eligible decisions** after its split exclusions. It fit on the merged historical corpus and targeted extension, with two selection cohorts. The test and saved timing requests stayed outside training. New labels can train the same architecture. Exact historical quality comparisons require the archived input bodies and labels.
 
-To repeat the original training inputs, use the private archive under `.local-jev/laya/`. Join `corpus-v3-train.jsonl` followed by `mmbert-small-v1/half-q4/cycle3/train.jsonl`. Keep `corpus-v3-calibration.jsonl` and `mmbert-small-v1/half-q4/cycle3/calibration.jsonl` as separate selection cohorts. For the fit split, exclude rows that share a scenario group or normalized state with selection or `corpus-v3-test.jsonl`. Exclude saved `mmbert-small-v1/perf-7/requests.json` states from fit and selection. Exclude test states from selection. Normalize a state with `" ".join(state.casefold().split())`. The resulting counts are 3,090 fit requests and 645 and 69 selection requests.
+To repeat the original training inputs, run `shared_q8/prepare.py` from the private archive above. For manual preparation, decompress the inputs and join `corpus-v3-train.jsonl` followed by `cycle3-train.jsonl`. Keep `corpus-v3-calibration.jsonl` and `cycle3-calibration.jsonl` as separate selection cohorts. For the fit split, exclude rows that share a scenario group or normalized state with selection or `corpus-v3-test.jsonl`. Exclude saved timing states in `requests.json` from fit and selection. Exclude test states from selection. Normalize a state with `" ".join(state.casefold().split())`. The resulting counts are 3,090 fit requests and 645 and 69 selection requests.
 
 ## 3. Project the original table, train the ranker, and export Q8
 
@@ -323,7 +338,7 @@ env -u JEV_BUNDLE_DIR -u LAYA_BUNDLE_DIR \
 runner="$work/target/release/local-jev-shared"
 ```
 
-Set `request_json` to a file containing one complete Vera request body with `state` and `questions`. To reproduce the historical measurement, use the original 22-question body with SHA-256 `64a420c4b4f334c52a9f7ffa5531ad4462798ac12b5bd5510723fa3b3d482d9c`. The experiment archive stores it as `body` in `perf-7/requests.json`. Use that body verbatim for the hash check and the saved cloud answers from `perf-7/cloud-replay.json` for comparison.
+Set `request_json` to a file containing one complete Vera request body with `state` and `questions`. To reproduce the historical measurement, use the original 22-question body with SHA-256 `64a420c4b4f334c52a9f7ffa5531ad4462798ac12b5bd5510723fa3b3d482d9c`. The preparation script writes this body verbatim to `request22.json`. Use `saved-jev.json` from the same output directory to compare with the archived Jev answers.
 
 ```bash
 "$py" - "$runner" "$work/bundle" "$request_json" > "$work/timing.json" <<'PY'
