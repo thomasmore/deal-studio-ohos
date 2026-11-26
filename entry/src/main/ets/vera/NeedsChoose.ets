@@ -12,8 +12,8 @@
 import { OperationCancellation, isCancelled, throwIfCancelled } from './OperationCancellation'
 import { Sketch, SketchInput, ListField, SketchOption, SketchAsk, JevAsk, PlanReview, ComposeResult, composeFromSketch, closePartialJson, sketchSignature, describeSketch,
   listNeeds, clockOptions, listOptions, choice, askReady, askLive, SketchQuestion, answerTo, keepAnswers, LIST_SECTIONS, LIST_PUBLISHERS, PART } from './VeraCompose'
-import { NeedsPlan, Need, NEEDS_PROMPT, plainScenes, WIDGET_ROOM, WIDGET_NEEDS_NOTE, capForWidget, dropUnasked, NEED_COUNTDOWN, NEED_ACTION, NEED_FIGURE, ON_END, ON_ADDED, ON_TAP, parseNeedsPlan, sketchFrom,
-  needOf } from './NeedsPlan'
+import { NeedsPlan, Need, NEEDS_PROMPT, plainScenes, WIDGET_ROOM, WIDGET_NEEDS_NOTE, capForWidget, dropUnasked, NEED_COUNTDOWN, NEED_ACTION, NEED_FIGURE, ON_END, ON_ADDED, ON_TAP, parseNeedsPlan, sketchFrom, planningSketch,
+  ensureCameraNeed, needOf, navigationPlanProblem } from './NeedsPlan'
 
 /** Whether the list keeps a reading in a unit the request gives a number in: a temperature, a pressure, a weight. */
 export function readsMeasure(sketch: Sketch, prompt: string): boolean {
@@ -306,6 +306,7 @@ export function markSettings(sketch: Sketch, prompt: string): string[] {
 }
 
 class DrawnPlan {
+  appAttempted: boolean = false
   text: string = ''
   plan: NeedsPlan | null = null
   sketch: Sketch | null = null
@@ -321,7 +322,8 @@ async function drawOnce(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
     if (isCancelled(cancellation)) { return }
     let plan = parseNeedsPlan(reply)
     if (plan === null) { return }
-    let sketch = sketchFrom(plan!)
+    ensureCameraNeed(plan!, prompt)
+    let sketch = planningSketch(plan!)
     if (sketch === null) { return }
     let signature = sketchSignature(sketch!)
     if (signature === shown) { return }
@@ -348,15 +350,29 @@ async function drawPlan(askPlan: SketchAsk, prompt: string, onSketch: (partial: 
     throwIfCancelled(cancellation)
     let reply = await drawOnce(askPlan, user, onSketch, attempt === 2, cancellation)
     throwIfCancelled(cancellation)
-    let plan = reply !== null ? parseNeedsPlan(reply!) : null
-    let sketch = plan !== null ? sketchFrom(plan!) : null
-    if (plan !== null && sketch !== null) {
+    if (reply !== null) {
+      try {
+        let body = reply!.substring(reply!.indexOf('{'), reply!.lastIndexOf('}') + 1)
+        let raw = JSON.parse(body) as Record<string, Object>
+        let screens = raw['screens']
+        if (screens !== undefined && (!Array.isArray(screens) || screens.length > 1)) { out.appAttempted = true }
+      } catch (_e) {}
+    }
+    let problems: string[] = []
+    let plan = reply !== null ? parseNeedsPlan(reply!, problems) : null
+    let cameraProblem = plan !== null ? ensureCameraNeed(plan!, prompt) : ''
+    let sketch = plan !== null ? planningSketch(plan!) : null
+    let navigation = plan !== null ? navigationPlanProblem(plan!) : ''
+    // Prose is only a heuristic. It may request a better plan, but cannot disable the ordinary fallback on its own.
+    if (plan !== null && sketch !== null && navigation.length === 0 && cameraProblem.length === 0) {
       out.text = reply!
       out.plan = plan
       out.sketch = sketch
       return out
     }
-    let wrong = reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200)
+    if (cameraProblem.length > 0) { problems.push(cameraProblem) }
+    let wrong = navigation.length > 0 ? navigation : (problems.length > 0 ? problems.join('; ') :
+      (reply === null ? 'there was no answer' : 'it was not one JSON object in the form asked for: ' + reply!.substring(0, 200)))
     user = prompt + note + '\n\nThe last answer could not be used: ' + wrong + '. Answer with the JSON object only, in the form asked for.'
   }
   return out
@@ -387,7 +403,11 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   throwIfCancelled(cancellation)
   result.sketchMs = Date.now() - started
   result.planTries = drawn.tries
-  if (drawn.plan === null) { result.note = 'no usable plan after ' + drawn.tries.toString() + ' tries'; return result }
+  if (drawn.plan === null) {
+    result.appPlanFailed = drawn.appAttempted
+    result.note = 'no usable plan after ' + drawn.tries.toString() + ' tries'
+    return result
+  }
   let plan: NeedsPlan = drawn.plan!
   let sketch: Sketch = drawn.sketch!
   let text = drawn.text
@@ -396,6 +416,8 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   throwIfCancelled(cancellation)
   // What each question stands at, the person's answer or its default, before a plan drawn again drops the questions.
   let answered: string[] = sketch.questions.map((q: SketchQuestion): string => answerTo(q)).filter((a: string): boolean => a.length > 0)
+  let clarified: string[] = sketch.questions.filter((q: SketchQuestion): boolean => answerTo(q).length > 0)
+    .map((q: SketchQuestion): string => q.ask + ' ' + answerTo(q))
   if (settled.length > 0) {
     prompt = prompt + '\n\n' + settled
     let again = Date.now()
@@ -404,7 +426,11 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
     result.sketchMs += Date.now() - again
     result.replanned = true
     result.planTries += redrawn.tries
-    if (redrawn.plan === null) { result.note = 'no usable plan drawn again after ' + redrawn.tries.toString() + ' tries'; return result }
+    if (redrawn.plan === null) {
+      result.appPlanFailed = plan.screens.length > 1 || redrawn.appAttempted
+      result.note = 'no usable plan drawn again after ' + redrawn.tries.toString() + ' tries'
+      return result
+    }
     plan = redrawn.plan!
     sketch = redrawn.sketch!
     sketch.questions = []
@@ -415,11 +441,23 @@ export async function composeNeeds(prompt: string, askPlan: SketchAsk, askChoice
   // asked for no animation) is built as any other need.
   let unscened = sceneAllowed ? 0 : plainScenes(plan)
   if (unscened > 0) {
-    let redone = sketchFrom(plan)
+    let redone = planningSketch(plan)
     if (redone !== null) { redone!.questions = sketch.questions; sketch = redone! }
   }
   // What the model added that the request does not ask for (a note, a reminder nobody named) is not built.
   let unasked = dropUnasked(plan, prompt)
+  // A multi-screen app is written once from the full plan, before choosing any flat parts or sections.
+  if (plan.screens.length > 1) {
+    plan.request = prompt + (clarified.length > 0 ? '\n\nClarification answers (chosen or default):\n' + clarified.join('\n') : '')
+    plan.compact = widget
+    result.appPlan = plan
+    result.note = 'shared app (' + plan.presentation + (widget ? ', compact' : '') + '): ' + plan.screens.map((s): string => s.id).join(', ')
+    if (unasked.length > 0) {
+      result.note += '; not in the request, so not built: ' + unasked.join('; ')
+      result.dropped = unasked.map((words: string): string => 'not in the request: ' + words)
+    }
+    return result
+  }
   // A widget has room for a few things: the plan was asked to keep to them, and what it did not is cut here.
   let cut: string[] = widget ? capForWidget(plan, WIDGET_ROOM) : []
   if (unasked.length > 0 || cut.length > 0) {

@@ -95,7 +95,7 @@ static napi_value LlamaInit(napi_env env, napi_callback_info info) {
     napi_call_function(env, json_obj, parse_fn, 1, &json_str, &config_val);
 
     std::string model_path = json_string(env, config_val, "model_path");
-    int n_ctx = json_int(env, config_val, "n_ctx", 4096);
+    int n_ctx = json_int(env, config_val, "n_ctx", 16384);
     int n_threads = json_int(env, config_val, "n_threads", 4);
     int n_gpu_layers = json_int(env, config_val, "n_gpu_layers", 0);
 
@@ -113,6 +113,8 @@ static napi_value LlamaInit(napi_env env, napi_callback_info info) {
 
     auto cparams = llama_context_default_params();
     cparams.n_ctx = n_ctx;
+    // The prompt is decoded as one batch (LlamaGenerate), and llama_decode refuses a batch over n_batch (2048 by default).
+    cparams.n_batch = n_ctx;
     cparams.n_threads = n_threads;
     cparams.n_threads_batch = n_threads;
     g_ctx = llama_init_from_model(g_model, cparams);

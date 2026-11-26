@@ -28,6 +28,7 @@ export class LiveNode {
   /** ui.Surface with style fill: how tall it is drawn, from where it starts to the bottom of the window. */
   @Trace layoutHeight: number = 0
   @Trace kind: string = ''
+  @Trace screenId: string = ''
   @Trace style: string = ''
   @Trace text: string = ''
   @Trace source: string = ''
@@ -132,6 +133,7 @@ export function armReveal(on: boolean): void {
 export function toLive(node: VeraUiNode): LiveNode {
   let live = new LiveNode()
   live.kind = node.kind
+  live.screenId = node.screenId
   live.style = node.style
   live.text = node.text
   live.source = node.source
@@ -202,16 +204,34 @@ export function toLive(node: VeraUiNode): LiveNode {
  * grows its list every frame. A list drawn newest-first -- the natural way to
  * show a journal -- then disagrees with its own state on every row.
  */
-export function reconcile(live: LiveNode, next: VeraUiNode): void {
+export function reconcile(live: LiveNode, next: VeraUiNode,
+    fieldValue?: (node: LiveNode, next: VeraUiNode) => string | undefined): void {
+  let generation = live.fieldGeneration
+  let draft = live.kind === 'field'
+    ? fieldValue !== undefined ? fieldValue(live, next)
+      : live.fieldValue !== live.value && next.value === live.value ? live.fieldValue : undefined
+    : undefined
+  // A screen owns its native controls. Never reconcile an outgoing editor into
+  // an unrelated incoming screen just because its fields occupy the same positions.
+  let screenChanged = (live.kind === 'screen' || next.kind === 'screen') &&
+    (live.kind !== next.kind || live.screenId !== next.screenId)
+  if (screenChanged) {
+    live.children = next.children.map((child: VeraUiNode): LiveNode => toLive(child))
+    live.layoutWidth = 0
+    live.layoutHeight = 0
+    live.fieldGeneration++
+  }
+  if (live.screenId !== next.screenId) { live.screenId = next.screenId }
   if (live.kind !== next.kind || live.action !== next.action || live.enabled !== next.enabled ||
       ((live.kind === 'field' || live.kind === 'surface') &&
-        live.value !== next.value && live.fieldValue !== next.value) ||
+        live.value !== next.value && live.fieldValue !== next.value && draft === undefined) ||
       (live.kind === 'field' && (live.keyboardType !== next.keyboardType || live.required !== next.required ||
         live.minLength !== next.minLength || live.maxLength !== next.maxLength ||
         live.pattern !== next.pattern || live.email !== next.email))) {
     live.fieldGeneration++
   }
-  if (live.fieldValue !== next.value) { live.fieldValue = next.value }
+  let value = generation === live.fieldGeneration && draft !== undefined ? draft : next.value
+  if (live.fieldValue !== value) { live.fieldValue = value }
   if (live.kind !== next.kind) {
     live.kind = next.kind
     live.layoutWidth = 0
@@ -265,12 +285,14 @@ export function reconcile(live: LiveNode, next: VeraUiNode): void {
   if (live.email !== next.email) { live.email = next.email }
   if (live.emailMessage !== next.emailMessage) { live.emailMessage = next.emailMessage }
 
+  if (screenChanged) { return }
+
   // Reconcile the positions that already exist, in place, so the components
   // rendering them keep pointing at a node that is still being updated.
   let shared = live.children.length < next.children.length
     ? live.children.length : next.children.length
   for (let i = 0; i < shared; i++) {
-    reconcile(live.children[i], next.children[i])
+    reconcile(live.children[i], next.children[i], fieldValue)
   }
   if (live.children.length === next.children.length) { return }
 
@@ -286,4 +308,73 @@ export function reconcile(live: LiveNode, next: VeraUiNode): void {
     kids.push(added)
   }
   live.children = kids
+}
+
+export function cloneLiveTree(node: LiveNode): LiveNode {
+  let copy = new LiveNode()
+
+  copy.layoutWidth = node.layoutWidth
+  copy.layoutHeight = node.layoutHeight
+  copy.kind = node.kind
+  copy.screenId = node.screenId
+  copy.style = node.style
+  copy.text = node.text
+  copy.source = node.source
+  copy.alt = node.alt
+  copy.action = node.action
+  copy.eventValue = node.eventValue
+  copy.enabled = node.enabled
+  copy.commands = node.commands
+  copy.spinPeriodMs = node.spinPeriodMs
+  copy.motionStart = node.motionStart
+  copy.label = node.label
+  copy.tickerId = node.tickerId
+  copy.columns = node.columns
+  copy.value = node.value
+  copy.checked = node.checked
+  copy.minimum = node.minimum
+  copy.maximum = node.maximum
+  copy.options = node.options.slice()
+  copy.series = node.series.slice()
+  copy.bars = node.bars
+  copy.series2 = node.series2.slice()
+  copy.series2Style = node.series2Style
+  copy.seriesLabel = node.seriesLabel
+  copy.series2Label = node.series2Label
+  copy.categories = node.categories.slice()
+  copy.numberValue = node.numberValue
+  copy.prefix = node.prefix
+  copy.suffix = node.suffix
+  copy.minimumDigits = node.minimumDigits
+  copy.decimals = node.decimals
+  copy.step = node.step
+  copy.icon = node.icon
+  copy.keyboardType = node.keyboardType
+  copy.required = node.required
+  copy.requiredMessage = node.requiredMessage
+  copy.minLength = node.minLength
+  copy.minLengthMessage = node.minLengthMessage
+  copy.maxLength = node.maxLength
+  copy.maxLengthMessage = node.maxLengthMessage
+  copy.pattern = node.pattern
+  copy.patternMessage = node.patternMessage
+  copy.email = node.email
+  copy.emailMessage = node.emailMessage
+  copy.touched = node.touched
+  copy.typed = node.typed
+  copy.fieldValue = node.fieldValue
+  copy.fieldIssue = node.fieldIssue
+  copy.fieldGeneration = node.fieldGeneration
+  copy.fieldCancellation = node.fieldCancellation
+  copy.liveGeneration = node.liveGeneration
+  copy.reveal = node.reveal
+  copy.iconRoom = node.iconRoom
+
+  let children: LiveNode[] = []
+  for (let child of node.children) {
+    children.push(cloneLiveTree(child))
+  }
+  copy.children = children
+
+  return copy
 }

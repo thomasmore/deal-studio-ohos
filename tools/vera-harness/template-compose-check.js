@@ -1,5 +1,5 @@
 // Compiles every Jev section fragment (VeraTemplates.ets) alone and in every ordered pair, through the
-// real composeProgram and compileVeraSource. No device, no Jev call. Prints one JSON report.
+// real composeProgram and compileVeraSource, both normal and legacy widget/tab layouts. No device or Jev call.
 'use strict'
 const {loadVera} = require('./source-loader')
 const {fragments} = loadVera('VeraTemplates')
@@ -27,6 +27,8 @@ const results = cases.map(chosen => {
   try {
     const source = composeProgram(chosen, globals, chosen.map(defaults))
     compileVeraSource(source)
+    const widgetGlobals = new Map(globals); widgetGlobals.set('__WIDGET__', 'true')
+    compileVeraSource(composeProgram(chosen, widgetGlobals, chosen.map(defaults)))
     return {label, ok: true}
   } catch (e) {
     const d = e.diagnostics ? e.diagnostics.map(x => x.message || String(x)).slice(0, 3) : [String(e.message || e)]

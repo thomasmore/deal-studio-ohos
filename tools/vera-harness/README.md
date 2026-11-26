@@ -10,6 +10,22 @@ Use an available TypeScript installation with Node module resolution.
 Alternatively, set `VERA_TYPESCRIPT_PATH` to the TypeScript module entry file before these commands.
 No dependency installation is required when that module is available.
 
+## Running the checks
+
+`run-all.js` discovers every `*-check.js` and `*-suite.js` in this folder and runs it in its own process, then reports pass/fail/skip with timing:
+
+```bash
+node tools/vera-harness/run-all.js                # ALL CHECKS, SEQUENTIALLY
+node tools/vera-harness/run-all.js --list         # names and families
+node tools/vera-harness/run-all.js --family=runtime
+node tools/vera-harness/run-all.js --filter=host --jobs=2
+node tools/vera-harness/run-all.js --json=/tmp/vera-checks.json
+```
+
+Families are `runtime`, `visual`, `widget`, `prompt`, `agent`, `composition`, `live`, `ui`, `compiler` and `other`.
+
+`manifest.js` records what cannot be inferred: extra arguments (for checks that take a repo root or report path), required environment (skipping with a reason when absent), and platform skips, `--jobs=N` runs checks concurrently; keep it at 1 when a check writes a fixed temp path.
+
 Run these commands from the repository root:
 
 ```bash
@@ -76,6 +92,32 @@ Each new process loads its selected sources again, so a previous build cannot su
 `compatibility/*.json` stores bytecode and saved state from the current build for the five visual workflows, so a change to the bytecode or saved-state format shows up as a failure. The pre-redesign set from `b3acfcf` stopped loading when `int` was removed (its bytecode calls `IntText`); it is still in git history.
 `visual-check.js` records the tested revision, command, decoded trees, and expected-versus-observed checks in JSON.
 Native validation still requires the toolchain described in `CLAUDE.md`.
+
+For shared-state screen identity, stale controls, timer/surface teardown and Back:
+
+```bash
+node tools/vera-harness/multiscreen-check.js
+```
+
+See the [runtime contract](../../docs/multiscreen-runtime.md). Host SVGs are approximate proofs, not native-device evidence.
+
+For the multi-screen planning/shared-writer path and refinement preservation:
+
+```bash
+VERA_TYPESCRIPT_PATH=/path/to/typescript/lib/typescript.js node tools/vera-harness/app-plan-check.js
+```
+
+Real compiler/VM with mocked model/phone boundaries: planning, Generate/Chat handoff, drafts, refinement preservation and repair feedback. `template-run-check.js` covers existing Chat tabs; `chat-prompt-check.js` covers terminal multi-view failures.
+
+For deterministic screen reachability (no phone or model calls):
+
+```bash
+node tools/vera-harness/reachability-check.js                 # regression tests
+node tools/vera-harness/reachability-check.js /path/app.vera # check generated c_view_<id> screens
+# Or append explicit screen IDs: /path/app.vera list detail editor
+```
+
+The same bounded UI-path check runs automatically in `smokeRun` for declared pages and planned named Chat tabs; failures feed the existing repair loop. Single-view apps and legacy fragment-to-tab compositions keep their ordinary smoke contract. See [multi-view generation](../../docs/multiscreen-agent.md) for search limits and coverage caveats.
 
 A `ui.Surface` is drawn by the program itself, frame by frame, so its proofs come from playing it.
 `gfx-run.js` runs `init()`, `view()`, then fixed-step frames with scripted fingers, and draws chosen frames to SVG with `VeraGfx.paintGfx`, the phone's own painter, through the canvas recorder in `gfx-svg.js`:

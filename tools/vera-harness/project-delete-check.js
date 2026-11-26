@@ -56,7 +56,7 @@ function memoryFs() {
   }
   function record(method, name) {
     calls.push({method, path: name})
-    const at = faults.findIndex(f => f.method === method && f.path === name)
+    const at = faults.findIndex(f => f.method === method && (f.path === undefined || f.path === name))
     if (at < 0) { return }
     const fault = faults.splice(at, 1)[0]
     if (fault.partial) { fault.partial() }
@@ -109,8 +109,16 @@ function memoryFs() {
     },
     closeSync(handle) {
       assert.ok(handles.has(handle.fd), 'Close needs an open handle')
-      record('close', handles.get(handle.fd))
+      const name = handles.get(handle.fd)
       handles.delete(handle.fd)
+      record('close', name)
+    },
+    renameSync(from, to) {
+      record('rename', from)
+      assert.ok(![...handles.values()].includes(from), 'Rename must follow close')
+      assert.equal(typeof requireEntry(from), 'string')
+      entries.set(to, entries.get(from))
+      entries.delete(from)
     },
     unlinkSync(name) {
       record('unlink', name)
@@ -374,6 +382,134 @@ for (const method of ['deleteProject', 'deleteVersion']) {
     assert.equal(await invoke(), f.status.NotFound)
     assert.deepEqual(mutations(f), [])
   })
+}
+
+const atomicTargets = [
+  {
+    name: 'project state', path: projectDir + '/v0.state.json',
+    before: {stamp: 'old-stamp', value: ['number', 1]}, after: {stamp: 'new-stamp', value: ['number', 2]},
+    setup(memory) {
+      const {ProjectStore} = load('ProjectStore', {
+        '@kit.CoreFileKit': {fileIo: memory.disk}, '@kit.BasicServicesKit': {},
+        './ProjectText': load('ProjectText', {}, console)
+      }, console)
+      const store = new ProjectStore(); store.init('/fixture/files')
+      return {save: () => store.saveState('target', 'v0', 'new-stamp', '["number",2]'),
+        read: () => store.loadState('target', 'v0', 'new-stamp'), expected: '["number",2]'}
+    }
+  },
+  {
+    name: 'form bindings', path: root + '/forms.json',
+    before: {existing: 'keep', form: 'old'}, after: {existing: 'keep', form: 'new'},
+    setup(memory) {
+      const {FormBindings} = load('FormBindings', {'@kit.CoreFileKit': {fileIo: memory.disk}}, console)
+      const bindings = new FormBindings(); bindings.init('/fixture/files')
+      return {save: () => bindings.bind('form', 'new'), read: () => bindings.projectFor('form'), expected: 'new'}
+    }
+  },
+  {
+    name: 'form sizes', path: root + '/form-sizes.json',
+    before: {existing: 2, form: 3}, after: {existing: 2, form: 4},
+    setup(memory) {
+      const {FormBindings} = load('FormBindings', {'@kit.CoreFileKit': {fileIo: memory.disk}}, console)
+      const bindings = new FormBindings(); bindings.init('/fixture/files')
+      return {save: () => bindings.setDimension('form', 4), read: () => bindings.dimensionFor('form'), expected: 4}
+    }
+  },
+  {
+    name: 'form offer', path: root + '/form-offer.json',
+    before: {projectId: 'old', at: 100}, after: {projectId: 'new', at: 200},
+    setup(memory) {
+      const {FormBindings} = load('FormBindings', {'@kit.CoreFileKit': {fileIo: memory.disk}}, console)
+      const bindings = new FormBindings(); bindings.init('/fixture/files')
+      return {save: () => bindings.offer('new', 200), read: () => bindings.takeOffer(201), expected: 'new'}
+    }
+  },
+  {
+    name: 'refresh ledger', path: root + '/widget-refresh.json',
+    before: {existing: 100, target: 200}, after: {existing: 100, target: 300},
+    setup(memory) {
+      const {RefreshLedger} = load('FormBindings', {'@kit.CoreFileKit': {fileIo: memory.disk}}, console)
+      const ledger = new RefreshLedger(); ledger.init('/fixture/files')
+      return {save: () => ledger.markRun('target', 300), read: () => ledger.lastRun('target'), expected: 300}
+    }
+  }
+]
+
+for (const target of atomicTargets) {
+  function atomicFixture() {
+    const memory = memoryFs(), api = target.setup(memory)
+    memory.file(target.path, JSON.stringify(target.before))
+    memory.file(root + '/unrelated.json', '{"keep":true}')
+    memory.calls.length = 0
+    return {...memory, ...api}
+  }
+  function atomicCalls(f) {
+    return f.calls.filter(c => ['open', 'write', 'close', 'rename', 'unlink'].includes(c.method))
+  }
+  function checkedTemp(f) {
+    const calls = atomicCalls(f), temp = calls[0].path
+    assert.ok(temp.startsWith(target.path + '.') && temp.endsWith('.tmp'), 'Use a sibling temporary file')
+    assert.ok(calls.every(c => c.path === temp), 'Only the temporary file may be opened, written, closed, renamed or unlinked')
+    assert.equal(f.handles.size, 0, 'Every opened handle must be closed, including after write failure')
+    assert.deepEqual(f.faults, [], 'Every injected fault must be reached')
+    assert.equal(f.entries.get(root + '/unrelated.json'), '{"keep":true}')
+    return temp
+  }
+  for (const cleanupFails of [false, true]) {
+    check(target.name + ' keeps its schema and commits only after close' + (cleanupFails ? ' despite unlink failure' : ''), () => {
+      const f = atomicFixture()
+      if (cleanupFails) { f.inject('unlink', undefined, new Error('Cleanup failure')) }
+      f.save()
+      assert.deepEqual(atomicCalls(f).map(c => c.method), ['open', 'write', 'close', 'rename', 'unlink'])
+      assert.equal(f.entries.has(checkedTemp(f)), false)
+      assert.equal(f.entries.get(target.path), JSON.stringify(target.after))
+      assert.equal(f.read(), f.expected)
+    })
+  }
+  const atomicFailures = [
+    {name: 'open', method: 'open'},
+    {name: 'partial open', method: 'open', partial: true},
+    {name: 'partial write', method: 'write', partial: true},
+    {name: 'close', method: 'close'},
+    {name: 'rename', method: 'rename'},
+    {name: 'write and close', method: 'write', partial: true, closeFails: true},
+    {name: 'null write and close', method: 'write', closeFails: true, error: null},
+    {name: 'undefined write and close', method: 'write', closeFails: true, error: undefined}
+  ]
+  for (const scenario of atomicFailures) {
+    for (const cleanupFails of [false, true]) {
+      check(target.name + ' preserves destination and original error on ' + scenario.name +
+        (cleanupFails ? ' plus cleanup failure' : ''), () => {
+        const f = atomicFixture(), before = f.snapshot()
+        const error = Object.hasOwn(scenario, 'error') ? scenario.error : businessError(13900005, scenario.name)
+        f.inject(scenario.method, undefined, error, scenario.partial ? () => {
+          const temp = f.calls[f.calls.length - 1].path
+          f.file(temp, 'incomplete JSON')
+        } : undefined)
+        if (scenario.closeFails) { f.inject('close', undefined, new Error('Secondary close failure')) }
+        if (cleanupFails) { f.inject('unlink', undefined, new Error('Secondary cleanup failure')) }
+        throwsIdentity(f.save, error)
+        const temp = checkedTemp(f)
+        const expected = ['open']
+        if (scenario.method !== 'open') { expected.push('write', 'close') }
+        if (scenario.method === 'rename') { expected.push('rename') }
+        expected.push('unlink')
+        assert.deepEqual(atomicCalls(f).map(c => c.method), expected, 'Never rename after an open, write or close failure')
+        assert.equal(f.entries.get(target.path), JSON.stringify(target.before), 'The previous destination must survive')
+        if (cleanupFails) {
+          assert.deepEqual(f.snapshot().filter(([name]) => name !== temp), before)
+        } else {
+          assert.deepEqual(f.snapshot(), before, 'Best-effort cleanup must remove even partially written temporary files')
+        }
+        f.calls.length = 0
+        f.save()
+        assert.equal(f.entries.get(target.path), JSON.stringify(target.after), 'A retry must still succeed')
+        assert.equal(f.read(), f.expected)
+        assert.equal(f.handles.size, 0)
+      })
+    }
+  }
 }
 
 ;(async () => {

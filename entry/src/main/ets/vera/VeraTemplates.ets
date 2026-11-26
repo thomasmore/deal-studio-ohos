@@ -4006,6 +4006,38 @@ export function liveFigureNumber(k: number): string { return 'liveNumber(state.l
  * says why. One per screen, so its names are its own (not indexed): the plan's formulas read its figures through its
  * ports by the same names wherever it is on the screen.
  */
+/** A fixed section for a camera need: the live preview and its shutter, with the photos it captured under it. */
+export function cameraCaptureFragment(): FragmentSpec {
+  return new FragmentSpec(
+    'camera_capture',
+    'A live camera preview inside the app with a shutter that captures a photo and keeps it',
+    '',
+    [new StateFieldSpec('photosIDX', 'string[]')],
+    '  let photosIDX: string[] = [];',
+    'photosIDX: photosIDX',
+    `function capturePhotoIDX(state: AppState, uri: string): AppState {
+  let out: string[] = [];
+  let i: number = 0;
+  while (i < state.photosIDX.length()) {
+    out.push(state.photosIDX[i]);
+    i = i + 1;
+  }
+  out.push(uri);
+  return {photosIDX: out__PASSTHROUGH__};
+}`,
+    `{
+  let photoViews: ui.View[] = [];
+  photoViews.push(ui.Camera("default", "capturePhotoIDX", "back", "Capture page"));
+  let i: number = 0;
+  while (i < state.photosIDX.length()) {
+    photoViews.push(ui.Image("default", state.photosIDX[i], "Captured page"));
+    i = i + 1;
+  }
+  sections.push(ui.Section("content", "Photograph", "Use the live preview, then tap Capture", photoViews));
+}`,
+    [], [])
+}
+
 function liveFigureFragment(): FragmentSpec {
   let spec = new FragmentSpec(
     LIVE_KIND,

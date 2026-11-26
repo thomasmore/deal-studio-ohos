@@ -146,6 +146,7 @@ function createRenderer(theme, options) {
       return frame(inner, width, px, filled ? t.padCard : 0, filled ? t.padCard : 0,
         fill, filled ? t.radiusCard : 0, 'none', t.gapTight, t.gapSection)
     }
+    if (kind === 'screen') return stack(children.map(c => layout(c, width, kind)), width, 0)
     if (['column', 'scroll', 'card', 'listgroup', 'timeline'].includes(kind)) {
       const card = kind === 'card' || kind === 'listgroup'
       const pad = card ? t.padCard : T.densityPad(t, style), w = Math.max(1, width - 2 * pad)

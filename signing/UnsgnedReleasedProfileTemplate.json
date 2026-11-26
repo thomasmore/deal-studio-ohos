@@ -19,7 +19,9 @@
         "allowed-acls": [
             "ohos.permission.EXECUTE_INSIGHT_INTENT",
             "ohos.permission.START_INVISIBLE_ABILITY",
+            "ohos.permission.START_ABILITIES_FROM_BACKGROUND",
             "ohos.permission.ABILITY_BACKGROUND_COMMUNICATION",
+            "ohos.permission.KEEP_BACKGROUND_RUNNING",
             "ohos.permission.GET_BUNDLE_INFO_PRIVILEGED",
             "ohos.permission.STORAGE_MANAGER",
             "ohos.permission.GET_WIFI_INFO",
@@ -29,6 +31,7 @@
             "ohos.permission.NOTIFICATION_CONTROLLER",
             "ohos.permission.GET_NETWORK_INFO",
             "ohos.permission.MANAGE_SHORTCUTS",
+            "ohos.permission.RUNNING_LOCK",
             "ohos.permission.INPUT_MONITORING"
         ]
     },

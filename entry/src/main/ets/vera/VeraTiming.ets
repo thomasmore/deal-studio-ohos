@@ -41,6 +41,19 @@ export function trace(event: string, fields: Record<string, Object>): void {
   }
 }
 
+/**
+ * One answer of the phone's function lookup (find_intent_function / find_sdk_function) as a hole writer is shown it: what
+ * the host replays when it writes holes without the phone's index (vera-tuning's lookup cache).
+ */
+export function traceLookup(tool: string, query: string, both: boolean, text: string): void {
+  let fields: Record<string, Object> = {}
+  fields['tool'] = tool
+  fields['query'] = query
+  fields['both'] = both
+  fields['text'] = text
+  trace('lookup', fields)
+}
+
 /** Moments in one streamed model request, as Date.now() values; 0 = never happened. */
 export class TurnTiming {
   sentAt: number = 0

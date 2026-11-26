@@ -17,22 +17,30 @@ export async function publishLiveWidget(projectId: string): Promise<string> {
       'projectId': projectId
     }
   }
-  if (!await formProvider.isRequestPublishFormSupported()) {
-    formBindings.offer(projectId)
-    formProvider.openFormManager(want)
-    return 'Your launcher opened its widget list. Pick VERA live app: it will show this app.'
+  try {
+    if (!await formProvider.isRequestPublishFormSupported()) {
+      formBindings.offer(projectId)
+      formProvider.openFormManager(want)
+      return 'Your launcher opened its widget list. Pick VERA live app: it will show this app.'
+    }
+    let id = await formProvider.requestPublishForm(want, liveBinding(projectId))
+    formBindings.bind(id, projectId)
+    await refreshForms()
+    return WIDGET_ADDED
+  } catch (e) {
+    throw e as Error
   }
-  let id = await formProvider.requestPublishForm(want, liveBinding(projectId))
-  formBindings.bind(id, projectId)
-  await refreshForms()
-  return WIDGET_ADDED
 }
 
 /** A live card placed with no app yet (WidgetBindPage) shows projectId from now on. Only our own live cards are taken. */
 export async function bindLiveForm(formId: string, projectId: string): Promise<void> {
   // Do not accept arbitrary form IDs supplied as launch parameters.
-  let info = await formProvider.getPublishedRunningFormInfoById(formId)
-  if (info.formName !== 'live' || info.bundleName !== 'com.vera.probe.dyn') { throw new Error('Not a VERA live widget') }
-  formBindings.bind(formId, projectId)
-  await refreshForms()
+  try {
+    let info = await formProvider.getPublishedRunningFormInfoById(formId)
+    if (info.formName !== 'live' || info.bundleName !== 'com.vera.probe.dyn') { throw new Error('Not a VERA live widget') }
+    formBindings.bind(formId, projectId)
+    await refreshForms()
+  } catch (e) {
+    throw e as Error
+  }
 }

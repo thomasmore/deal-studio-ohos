@@ -4,6 +4,7 @@ import { webSearch } from './VeraWebSearch'
 import { OperationCancellation, PredicateCancellation, throwIfCancelled } from './OperationCancellation'
 import { findSource, SourceFound } from './VeraSourceFind'
 import { appSourceCalls } from './SourceAppCalls'
+import { traceLookup } from './VeraTiming'
 
 export function appBlockCalls(canSearch: boolean, status: (text: string) => void = (_text: string): void => {},
     cancelled: () => boolean = (): boolean => false, cancellation?: OperationCancellation): BlockCalls {
@@ -52,6 +53,7 @@ export function appBlockCalls(canSearch: boolean, status: (text: string) => void
     check()
     try {
       let reply = await discoveryToolResult('find_sdk_function', prompt.substring(0, 300), 0, false, operation)
+      traceLookup('find_sdk_function', prompt.substring(0, 300), false, reply)
       return reply.substring(0, 2500)
     } finally {
       check()

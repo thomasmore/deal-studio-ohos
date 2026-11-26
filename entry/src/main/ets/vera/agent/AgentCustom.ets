@@ -19,6 +19,9 @@ import { playSurface } from '../VeraSurfacePlay'
 import { isScene } from '../VeraCompose'
 import { asksFor3D } from '../Asks3D'
 import { SCENE_GUIDE, SCENE_TOKENS } from './AgentScene'
+import { NeedsPlan } from '../NeedsPlan'
+import { APP_CONTRACT, appContext, appPresentation, unboundAppAction } from './AgentAppContract'
+import { deserializeVbc2 } from '../VeraInterpreter'
 import { applyRepair, SEARCH_MARK, SPLIT_MARK, REPLACE_MARK } from '../VeraRepair'
 
 /**
@@ -111,9 +114,11 @@ function phoneRule(phone: string): string {
   if (phone.length === 0) {
     return DECLINE_RULE + '- The section never calls sdk.call, except "' + ASK_TARGET + '" as said below: what the phone does is not its job.\n' +
       '- Words written from what the person entered (suggestions, recipes, ideas) are never declined: "' + ASK_TARGET + '" writes them.\n' +
-      '- If the section cannot really do it with this language and these components -- it needs a camera, a live feed, ' +
-      'the person\'s location or data the phone does not hold -- decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
-      '</cannot> only when none of the needs can be done. Never fake it with made-up data.\n'
+      '- If the section cannot really do it with this language and these components -- it needs a live feed from somewhere ' +
+      'the phone cannot reach, the person\'s location or data the phone does not hold -- decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
+      '</cannot> only when none of the needs can be done. Never fake it with made-up data.\n' +
+      '- A camera view is not declined: use ui.Camera, which shows a live preview inside the app and hands the handler the ' +
+      'captured photo as a file URI. Do not use sdk.call camera targets for a screen that should keep the preview inside itself.\n'
   }
   return DECLINE_RULE + '- What the phone or another app must do, the section does with sdk.call from a handler, calling ONLY targets from ' +
     '"Phone functions found" in the request (and "' + ASK_TARGET + '", as said below), copied exactly, with the parameters they show, values from the screen\'s state. ' +
@@ -126,8 +131,10 @@ function phoneRule(phone: string): string {
     'if a function found does the nearest useful thing for the person -- shows or opens the same thing in the app made for it: ' +
     'write the section with that function, and say in a line on the screen what it does instead.\n' +
     '- Words written from what the person entered (suggestions, recipes, ideas) are never declined: "' + ASK_TARGET + '" writes them, as said below.\n' +
+    '- A camera view is not declined: use ui.Camera, which shows a live preview inside the app and hands the handler the ' +
+    'captured photo as a file URI. Do not use sdk.call camera targets for a screen that should keep the preview inside itself.\n' +
     '- If none of the phone functions found does what is needed, or it needs something the phone cannot give a program ' +
-    '(a camera, a live feed, the person\'s location), decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
+    '(a live feed from somewhere the phone cannot reach, the person\'s location), decline that need as above, beside the rest; a bare <cannot>' + CANNOT_FORM +
     '</cannot> only when none of the needs can be done. Never fake it, never pretend a call happened, ' +
     'never call a target that is not listed.\n'
 }
@@ -168,6 +175,8 @@ function callProblem(reply: string, found: string[]): string {
 }
 
 export class CustomRequest {
+  /** One whole-app contribution, with the original named views and shared data references. */
+  appPlan: NeedsPlan | null = null
   /** What the section must do, each in words. */
   needs: string[] = []
   /** The person's request. */
@@ -189,6 +198,11 @@ export class CustomRequest {
   verify: ((body: string) => Promise<string>) | null = null
   /** The section is the whole screen: the program so far has nothing but its header. */
   whole: boolean = false
+  /**
+   * A change to a section already on the screen (AgentSectionEdit.ets): the section as it is, in the answer's own form.
+   * `needs` are then the change; the section keeps everything else it does.
+   */
+  previous: string = ''
 }
 
 /** Jev reads the section against each need: a section that only says it cannot, or does something else, does not count. */
@@ -211,7 +225,9 @@ export function verifyRequest(request: CustomRequest, reply: string): string {
   body['model'] = 'jev-latest'
   // What the code does not show: the runtime keeps the app's state between visits by itself.
   body['state'] = 'Request: ' + request.prompt + '\nThe app\'s state (every field) is saved and restored by the phone between ' +
-    'visits without any code for it.\nThe section, as code:\n' + reply
+    'visits without any code for it.\n' + (request.appPlan === null ? '' :
+      'This is one shared-state app. Unless the request explicitly names an external app, actions on its records mean local AppState changes, not changes in another phone app. ' +
+      'A handler declaration alone is not a user action: check that a reachable control calls it.\n') + 'The section, as code:\n' + reply
   body['questions'] = questions
   return JSON.stringify(body)
 }
@@ -357,11 +373,15 @@ function quoted(source: string, errors: string): string {
  * '' when the program compiles and runs, else what went wrong with the lines it points at. A section with a scene is also
  * played: fingers on it, then each button pressed, every frame drawn.
  */
-function check(source: string, scene: boolean = false, unreadToo: boolean = true): string {
+function check(source: string, scene: boolean = false, unreadToo: boolean = true, app: NeedsPlan | null = null): string {
   try {
     let compiled = compileVeraSource(source)
-    let ran = smokeRun(compiled)
+    let ran = app === null ? smokeRun(compiled) : smokeRun(compiled, true, app.screens.map((s): string => s.id), app.startScreen)
     if (ran.length > 0) { return quoted(source, ran) }
+    if (app !== null) {
+      let unbound = unboundAppAction(deserializeVbc2(compiled.vbc2))
+      if (unbound.length > 0) { return unbound }
+    }
     if (scene) {
       let played = playSurface(compiled, true, true)
       if (played.length > 0) { return quoted(source, played) }
@@ -405,7 +425,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
   let found = foundTargets(request.phone)
   let phone = found.length > 0 ? request.phone : ''
   let scene = request.needs.some((n: string): boolean => isScene(n))
-  let system = language + CONTRACT + phoneRule(phone) + ASK_RULE + (scene ? SCENE_GUIDE : '')
+  let system = language + (request.appPlan === null ? CONTRACT : APP_CONTRACT + appPresentation(request.appPlan!)) + phoneRule(phone) + ASK_RULE + (scene ? SCENE_GUIDE : '')
   let asked = 'Request: ' + request.prompt + '\n\nThe section must do:\n- ' + request.needs.join('\n- ') +
     (request.inputs.length > 0 ? '\n\nThe person sets these on the screen and nothing else uses them yet; the section uses them:\n- ' +
       request.inputs.join('\n- ') : '') +
@@ -415,8 +435,12 @@ export async function writeSection(request: CustomRequest, language: string, ask
       'already has one (two empty states one under the other read as a broken screen).' : '') +
     (request.facts.length > 0 ? '\n\nFixed numbers the app uses:\n- ' + request.facts.join('\n- ') : '') +
     (phone.length > 0 ? '\n\nPhone functions found (the only targets the section may call):\n' + phone : '') +
-    (request.whole ? '\n\nThe program has nothing yet but its header: your section is the whole screen, everything the request ' +
-      'asks for. It may push several ui.Section(...) in its view.' : '') +
+    (request.appPlan !== null ? appContext(request.appPlan!) :
+      (request.whole ? '\n\nThe program has nothing yet but its header: your section is the whole screen, everything the request ' +
+        'asks for. It may push several ui.Section(...) in its view.' : '')) +
+    (request.previous.length > 0 ? '\n\nThe section as it is now. Change it as the section must do above, and keep everything ' +
+      'else it does, its look and the names and types of its fields; write the whole section again, changed, in the same form:\n' +
+      request.previous : '') +
     '\n\nThe program so far, which the section joins (do not repeat it):\n' + request.compose(null)
   let user = asked
   // The best section that compiled and ran but that Jev reads as missing a need: kept, in case no try does them all.
@@ -440,7 +464,9 @@ export async function writeSection(request: CustomRequest, language: string, ask
   // The first try written whole, then mended by edits (cheap: 2-4 s against 10-18 s for a whole one), a quick whole try when
   // edits do not apply, and last the thinking try written whole: slower, for what the rest got wrong. Edit rounds do not use
   // up the quick tries: counted as tries, two of them sent the next straight to a 33 s thinking try (Timetable on the phone).
-  for (let attempt = 0; attempt < MAX_ASKS; attempt++) {
+  // A failed app already used the whole contribution: never repeat a full pipeline for each screen.
+  let asks = request.appPlan === null ? MAX_ASKS : 3
+  for (let attempt = 0; attempt < asks; attempt++) {
     throwIfCancelled(cancellation)
     let editing = mending.length > 0
     let think = !editing && wholes > 0 && (editRounds >= EDIT_ROUNDS || wholes > REPAIRS)
@@ -448,7 +474,8 @@ export async function writeSection(request: CustomRequest, language: string, ask
     result.attempts = attempt + 1
     result.thought = think
     let tryStart = Date.now()
-    let budget: number = (request.whole || truncated) ? SCREEN_TOKENS : (scene ? SCENE_TOKENS : SECTION_TOKENS)
+    let budget: number = request.appPlan !== null ? Math.min(16000, SCREEN_TOKENS + (request.appPlan!.screens.length - 1) * 1200) :
+      ((request.whole || truncated) ? SCREEN_TOKENS : (scene ? SCENE_TOKENS : SECTION_TOKENS))
     throwIfCancelled(cancellation)
     let answer: string | null = await ask(system, user, editing ? editBudget : (think ? budget * THINKING_ROOM : budget), think)
     throwIfCancelled(cancellation)
@@ -499,7 +526,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
     let again = section === null || attempt >= 2 ? '' : repeats(section, request)
     let problem = section === null ? 'The answer was not in the form asked for: <classes>, <fields>, <functions> and <view>.' :
       (calls.length > 0 ? calls : (again.length > 0 ? again : (flatOnly(request.prompt, reply) ||
-        check(request.compose(section), scene, !unreadAsked))))
+        check(request.compose(section), scene, !unreadAsked, request.appPlan))))
     if (problem.startsWith(UNREAD_PROBLEM)) { unreadAsked = true }
     if (problem.length === 0) {
       // It compiles and runs; whether it does what it is for is Jev's reading. One it reads as not doing a need is asked
@@ -512,6 +539,7 @@ export async function writeSection(request: CustomRequest, language: string, ask
         let part = new CustomRequest()
         part.prompt = request.prompt
         part.needs = doing
+        part.appPlan = request.appPlan
         throwIfCancelled(cancellation)
         unread = undone(part, await request.verify!(verifyRequest(part, reply)))
         throwIfCancelled(cancellation)

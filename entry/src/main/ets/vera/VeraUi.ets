@@ -17,6 +17,8 @@ import { invokeStdScene } from './VeraScene'
 export class VeraUiNode {
   id: number = 0
   kind: string = ''
+  /** ui.Screen: native subtree identity, not a second program or state. */
+  screenId: string = ''
   style: string = ''
   text: string = ''
   source: string = ''
@@ -256,6 +258,21 @@ function invokeStdTime(name: string, args: RuntimeValue[]): RuntimeValue {
       return new VeraNumberValue(now.getTime())
     case 'nowSeconds':
       return new VeraNumberValue(Math.floor(now.getTime() / 1000))
+    case 'atLocalTime': {
+      let day = asWhole(args[0])
+      let minute = asWhole(args[1])
+      if (Math.abs(day) > 1000000 || minute < 0 || minute >= 1440) {
+        throw new RuntimeTrap('R0009', 'atLocalTime expects a day in -1000000..1000000 and minutes in 0..1439')
+      }
+      let date = new Date(day * 86400000)
+      let at = new Date(0)
+      // Build the selected local calendar date, not today's offset or midnight + N * 24 hours.
+      // Noon keeps construction away from ordinary midnight DST transitions. setFullYear preserves years 0..99.
+      at.setHours(12, 0, 0, 0)
+      at.setFullYear(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+      at.setHours(Math.floor(minute / 60), minute % 60, 0, 0)
+      return new VeraNumberValue(at.getTime())
+    }
     case 'daysSinceEpoch':
       // Local midnights, not UTC: a dose taken at 23:30 belongs to that day for
       // the person holding the phone.
@@ -484,6 +501,11 @@ export class UiHostEnvironment extends HostEnvironment {
       case 'Column': return containerNode('column', args)
       case 'Row': return containerNode('row', args)
       case 'Card': return containerNode('card', args)
+      case 'Screen':
+        return viewNode('screen', [
+          ['screenId', new VeraStringValue(argString(args, 0))],
+          ['children', argArray(args, 1)],
+        ])
       case 'Scroll': return containerNode('scroll', args)
       case 'Canvas': return containerNode('canvas', args)
       case 'Transform':
@@ -529,6 +551,14 @@ export class UiHostEnvironment extends HostEnvironment {
           ['style', new VeraStringValue(argString(args, 0))],
           ['src', new VeraStringValue(argString(args, 1))],
           ['alt', new VeraStringValue(argString(args, 2))],
+        ])
+      case 'Camera':
+        // The renderer reads the facing back from value and the shutter label from text.
+        return viewNode('camera', [
+          ['style', new VeraStringValue(argString(args, 0))],
+          ['action', new VeraStringValue(argString(args, 1))],
+          ['value', new VeraStringValue(argString(args, 2))],
+          ['text', new VeraStringValue(argString(args, 3))],
         ])
       case 'Path':
         return viewNode('path', [
@@ -1052,6 +1082,9 @@ function decodeNode(obj: VeraObjectValue, depth: number): VeraUiNode {
     switch (key) {
       case 'type':
         if (v instanceof VeraStringValue) { node.kind = (v as VeraStringValue).value }
+        break
+      case 'screenId':
+        if (v instanceof VeraStringValue) { node.screenId = (v as VeraStringValue).value }
         break
       case 'style':
         if (v instanceof VeraStringValue) { node.style = (v as VeraStringValue).value }
