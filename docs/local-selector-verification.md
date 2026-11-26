@@ -326,7 +326,7 @@ Evidence (private local artifacts): `/tmp/local-jev-q8-device/` contains archive
 library hash, verified update log, standalone outputs/summary, filtered run trace,
 generated sources and UI layouts. Full historical trace remains private.
 
-## Selector metrics correction (host/build verification)
+## Selector metrics correction (host, build and countdown device verification)
 
 The shared selector boundary now measures every phase and attributes it to Local
 Jev, TypeSafe Jev or the cloud LLM approximation. Native calls retain zero API
@@ -353,9 +353,51 @@ Verification for this correction:
 - Host-only synthetic proof sheet: `/tmp/vera-selector-metrics-checks/proof.png`
   (not an ArkUI screenshot). Test logs and HAP are local, not committed.
 
-No model calls, phone update or provider switch were made for this correction.
-The historical measurements above retain the old UI undercount as observed;
-this build has not yet been visually verified on a device.
+The host/build checks above made no real model calls. Subsequently, the metrics
+fix (`6abb64b`) was installed in place with `update-phone.sh`, explicitly linking
+the supplied Q8 archive. The update took **30 s**, with zero build diagnostics;
+app identity and first-install time were verified unchanged. No uninstall, data
+clearing or provider switch was performed.
+
+A fresh English request was then entered through the phone's App flow:
+
+> A countdown timer. Let me choose the duration in minutes. Start at 5 minutes.
+> Include Start, Stop and Reset buttons, a remaining-time display and a progress bar.
+
+The first attempt composed a program successfully. The device Metrics tab and
+new run-log fields agreed:
+
+| Measurement | Observed |
+|---|---:|
+| Run wall time | **2,336 ms** (UI: Ready in 2.3 s) |
+| Local selector invocations / questions answered | **1 / 20 of 20** |
+| Local selector elapsed time | **55 ms** |
+| Selector HTTP requests / API cost | **0 / $0** |
+| Writer requests | **1** (cloud plan; no separate code-writing request) |
+| Cloud usage | **3,086 input / 2,816 cached / 275 output tokens** |
+| Estimated cloud model cost | **$0.000213948** (published-rate estimate, not an invoice) |
+
+The UI visibly showed `Local Jev (experimental)`, `20/20 questions answered`,
+`0 HTTP request(s)` and `$0 API cost`, separately from **Writer model calls**.
+The run log recorded `writerCalls=1`, `modelCalls=2`, `localSelectorCalls=1`,
+`selectorHttpRequests=0` and `selectorMs=55`. Its aggregate `partial` flag remains
+true, as the agent route conservatively marks its accounting partial; this is
+not evidence of complete billing coverage.
+
+Functional spot checks: initial duration **5 minutes**, both time readouts **5:00**;
+Start advanced to **4:56**, Stop held that value across a subsequent two-second
+wait, and Reset restored **5:00** and zero progress. A duration input and a progress
+bar were rendered. The duration field was not edited in this run, so this does not
+establish its update behavior. The fresh app was left unsaved on Preview; existing
+saved projects were not modified.
+
+Private local evidence: `/tmp/vera-selector-metrics-checks/update-phone.log`,
+`countdown-run.json`, `countdown-metrics/` and `countdown-preview/` screenshots;
+UI layout snapshots under `/tmp/local-jev-q8-device/metrics-demo-*.json`. The full
+historical run log remains private and is not committed. This is one device
+smoke test, not general quality/calibration evidence. The historical measurements
+above retain the old metrics undercount exactly as observed; the 8ms/zero-rounded
+stage cases are host-tested, not exercised by this 55ms phone call.
 
 ## Still not verified
 
