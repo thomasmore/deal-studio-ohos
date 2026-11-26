@@ -45,7 +45,11 @@ const CHANGE_RULES: string = 'Make the change asked for, and nothing else: keep 
   '>>>>>>> REPLACE\n' +
   'Each SEARCH part must match exactly one place in the program: copy whole lines, with enough of them to be unique. ' +
   'A new field of AppState is added to the class, to init() and to every object literal that builds an AppState. ' +
-  'Write nothing outside the blocks. Only when most of the program has to change, answer with the whole program instead.'
+  'Write nothing outside the blocks. Only when most of the program has to change, answer with the whole program instead. ' +
+  'If the change cannot be made on this phone at all -- it needs a live camera picture, the person\'s location, a sound or ' +
+  'notification while the app is closed, data the phone does not give the app -- answer only <cannot>one short sentence for ' +
+  'the person, in plain words about their phone and its apps: what this app cannot do, and why, and what it does instead if ' +
+  'anything; never mention the language, the program or code</cannot>, and change nothing. Never fake it.'
 
 /** For a scene: in a whole program the section's __PASSTHROUGH__ has been written out, so the guide is read with that. */
 const SCENE_IN_PROGRAM: string = '\nThe scene below is already part of a whole program: where the guide says to return only ' +
@@ -71,6 +75,15 @@ function worldEditLanguage(source: string, host: AgentHost): string {
   return usesOnly(source, WORLD_COMPONENTS) ? worldLanguage(host.language, host.worldGuide) : host.language + '\n\n' + host.worldGuide
 }
 
+/** '' when a program compiles and runs once with every handler tapped (VeraSmoke.ets); else what is wrong. */
+export function checkPlainProgram(source: string): string {
+  try {
+    return smokeRun(compileVeraSource(source))
+  } catch (e) {
+    return e instanceof CompileError ? (e as CompileError).message : (e as Error).message
+  }
+}
+
 /** '' when a screen with a scene compiles, runs once, and plays with its buttons pressed; else what is wrong. */
 export function checkSceneProgram(source: string): string {
   try {
@@ -83,6 +96,11 @@ export function checkSceneProgram(source: string): string {
   }
 }
 
+/** Any program changed by edits: the general refine's way (GeneratePage.ets), as a game or a scene is changed. */
+export function editProgram(source: string, change: string, prompt: string, host: AgentHost): Promise<SurfaceEdit> {
+  return editSurfaceProgram(source, change, prompt, host)
+}
+
 export class SurfaceEdit {
   /** The changed program, played; '' when none passed. */
   source: string = ''
@@ -91,6 +109,8 @@ export class SurfaceEdit {
   game: boolean = false
   /** True for a 3D program (a ui.World). */
   world: boolean = false
+  /** True for a program with no surface or world: changed with the language alone, checked by compiling and one run. */
+  plain: boolean = false
   /** Changes asked for: a second is asked with thinking on when the first could not be repaired. */
   attempts: number = 0
   /** Repair rounds, over all attempts. */
@@ -99,12 +119,15 @@ export class SurfaceEdit {
   edits: number = 0
   /** What still failed, '' when served. */
   failed: string = ''
+  /** The model's sentence for the person when it answered that the change cannot be made; '' otherwise. */
+  cannot: string = ''
   ms: number = 0
 }
 
 /**
  * The program changed as `change` asks: `source` is the program on the screen, `prompt` what it was made for. Played
- * before it is returned; `failed` says why when no change passed.
+ * before it is returned; `failed` says why when no change passed. A program with no surface or world (editProgram) is
+ * changed the same way, with the language alone, and checked by compiling it and running it once with every handler tapped.
  */
 export async function editSurfaceProgram(source: string, change: string, prompt: string, host: AgentHost): Promise<SurfaceEdit> {
   checkAgent(host)
@@ -112,14 +135,16 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
   let started = Date.now()
   out.world = isWorld(source)
   out.game = out.world || isWholeGame(source)
+  out.plain = !drawsSurface(source)
   if (host.askCode === null || host.language.length === 0 || (out.world && host.worldGuide.length === 0) ||
       (out.game && !out.world && host.surfaceGuide.length === 0)) {
     out.failed = 'no model or guide to make the change with'
     return out
   }
-  let system = out.world ? worldEditLanguage(source, host) :
-    (out.game ? surfaceLanguage(host.language, host.surfaceGuide) : host.language + SCENE_GUIDE + SCENE_IN_PROGRAM)
-  let check: (source: string) => string = out.world ? checkWorldProgram : (out.game ? checkSurfaceProgram : checkSceneProgram)
+  let system = out.plain ? host.language : (out.world ? worldEditLanguage(source, host) :
+    (out.game ? surfaceLanguage(host.language, host.surfaceGuide) : host.language + SCENE_GUIDE + SCENE_IN_PROGRAM))
+  let check: (source: string) => string = out.plain ? checkPlainProgram :
+    (out.world ? checkWorldProgram : (out.game ? checkSurfaceProgram : checkSceneProgram))
   let asked = 'The program:\n' + source + '\n\nIt was made for: ' + prompt + '\n\nThe change asked for now: ' + change +
     '\n\n' + CHANGE_RULES
   for (let attempt = 0; attempt < 2 && out.source.length === 0; attempt++) {
@@ -131,6 +156,13 @@ export async function editSurfaceProgram(source: string, change: string, prompt:
     let reply = await host.askCode!(system, asked, CHANGE_TOKENS, think)
     checkAgent(host)
     if (reply === null || reply.trim().length === 0) { out.failed = 'no answer for the change'; continue }
+    // A change the phone cannot make is said, not faked: the program stays as it was.
+    let refused = reply.match(new RegExp('^\\s*<cannot>([\\s\\S]*?)</cannot>\\s*$'))
+    if (refused !== null) {
+      out.cannot = refused[1].trim()
+      out.failed = 'cannot: ' + out.cannot
+      break
+    }
     let applied = applyRepair(source, reply)
     if (applied.source.length === 0) { out.failed = 'the edits did not apply: ' + applied.error; continue }
     let current = applied.source

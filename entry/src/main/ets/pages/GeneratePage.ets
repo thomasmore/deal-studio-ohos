@@ -43,7 +43,8 @@ import { sdkEvalRequested, runSdkEval } from '../vera/VeraSdkEval'
 import { composeEnabled, ComposeResult } from '../vera/VeraCompose'
 import { AgentRequest, AgentResult } from '../vera/agent/VeraAgent'
 import { appAgentHost } from '../vera/agent/AgentAppHost'
-import { drawsSurface, editSurfaceProgram, SurfaceEdit } from '../vera/agent/AgentSurfaceEdit'
+import { drawsSurface, editSurfaceProgram, editProgram, SurfaceEdit } from '../vera/agent/AgentSurfaceEdit'
+import { editSection, writtenSectionAt, refineEditEnabled, SectionEdit } from '../vera/agent/AgentSectionEdit'
 import { writeWidget, WidgetWrite, WIDGET_ASK } from '../vera/agent/AgentWidget'
 import { validateWidgetOffMain } from '../vera/agent/WidgetCheckTask'
 import { WidgetSuggestion, firstSuggestions, changeSuggestions } from '../vera/agent/WidgetSuggest'
@@ -369,6 +370,8 @@ export struct GeneratePage {
   private answerQuestion: ((answer: PersonAnswer) => void) | null = null
   @State compiledSource: string = ''
   @State refinePrompt: string = ''
+  /** Set when changing the section and editing the program both failed: the next refineWithModel rewrites the whole program. */
+  private rewriteNext: boolean = false
   @State program: RunTotals = new RunTotals()
   @State delta: SourceDelta = new SourceDelta()
   // Every run of this program, oldest first. A refinement used to wipe the
@@ -1102,7 +1105,7 @@ export struct GeneratePage {
       this.status = 'Loading model...'
       let ok = engine.init({
         modelPath: modelPath,
-        nCtx: 4096,
+        nCtx: 16384,
         nThreads: 4,
         nGpuLayers: 0
       })
@@ -2212,6 +2215,13 @@ export struct GeneratePage {
       this.editSurface(ask, continuingOperation)
       return
     }
+    // Any other program: its written section changed, else edits of the whole program; only when neither passes, the whole
+    // rewrite below (AgentSectionEdit.ets, AgentSurfaceEdit.ets's editProgram).
+    if (!this.makeWidget && this.mode === MODE_DEEPSEEK && refineEditEnabled() && !this.rewriteNext) {
+      this.refineByEdits(ask, continuingOperation)
+      return
+    }
+    this.rewriteNext = false
     // A widget is written on its own and spliced into the program, which is not written again (AgentWidget.ets).
     if (this.makeWidget && this.mode === MODE_DEEPSEEK) {
       this.makeWidgetAlone(ask)
@@ -2238,6 +2248,107 @@ export struct GeneratePage {
     this.lastRequest = ask
     this.status = 'Refining (attempt 1/' + MAX_RETRIES + ')...'
     this.startAttemptOne(ask, operation, 'Refining')
+  }
+
+  /**
+   * A change to any other program: the section the model wrote changed (the rest of the screen untouched), else edits of
+   * the whole program, each checked before it is served. When neither passes, the whole rewrite as before.
+   */
+  private async refineByEdits(ask: string, continuingOperation?: OperationController): Promise<void> {
+    let continuing = continuingOperation !== undefined
+    if (continuingOperation !== undefined && continuingOperation.isCancelled()) { return }
+    if (!continuing) { this.prepareRequest(ask) }
+    let operation = continuingOperation !== undefined ? continuingOperation : this.beginOperation()
+    this.generating = true
+    this.cancelRequested = false
+    let run = continuing ? this.runId : ++this.runId
+    if (!continuing) { this.genStartTime = Date.now() }
+    this.markMetricsPartial()
+    let host = appAgentHost((text: string): void => { if (run === this.runId) { this.status = text } },
+      (_vbc2: string): void => {}, (): boolean => run !== this.runId || this.cancelRequested,
+      this.promptTemplate, this.surfaceGuide, operation)
+    host.worldGuide = this.worldGuide
+    let askJevForRun = host.askJev
+    host.askJev = async (body: string): Promise<string> => {
+      this.countModelCall(run)
+      return askJevForRun(body)
+    }
+    let base = this.compiledSource
+    let record: Composition | null = this.compositionJson.length > 0 ? compositionFromJson(this.compositionJson) : null
+    let source = ''
+    let vbc2 = ''
+    let composition = ''
+    let how = ''
+    let failed = ''
+    let cannot = ''
+    try {
+      if (record !== null && writtenSectionAt(record!) >= 0) {
+        let changed: SectionEdit | null = await this.metricWork(run,
+          (): Promise<SectionEdit | null> => editSection(record!, ask, this.requestHistory, host))
+        if (run !== this.runId || operation.isCancelled()) { return }
+        if (changed !== null && changed!.source.length > 0) {
+          source = changed!.source
+          vbc2 = changed!.vbc2
+          composition = compositionToJson(changed!.composition!)
+          how = 'by changing the section'
+        } else if (changed !== null) {
+          failed = changed!.written.failed
+          cannot = changed!.written.cannot
+        }
+      }
+      if (source.length === 0 && cannot.length === 0) {
+        let made: SurfaceEdit = await this.metricWork(run, (): Promise<SurfaceEdit> => editProgram(base, ask, this.requestHistory, host))
+        if (run !== this.runId || operation.isCancelled()) { return }
+        if (made.source.length > 0) {
+          source = made.source
+          vbc2 = made.vbc2
+          how = made.edits > 0 ? 'by ' + made.edits.toString() + ' edit(s)' : 'written again'
+        } else {
+          failed = (failed.length > 0 ? failed + '; ' : '') + made.failed
+          cannot = made.cannot
+        }
+      }
+    } catch (e) {
+      if (run !== this.runId || operation.isCancelled()) { return }
+      throw (e as Error)
+    }
+    let fields: Record<string, Object> = {}
+    fields['change'] = ask
+    fields['how'] = how
+    fields['failed'] = failed
+    fields['cannot'] = cannot
+    fields['source'] = source
+    trace('refine-edit', fields)
+    if (source.length === 0 && cannot.length > 0) {
+      // Said it cannot: the app stays as it was, with the sentence for the person; a whole rewrite would only fake it.
+      this.generating = false
+      this.totalMs = Date.now() - this.genStartTime
+      this.markMetricsPartial()
+      this.status = cannot
+      this.finishMetrics(run)
+      return
+    }
+    if (source.length === 0) {
+      // Neither way passed: the whole rewrite, in this same operation.
+      this.rewriteNext = true
+      this.refineWithModel(ask, operation)
+      return
+    }
+    this.generating = false
+    this.totalMs = Date.now() - this.genStartTime
+    this.startRun(ask)
+    this.lastRequest = ask
+    this.previousSource = base
+    this.generatedSource = source
+    this.compiledSource = source
+    this.compiledVbc2 = vbc2
+    this.compositionJson = composition
+    this.modelWrote = true
+    this.compiled = true
+    this.compileErrors = ''
+    this.refinePrompt = ''
+    this.status = 'Changed in ' + (this.totalMs / 1000).toFixed(1) + ' s ' + how
+    this.acceptRequest()
   }
 
   /**

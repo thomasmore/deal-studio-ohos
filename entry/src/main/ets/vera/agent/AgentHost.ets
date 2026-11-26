@@ -44,6 +44,8 @@ export class HoleRecord {
   code: string = ''
   /** The phone functions the writer was shown for the phone needs (the lookups' answers), '' for none. */
   lookup: string = ''
+  /** The whole program with the section in it, as it was checked; '' when none was written. For the host's records only. */
+  program: string = ''
 }
 
 export class AgentHost {

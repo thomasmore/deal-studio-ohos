@@ -198,6 +198,11 @@ export class CustomRequest {
   verify: ((body: string) => Promise<string>) | null = null
   /** The section is the whole screen: the program so far has nothing but its header. */
   whole: boolean = false
+  /**
+   * A change to a section already on the screen (AgentSectionEdit.ets): the section as it is, in the answer's own form.
+   * `needs` are then the change; the section keeps everything else it does.
+   */
+  previous: string = ''
 }
 
 /** Jev reads the section against each need: a section that only says it cannot, or does something else, does not count. */
@@ -433,6 +438,9 @@ export async function writeSection(request: CustomRequest, language: string, ask
     (request.appPlan !== null ? appContext(request.appPlan!) :
       (request.whole ? '\n\nThe program has nothing yet but its header: your section is the whole screen, everything the request ' +
         'asks for. It may push several ui.Section(...) in its view.' : '')) +
+    (request.previous.length > 0 ? '\n\nThe section as it is now. Change it as the section must do above, and keep everything ' +
+      'else it does, its look and the names and types of its fields; write the whole section again, changed, in the same form:\n' +
+      request.previous : '') +
     '\n\nThe program so far, which the section joins (do not repeat it):\n' + request.compose(null)
   let user = asked
   // The best section that compiled and ran but that Jev reads as missing a need: kept, in case no try does them all.

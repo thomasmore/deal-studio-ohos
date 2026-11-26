@@ -47,7 +47,7 @@ class Data {}
 const Generate = load('GeneratePage', ['doRefine', 'refineWithModel', 'setFullscreen', 'openWhole', 'showAgent', 'send',
   'hasResult', 'stopGeneration', 'aboutToDisappear'], {
   WIDGET_ASK: 'Widget: ', MODE_DEEPSEEK: 'cloud', MODE_SERVER: 'server', MAX_RETRIES: 3, TAB_PREVIEW: 'preview',
-  templateSelectEnabled: () => false, surfaceRouteEnabled: () => false, drawsSurface: () => false,
+  templateSelectEnabled: () => false, surfaceRouteEnabled: () => false, refineEditEnabled: () => false, drawsSurface: () => false,
   settings: {}, SourceDelta: Data, READY_NOTE_MS: 3000, trace() {}, setTimeout: () => 1, clearTimeout() {}
 })
 

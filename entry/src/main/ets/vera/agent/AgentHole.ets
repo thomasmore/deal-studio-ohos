@@ -230,6 +230,7 @@ function settle(plan: ScreenPlan, prompt: string, slots: PlanSlot[], asked: Cust
     (written.missed.length > 0 ? OUTCOME_PARTIAL : OUTCOME_WRITTEN))
   record.whole = asked.whole
   record.lookup = asked.phone
+  if (written.section !== null) { record.program = asked.compose(written.section) }
   checkAgent(host)
   host.onHole(record)
   checkAgent(host)
