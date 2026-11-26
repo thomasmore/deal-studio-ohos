@@ -35,6 +35,8 @@ Q8 bundle. Readiness reports model ID `mmbert-shared-state-q8-experimental`
 and manifest SHA-256 `4d40ff9d998cb139df51104bcf3c3d9a23f8bf609bc74c25819b5017e1eec7d5`.
 [Bundle assets and terms](../tools/vera-playground/models/mmbert-shared-state-q8/README.md)
 
+[Rebuild and benchmark the shared-state Q8 selector from public mmBERT-small](local-jev-shared-q8-reproduction.md)
+
 Follow the playground guide to select the public Laya Q4 bundle or the
 separately supplied Cycle 2 bundle. Keep all four assets together.
 Use an explicit Laya bundle for the serial and batched phone benchmark.
